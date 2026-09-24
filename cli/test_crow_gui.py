@@ -3414,7 +3414,7 @@ class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
         # accent, the bevel and the model's own colour are brand values out of
         # the core, and a theme that redefined them would be inventing a second
         # brand rather than choosing a ground.
-        structural = {"--mono", "--ui", "--barh", "--sbw"}
+        structural = {"--mono", "--ui", "--barh", "--sbw", "--colw", "--colpad", "--reserve"}
         carried = {"--accent", "--bevel", "--model"}
         for theme in ("light", "crow"):
             head = ':root[data-theme="%s"]{' % theme
@@ -5546,8 +5546,8 @@ class TheMcpSheetTests(ApiCase):
         self.assertIn("border-radius", rule)
         self.assertIn("padding", rule)
         # HUGGING THE TEXT, not filling the column: without this a two-word
-        # message is a full-width slab.
-        self.assertIn("justify-self:start", rule)
+        # message is a full-width slab. #280: on the column's RIGHT edge.
+        self.assertIn("justify-self:end", rule)
         import re as _re
         used = _re.findall(r"var\((--[a-z-]+)\)", rule)
         self.assertIn("--raised", used)
@@ -5810,6 +5810,92 @@ class TheUserBubbleTests(unittest.TestCase):
         self.assertNotIn("max-width", rule)
         say = self.css[self.css.index(".say{"):]
         self.assertNotIn("max-width", say[:say.index(chr(125))])
+
+
+class TheBubblesStandOnTheComposersEdgesTests(unittest.TestCase):
+    """#280, robin 2026-09-24: chat and composer read as ONE column -- the
+    user's bubble with its right edge on #box's right border, Crow's text with
+    its left edge on #box's left border, with and without the #233/#255/#256
+    cards, at every width.
+
+    MEASURED in headless Chromium (real PAGE, rail open/shut x 1180/1440/1920/
+    2560 x no card/git/goal/subtasks, 32 combinations): before, the short
+    user bubble ended 716-780 px left of #box's right edge and Crow's `.say`
+    started 40 px right of its left edge, 32 of 32; after, 0.0 px in 32 of 32.
+    This suite has no browser, so it holds the rules that produced that -- and
+    recomputes the column and the box from the stylesheet's own numbers."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def _decl(self, rule: str, prop: str) -> str:
+        match = re.search(r"(?:^|[;{\s])" + re.escape(prop) + r":([^;]+)", rule)
+        self.assertIsNotNone(match, "%s fehlt in %r" % (prop, rule[:80]))
+        return match.group(1).strip()
+
+    def test_the_users_bubble_ends_on_the_right_edge(self):
+        self.assertIn("justify-self:end", self._rule(".you .txt{"))
+        self.assertNotIn("justify-self:start", self._rule(".you .txt{"))
+        self.assertIn("justify-self:end", self._rule(".you img.sent{"))
+
+    def test_crows_text_starts_on_the_left_edge(self):
+        """The 38-px mark column put `.say`, the thoughts and the cursor 40 px
+        inside the box's left border."""
+        self.assertNotIn("grid-template-columns", self._rule(".as{"))
+        start = self.source[self.source.index("  start(){"):]
+        start = start[:start.index("this.col=")]
+        self.assertNotIn('class="m"', start)
+        self.assertNotIn(".as .m{", self.css, "a rule with no wearer is left")
+
+    def test_column_and_composer_come_from_the_same_variables(self):
+        """ONE SOURCE. Every length that places the text column (#flow,
+        .turn) and the box (#composer, #box) is a var() of the four shared
+        ones -- a px literal in any of them is a second source that can drift.
+        Then both are computed for two widths, with and without a card, and
+        must share both edges."""
+        root = self._rule(":root{")
+        env = {name: float(self._decl(root, "--" + name)[:-2])
+               for name in ("sbw", "colw", "colpad", "reserve")}
+        block = self.css[self.css.index("@container chat"):]
+        block = block[:block.index("}\n}") + 1]
+        card = float(re.search(r"\{--reserve:(\d+)px\}", block).group(1))
+
+        def ev(expr: str, reserve: float) -> float:
+            self.assertNotRegex(expr, r"\d+px", "a literal in %r" % expr)
+            code = re.sub(r"var\(--([a-z]+)\)",
+                          lambda m: repr(reserve if m.group(1) == "reserve"
+                                         else env[m.group(1)]), expr)
+            code = code.replace("calc", "")
+            self.assertRegex(code, r"^[\d.\s+*()-]+$", expr)
+            return float(eval(code))  # noqa: S307 -- digits and + * ( ) only
+
+        def split(value: str) -> list:
+            return re.findall(r"calc\([^()]*(?:\([^()]*\)[^()]*)*\)|var\([^)]*\)|\S+", value)
+
+        flow, turn = self._rule("#flow{"), self._rule("\n.turn{")
+        comp, box = self._rule("#composer{position:absolute"), self._rule("#box{border:")
+        f_left, f_right = split(self._decl(flow, "padding-inline"))
+        t_pad = split(self._decl(turn, "padding"))[1]
+        c_pad = split(self._decl(comp, "padding"))[1]
+        for width in (937.0, 1417.0, 1677.0):       # #main at 1180/1920 rail open, 1920 shut
+            for reserve in (env["reserve"], card):
+                # #flow: scrollbar-gutter:stable takes --sbw on the right.
+                lo = ev(f_left, reserve)
+                hi = width - ev(f_right, reserve) - env["sbw"]
+                w = min(ev(self._decl(turn, "max-width"), reserve), hi - lo)
+                t_lo = lo + (hi - lo - w) / 2 + ev(t_pad, reserve)
+                t_hi = t_lo + w - 2 * ev(t_pad, reserve)
+                lo = ev(self._decl(comp, "left"), reserve) + ev(c_pad, reserve)
+                hi = width - ev(self._decl(comp, "right"), reserve) - ev(c_pad, reserve)
+                w = min(ev(self._decl(box, "max-width"), reserve), hi - lo)
+                b_lo = lo + (hi - lo - w) / 2
+                self.assertAlmostEqual(t_lo, b_lo, msg="left edge, %s/%s" % (width, reserve))
+                self.assertAlmostEqual(t_hi, b_lo + w, msg="right edge, %s/%s" % (width, reserve))
 
 
 class TheTraceFoldsFinishedRoundsTests(unittest.TestCase):
@@ -7260,10 +7346,13 @@ class TheVoiceLineTests(ApiCase):
         source = self._source()
         box = source[source.index("#box{border:"):]
         box = box[:box.index("#box.focus")]
-        self.assertIn("max-width:900px", box)
+        # #280: die 900 steht einmal, als --colw, und beide lesen sie.
+        self.assertIn("--colw:900px", source)
+        self.assertIn("max-width:var(--colw)", box)
         self.assertNotIn("max-width:675px", box)
         column = source[source.index(".turn{padding:"):]
-        self.assertIn("max-width:960px", column[:column.index("}")],
+        self.assertIn("max-width:calc(var(--colw) + 2 * var(--colpad))",
+                      column[:column.index("}")],
                       "die Spalte hat sich bewegt, die Maske folgt ihr nicht mehr")
 
     def test_the_bars_are_mirrored_and_thin(self):
@@ -8363,17 +8452,23 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
         Kartenbreite plus ihr Rand."""
         self.assertIn("container:chat/inline-size", self._rule("#main{"))
         block = self.css[self.css.index("@container chat"):]
-        block = block[:block.index("}\n}")]
-        flow = re.search(r"#flow\{\s*padding-inline:calc\(10px \+ var\(--sbw\) \+ (\d+)px\) "
-                         r"calc\(10px \+ (\d+)px\)", block)
-        comp = re.search(r"#composer\{\s*left:calc\(var\(--sbw\) \+ (\d+)px\);"
-                         r"right:calc\(var\(--sbw\) \+ (\d+)px\)", block)
-        self.assertIsNotNone(flow)
-        self.assertIsNotNone(comp)
+        block = block[:block.index("}\n}") + 1]
+        # #280: EINE Deklaration fuer beide -- #flow und #composer bekommen
+        # dieselbe --reserve aus derselben Regel, und beide lesen sie links
+        # und rechts.
+        rules = re.findall(r"([^{}]*)\{--reserve:(\d+)px\}", block)
+        self.assertEqual(len(rules), 1, block)
+        selectors, amount = rules[0]
+        self.assertEqual(selectors.count("#flow"), 3)
+        self.assertEqual(selectors.count("#composer"), 3)
         panels = self._rule("#panels{")
         reserve = self._px(panels, "width") + self._px(panels, "right")
-        self.assertEqual({int(g) for g in flow.groups()}, {reserve})
-        self.assertEqual({int(g) for g in comp.groups()}, {reserve})
+        self.assertEqual(int(amount), reserve)
+        self.assertIn("padding-inline:calc(var(--sbw) + var(--reserve)) var(--reserve)",
+                      self._rule("#flow{"))
+        composer = self._rule("#composer{position:absolute")
+        self.assertIn("left:calc(var(--sbw) + var(--reserve))", composer)
+        self.assertIn("right:calc(var(--sbw) + var(--reserve))", composer)
 
     def test_the_composer_is_centred_in_the_window_not_left_of_it(self):
         """#256, robin 2026-09-23: "die Eingabemaske ist nicht mittig,
@@ -8389,11 +8484,12 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
         muss ohne und mit Karten gelten -- jede einseitige Zahl ist dieser Bug."""
         sbw = self._px(self._rule(":root{"), "--sbw")
         composer = self._rule("#composer{position:absolute")
-        self.assertIn("left:var(--sbw)", composer)
-        self.assertIn("right:var(--sbw)", composer)
+        self.assertIn("left:calc(var(--sbw) + var(--reserve))", composer)
+        self.assertIn("right:calc(var(--sbw) + var(--reserve))", composer)
         flow = self._rule("#flow{")
         self.assertIn("scrollbar-gutter:stable", flow)
-        self.assertIn("padding-inline:calc(10px + var(--sbw)) 10px", flow)
+        # #280: links der Rinnstein mehr, rechts reserviert ihn der Browser.
+        self.assertIn("padding-inline:calc(var(--sbw) + var(--reserve)) var(--reserve)", flow)
         self.assertEqual(sbw, 10)
         block = self.css[self.css.index("@container chat"):]
         block = block[:block.index("}\n}")]

@@ -747,6 +747,21 @@ PAGE = r"""<!doctype html>
      it, and .turn centres inside it -- three rules that have to agree or the
      input box sits 5 px off the text above it. */
   --sbw:10px;
+  /* #280. THE COLUMN, ONCE. The chat and the composer are one column, and
+     robin wants the bubbles on the composer's edges: the user's right edge on
+     #box's right border, Crow's left edge on its left border. That holds only
+     while both boxes come out of the SAME numbers, so they are here and
+     nowhere else:
+       --colw     the text width, #box's width and .turn's content width;
+       --colpad   the inset from #flow's/#composer's inner edge to that text
+                  (was 30 + 10 on one side, 40 on the other -- equal by luck);
+       --reserve  the room the #233/#256 cards take on EACH side of #main,
+                  0 until the container query below sets it on both at once.
+     Both come out as min(--colw, #main - 2*--sbw - 2*--reserve - 2*--colpad),
+     centred. */
+  --colw:900px;
+  --colpad:40px;
+  --reserve:0px;
 }
 
 /* -- light ------------------------------------------------------------- */
@@ -1420,7 +1435,8 @@ body[data-git="shut"] #git{display:none}
    flow and still centres in both directions. */
 #hello{min-height:100%;display:flex;flex-direction:column;align-items:center;
   justify-content:center;gap:26px;
-  max-width:960px;margin-inline:auto;padding:0 30px;text-align:center;
+  max-width:calc(var(--colw) + 2 * var(--colpad));margin-inline:auto;
+  padding:0 var(--colpad);text-align:center;
   font-size:19px;color:var(--text-faint);letter-spacing:.01em}
 /* SIZED IN THE PAGE, NOT IN THE FILE. Both drawings are 1024 square; a width
    here keeps them from filling the window, and `height:auto` keeps the square
@@ -1618,8 +1634,11 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    ihre Mitte also --sbw/2 = 5 px links der Fenstermitte -- und die Maske,
    die sich an diese Mitte haelt, mit ihr. Links `10px + --sbw` macht die
    Box symmetrisch in #main: Spalte und Maske stehen auf der Mitte von #main. */
+/* #280: die zehn Pixel Luft sind seitdem Teil von --colpad (10 + 30 = 40,
+   dieselbe Zahl, die #composer traegt), und die Kartenreserve ist --reserve --
+   eine Variable, die #composer mit derselben Regel bekommt. */
 #flow{overflow-y:auto;padding:22px 0 26px;
-  padding-inline:calc(10px + var(--sbw)) 10px;flex:1;
+  padding-inline:calc(var(--sbw) + var(--reserve)) var(--reserve);flex:1;
   min-height:0;scroll-behavior:smooth;user-select:text;
   scrollbar-gutter:stable}
 /* CENTRED, NOT LEFT-HUGGING. max-width alone pins the column to the left edge
@@ -1634,7 +1653,8 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    min-content-Breite, und `.you .txt` ist ein Grid-Item in einer `1fr`-Spur
    (= minmax(auto,1fr)) -- mit `break-word` bliebe die Blase so breit wie das
    Wort. Code-Bloecke sind `pre` und brechen weiterhin nie. */
-.turn{padding:0 30px;max-width:960px;margin-inline:auto;overflow-wrap:anywhere}
+.turn{padding:0 var(--colpad);max-width:calc(var(--colw) + 2 * var(--colpad));
+  margin-inline:auto;overflow-wrap:anywhere}
 .turn+.turn{margin-top:26px}
 /* #131. NO LABEL. The bubble says whose the line is; a three-letter prefix in
    front of it says it a second time, and the model's own turns never had one. */
@@ -1648,9 +1668,14 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    fills the grid column and a two-word message is a full-width slab. */
 .you .txt{color:var(--text);white-space:pre-wrap;background:var(--raised);
   border:1px solid var(--line);border-radius:12px;padding:9px 13px;
-  justify-self:start;max-width:75%;box-sizing:border-box}
-.as{display:grid;grid-template-columns:38px 1fr;gap:2px}
-.as .m{color:var(--bevel);padding-top:1px}
+  justify-self:end;max-width:75%;box-sizing:border-box}
+/* #280. ONE COLUMN, TWO SIDES (robin, 2026-09-24). The user's bubble stands
+   on the RIGHT edge of the column -- which is #box's right border, see
+   --colw -- and Crow's text on the LEFT edge, which is #box's left border.
+   The `●` in a 38-px grid column in front of every answer went with it: it
+   put Crow's text 40 px inside the box's edge, and the side of the column now
+   says whose line it is, the reasoning #131 used for dropping the labels. */
+.as{display:block}
 .col{min-width:0}
 
 /* #131. THE TRACE. Same furniture as a reasoning block, one level up: it holds
@@ -2130,7 +2155,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 .askcard .elicfield input[type=checkbox]{margin:0}
 .askcard .elichint{color:var(--dimmer);font-size:10.5px;margin:-4px 0 8px
   calc(30% + 9px)}
-#pendbar{max-width:900px;margin:0 auto -14px;padding:9px 13px 22px;
+#pendbar{max-width:var(--colw);margin:0 auto -14px;padding:9px 13px 22px;
   border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);
   border-radius:10px;color:var(--accent);font-size:11.5px;cursor:pointer;
   background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 20%,transparent) 50%,transparent 100%),var(--raised);
@@ -2140,7 +2165,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 /* #162. RUHIG, NICHT ALARMIEREND: ein Blick in einen anderen Chat ist ein
    normaler Zustand, kein Fehler. Deshalb der gedaempfte Rahmen und keine
    Animation -- die gehoert #pendbar, wo wirklich etwas wartet. */
-#viewbar{max-width:900px;margin:0 auto -14px;padding:9px 13px 22px;
+#viewbar{max-width:var(--colw);margin:0 auto -14px;padding:9px 13px 22px;
   border:1px solid var(--line);border-radius:10px;background:var(--raised);
   color:var(--dim);font-size:11.5px;display:flex;align-items:center;gap:10px}
 #viewbar[hidden]{display:none}
@@ -2194,7 +2219,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    A FLOOR OF FOUR SECONDS (robin, 2026-08-22) lives in the page, not here: an
    answer that arrives in 300 ms would flash past and read as nothing having
    happened at all. */
-.installbar{max-width:900px;margin:0 auto;padding:9px 13px;
+.installbar{max-width:var(--colw);margin:0 auto;padding:9px 13px;
   border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);
   border-radius:10px;color:var(--accent);font-size:11.5px;
   background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 20%,transparent) 50%,transparent 100%),var(--raised);
@@ -2253,8 +2278,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `--comph` oberhalb, also teilen sich beide sonst kein Pixel. */
 /* #256: BEIDE SEITEN --sbw, aus demselben Grund wie links an #flow --
    die Maske steht auf der Mitte von #main, nicht 5 px links davon. */
-#composer{position:absolute;left:var(--sbw);right:var(--sbw);bottom:0;z-index:6;
-  padding:26px 40px 14px;
+/* #280: dieselben --sbw, --reserve und --colpad wie #flow und .turn. */
+#composer{position:absolute;bottom:0;z-index:6;
+  left:calc(var(--sbw) + var(--reserve));right:calc(var(--sbw) + var(--reserve));
+  padding:26px var(--colpad) 14px;
   background:linear-gradient(to bottom,transparent,var(--bg) 26px)}
 /* #233. WO PLATZ IST, WEICHT DIE SPALTE DEN KARTEN AUS. Die Karten
    bleiben absolut (#164), aber ueber der Leseflaeche lagen sie bei jeder
@@ -2277,12 +2304,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 @container chat (min-width:1100px){
   body:not([data-git="shut"]) #flow,
   #main:has(#goalpanel:not([hidden])) #flow,
-  #main:has(#subpanel:not([hidden])) #flow{
-    padding-inline:calc(10px + var(--sbw) + 306px) calc(10px + 306px)}
+  #main:has(#subpanel:not([hidden])) #flow,
   body:not([data-git="shut"]) #composer,
   #main:has(#goalpanel:not([hidden])) #composer,
-  #main:has(#subpanel:not([hidden])) #composer{
-    left:calc(var(--sbw) + 306px);right:calc(var(--sbw) + 306px)}
+  #main:has(#subpanel:not([hidden])) #composer{--reserve:306px}
 }
 /* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
    2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
@@ -2310,14 +2335,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #box{border:1px solid var(--bevel);border-radius:8px;background:var(--panel);
   padding:9px 11px 8px;box-shadow:0 0 0 3px rgba(126,176,248,.06);
   transition:border-color .15s ease,box-shadow .15s ease;
-  /* 900, not 960: .turn spends 30px of its 960 on padding either side, so its
-     text starts at 900 wide. Matching that here puts this box's border on the
-     same edge as the text above it.
+  /* --colw (900), the width .turn's text runs at: .turn is --colw plus
+     --colpad either side. The same variable here puts this box's border on
+     the same edge as the text above it (#280: and on the bubbles' edges).
      ES WAR EINEN ABEND LANG 675 (robin, 2026-08-23), also ein Viertel schmaler,
      und robin hat es am selben Abend zurueckgenommen: gesehen ist die Maske,
      die unter ihrer eigenen Spalte steht, die ruhigere. Die Zahl steht hier
      mit ihrer Geschichte, damit sie niemand ein zweites Mal probiert. */
-  max-width:900px;margin-inline:auto}
+  max-width:var(--colw);margin-inline:auto}
 /* KEIN PLATZHALTER, WAEHREND GESPROCHEN WIRD. Das Band liegt ueber der Zeile,
    also stuenden sonst beide uebereinander und die ruhenden Punkte laesen sich
    als Zeichen im Satz -- genau so sah es am 2026-08-23 bei robin aus. */
@@ -2341,7 +2366,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   height:16px;line-height:14px;padding:0;border-radius:50%;font-size:11px;
   border:1px solid var(--bevel);background:var(--panel);color:inherit;
   cursor:pointer}
-.you img.sent{display:block;max-width:min(320px,70%);border-radius:8px;
+.you img.sent{display:block;justify-self:end;max-width:min(320px,70%);border-radius:8px;
   margin-top:6px;border:1px solid var(--bevel)}
 #in{flex:1;background:transparent;border:0;outline:0;resize:none;color:var(--text);
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
@@ -3646,7 +3671,7 @@ const crow = {
   start(){
     this.fold();
     const t=this.turn("");
-    t.innerHTML='<div class="as"><span class="m">&#9679;</span><div class="col"></div></div>';
+    t.innerHTML='<div class="as"><div class="col"></div></div>';
     this.col=t.querySelector(".col"); this.say=null; this.think=null;
     this.fence=null; this.blocks=[];
     // ONE CURSOR IN THE WHOLE FLOW. `reply_started` fires once per ROUND, not

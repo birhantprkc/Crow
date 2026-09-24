@@ -30,6 +30,7 @@ Tickets open until robin's live check unless marked closed.
 - **Rollover archives leave the chat rail** (#261, `d1044f7`) for the archive drawer; a Crow note is never a chat title.
 - **goal_set carries the whole step record** (#260, `b165ffa`): notes, seconds and tokens of a re-declared step survive.
 - **edit_file answers a missed 'old' with the closest text** (#276): line numbers, what differs, whitespace-only named; a uniform indentation drift with one unambiguous window is applied and said. 16 of 147 edits missed on 2026-09-23/24; replayed, 3 now land, 11 of the other 12 get the region (1, state uncertain, gets 'nothing resembles').
+- **Chat bubbles stand on the composer's edges** (#280): your bubble right-aligned on the input box's right border, Crow's text on its left border (the `●` mark column is gone); column and composer share `--colw`/`--colpad`/`--reserve`. Headless Chromium 2026-09-24, 32 layouts: 716–780 px (user) and 40 px (Crow) off before, 0.0 px after.
 
 ### Fixed
 
