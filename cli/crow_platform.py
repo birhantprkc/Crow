@@ -994,6 +994,24 @@ def find_browser_path() -> "str | None":
 # through.
 _GPU_HEADROOM_MIB = 512
 
+# #279. CROW'S OWN BROWSER PANEL IS A SECOND GPU CLIENT. Measured
+# 2026-09-24 (robin's diorama run, serve up, ~560 MiB free at boot): the
+# panel's WebKitWebProcess held 343 MiB of the card, and twice a GPU render
+# 5-10 s earlier was followed by a SIGSEGV of that process inside
+# libnvidia-eglcore (coredumpctl, 13:15:20 and 13:16:01 local). 512 MiB was
+# set in #213 from ONE headless render with no second client in the picture.
+# With the panel open (or holding a page) the bound is the render's measured
+# ~150 MiB + the panel's measured 343 MiB, doubled for a WebGL page that grows
+# and for the driver's own slack, rounded up to 1.5 GiB. The window says
+# whether the panel counts (crow_core.render_panel_set, read per turn).
+_GPU_HEADROOM_PANEL_MIB = 1536
+
+
+def gpu_headroom_mib(panel: bool = False) -> int:
+    """The free VRAM a GPU render needs: #213's bound, or #279's with the
+    window's browser panel on the same card."""
+    return _GPU_HEADROOM_PANEL_MIB if panel else _GPU_HEADROOM_MIB
+
 
 def gpu_free_mib(query=None) -> "int | None":
     """Free VRAM in MiB on the first card, or None when there is no answer.
@@ -1144,7 +1162,7 @@ def machine_facts(card=None) -> str:
     return line
 
 
-def render_gl_reason(free_mib: "int | None" = None) -> str:
+def render_gl_reason(free_mib: "int | None" = None, panel: bool = False) -> str:
     """#271: why render_gl_mode chose software, in one clause."""
     forced = (os.environ.get("CROW_RENDER_GL") or "").strip().lower()
     if forced in ("swiftshader", "software", "cpu"):
@@ -1155,14 +1173,22 @@ def render_gl_reason(free_mib: "int | None" = None) -> str:
         return "nvidia-smi gave no free-VRAM reading"
     card = gpu_card()
     name = card[0] if card else "the GPU"
-    return ("%s has %s MiB VRAM free, below the %d MiB a GPU render needs -- the "
+    need = gpu_headroom_mib(panel)
+    # #279: the bound is named with its reason, so a capture that went to
+    # software with 900 MiB free does not read as a miscount.
+    beside = (" next to Crow's own browser panel on the same card" if panel
+              else "")
+    return ("%s has %s MiB VRAM free, below the %s MiB a GPU render needs%s -- the "
             "model server holds it; the machine HAS this GPU and the user's browser "
             "renders on it, so this capture says nothing about GPU speed"
-            % (name, "{:,}".format(free_mib), _GPU_HEADROOM_MIB))
+            % (name, "{:,}".format(free_mib), "{:,}".format(need), beside))
 
 
-def render_gl_mode(free_mib: "int | None" = None) -> str:
+def render_gl_mode(free_mib: "int | None" = None, panel: bool = False) -> str:
     """"angle" when the card has headroom, else "swiftshader" (#213).
+
+    `panel`: the window's browser panel is open or holds a page, so the render
+    would be the card's second client next to it (#279).
 
     $CROW_RENDER_GL forces the answer (`angle`/`gpu` or `swiftshader`/
     `software`/`cpu`) -- the honest way to pin an arm for a measurement;
@@ -1176,7 +1202,7 @@ def render_gl_mode(free_mib: "int | None" = None) -> str:
     if free_mib is None:
         free_mib = gpu_free_mib()
     return "angle" if (free_mib is not None
-                       and free_mib >= _GPU_HEADROOM_MIB) else "swiftshader"
+                       and free_mib >= gpu_headroom_mib(panel)) else "swiftshader"
 
 
 # --------------------------------------------------------------- the fonts ---
