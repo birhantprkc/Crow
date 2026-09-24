@@ -18034,6 +18034,18 @@ _GOAL_PLANNING = re.compile(r"(?i)^\W*(?:think|plan|research|read|outline|"
                             r"design doc|write (?:the |a )?plan)\b")
 _GOAL_BUILDS = re.compile(r"(?i)\b(?:build|implement|render|draw|code|write "
                           r"(?:the )?(?:page|html|shader|scene)|fix|verify)\b")
+# #267 follow-up, 2026-09-24 diorama run: "Think and plan: read
+# DIORAMA-PROMPT.md, research ..., verify findings, write PLAN.md (...)" was
+# refused `done` because "verify" is a build verb. The step's LEADING PHRASE
+# (before the first ':', ',' or '(') says what kind of step it is; "verify"
+# and "fix" further on are part of planning when the step's deliverable is a
+# document. A real making verb anywhere ("build", "render", "write the page")
+# still makes it visual, so "Think and plan the page, then build it" keeps
+# the gate, and so does robin's "Verify offline via file://, fix, report fps".
+_GOAL_MAKES = re.compile(r"(?i)\b(?:build|implement|render|draw|code|write "
+                         r"(?:the )?(?:page|html|shader|scene))\b")
+_GOAL_DOC = re.compile(r"(?i)(?:\.(?:md|txt|rst)\b|\b(?:plan|notes|report|"
+                       r"design doc)\b)")
 _GOAL_IMAGE_CITED = re.compile(r"[^\s'\"`(),;<>\[\]]+\.(?:png|jpe?g|webp)\b",
                                re.I)
 
@@ -18086,7 +18098,15 @@ def goal_step_needs_render(goal: "dict | None", index: int) -> bool:
     if not 0 <= index < len(steps):
         return False
     text = str(steps[index].get("text") or "")
-    return not (_GOAL_PLANNING.search(text) and not _GOAL_BUILDS.search(text))
+    head = re.split(r"[:,(]", text, maxsplit=1)[0]
+    if not _GOAL_PLANNING.search(head) or _GOAL_BUILDS.search(head):
+        return True
+    if _GOAL_MAKES.search(text):
+        return True
+    # Only "verify"/"fix" past the leading phrase: planning, when the rest of
+    # the step names a document it writes ("Plan: verify the page" does not).
+    return (bool(_GOAL_BUILDS.search(text))
+            and not _GOAL_DOC.search(text[len(head):]))
 
 
 def _render_candidates(cited: str) -> "list[str]":
@@ -18138,7 +18158,11 @@ def goal_evidence_refusal(goal: "dict | None", index: int,
                 "capture, call judge on it, then report done with the capture's "
                 "path in the note (e.g. %s/render-YYYYMMDD-HHMMSS.png). If "
                 "nothing can be rendered, call goal_step with 'failed' and say "
-                "why." % (index + 1, where.replace(os.sep, "/")))
+                "why. (Planning steps are exempt: one that starts with "
+                "think/plan/research/read and writes a document such as "
+                "PLAN.md needs no picture. This step's text reads as making "
+                "or checking something visible.)"
+                % (index + 1, where.replace(os.sep, "/")))
     verdict = goal["steps"][index].get("judge")
     low = verdict.get("min") if isinstance(verdict, dict) else None
     if isinstance(low, (int, float)) and low < JUDGE_THRESHOLD:
