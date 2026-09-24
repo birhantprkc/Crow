@@ -2431,6 +2431,12 @@ def build_parser() -> argparse.ArgumentParser:
                         default=0, metavar="N",
                         help="decoded tokens one turn may spend before it is told to"
                              " answer (default: 0, off)")
+    # #274: an environment variable cannot be set from inside a session; a
+    # flag and the window's settings.json key can.
+    parser.add_argument("--bundler", dest="bundler", default=None, metavar="PATH",
+                        help="the esbuild build_bundle uses before searching the"
+                             " project, PATH and the deno/npx caches (the window:"
+                             " \"bundler\" in settings.json)")
     parser.add_argument("--subtask-max-tokens", dest="subtask_max_tokens", type=int,
                         default=0, metavar="N",
                         help="output cap for one delegated subtask"
@@ -2575,6 +2581,8 @@ def main(argv: list[str] | None = None) -> int:
     # #145: once, like set_root -- a subtask starts deep inside a turn where no
     # flag can reach it.
     crow_core.subtask_budget_set(args.subtask_max_tokens)
+    # #274: the window's `bundler` setting, as a flag -- once, like the cap.
+    crow_core.bundler_set(args.bundler)
     if args.serve is not None:
         return serve_only(args.serve)
     # #114, and BEFORE repl(): the loop's first act is to check the endpoint,

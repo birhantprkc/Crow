@@ -32,6 +32,7 @@ Tickets open until robin's live check unless marked closed.
 
 ### Fixed
 
+- **build_bundle missed deno's esbuild and gave advice the model could not follow** (#274). It looked in `~/.cache/crow/deno` instead of `~/.cache/deno` (`crow_platform.user_cache_base()` now), and its "no bundler" error said to pin `CROW_ESBUILD` — the 2026-09-24 diorama run exported it inside `run_command`, got the same error, and copied another program's esbuild into the project: 4 extra rounds. New: `bundler` in settings.json (read per turn) / `--bundler PATH`, checked with `--version` like every candidate; the error names the settings file, the `node_modules/.bin/esbuild` link in the working area, and says an `export` does not reach Crow. Measured 2026-09-24: an entry without a project esbuild now finds `~/.cache/deno/dl/esbuild-0.25.5-1` (0.25.5, was: none).
 - **The goal brake judged a turn by its last message** (#258, `d0d2548`) and cut 157 + 52 messages of real work on 2026-09-23 (cold prefills of 106k). A turn that ran tools is never "empty"; two turns are the same only with the same calls and arguments.
 - **A forced answer after the tool budget could be reasoning-only** (#259, `579fd43`): the window showed nothing. The reasoning is surfaced; the brake still reads it as empty.
 - **A subtask stopped while its attempt fails closed "failed"** and memoed the spot dead (#242, `bb81d58`); it closes "interrupted" now.

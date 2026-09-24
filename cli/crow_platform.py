@@ -122,6 +122,17 @@ def cache_dir() -> str:
     return _windows_base() if IS_WINDOWS else _xdg("XDG_CACHE_HOME", (".cache",))
 
 
+def user_cache_base() -> str:
+    """The XDG cache BASE (`$XDG_CACHE_HOME`, else ~/.cache), without Crow's name.
+
+    For the caches OTHER programs keep there -- deno's is `<base>/deno`. #274:
+    build_bundle joined `cache_dir()` with "deno" and looked in ~/.cache/crow/deno,
+    where no deno ever wrote, and missed the esbuild in ~/.cache/deno.
+    POSIX only; Windows callers use %LOCALAPPDATA% directly.
+    """
+    return _xdg_base("XDG_CACHE_HOME", (".cache",))
+
+
 def install_dir() -> str:
     """Where the installer puts an installation -- its default, not a guess.
 

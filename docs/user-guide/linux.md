@@ -285,7 +285,7 @@ that is missing as a warning.
 | | used for | without it |
 |---|---|---|
 | `node` | MCP servers started with `npx`/`node`; `node --check` over what `write_file`/`append_file`/`edit_file` wrote to a `.js`/`.mjs`/`.cjs` file or into an HTML page's inline scripts (#251) | MCP servers that need it cannot start; writes carry no syntax line, and the write itself is unaffected |
-| an `esbuild` | `build_bundle` (#212): `$CROW_ESBUILD`, a project's `node_modules`, `PATH`, the deno and npx caches — never downloaded | `build_bundle` answers "no bundler found" with every place it looked, and writes nothing |
+| an `esbuild` | `build_bundle` (#212): `$CROW_ESBUILD`, the `bundler` setting (#274), a project's `node_modules`, `PATH`, the deno (`~/.cache/deno`) and npx caches — never downloaded | `build_bundle` answers "no bundler found" with every place it looked, and writes nothing |
 | `bwrap` | the in-window browser panel's web process runs sandboxed (#226); `CROW_PANE_SANDBOX=0` turns it off | the panel runs without a sandbox |
 | `systemd-run` | the scopes above, and the server's own | no memory ceiling for render, command or server |
 

@@ -3464,6 +3464,27 @@ class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
             finally:
                 crow_gui.SETTINGS_FILE = before
 
+    def test_the_bundler_setting_is_read_every_turn(self):
+        """#274: `bundler` in settings.json reaches build_bundle through the
+        same per-turn door as the #145/#154 keys -- no restart, and a key that
+        is gone again clears it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            before = crow_gui.SETTINGS_FILE
+            crow_gui.SETTINGS_FILE = os.path.join(tmp, "settings.json")
+            try:
+                api = crow_gui.Api.__new__(crow_gui.Api)
+                with io.open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                    json.dump({"bundler": "/opt/esb/esbuild"}, fh)
+                api._token_budget()
+                self.assertEqual(crow_core.bundler_path(), "/opt/esb/esbuild")
+                with io.open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                    json.dump({}, fh)
+                api._token_budget()
+                self.assertIsNone(crow_core.bundler_path())
+            finally:
+                crow_gui.SETTINGS_FILE = before
+                crow_core.bundler_set(None)
+
     def test_hilfe_sits_in_the_title_bar_and_leaves_the_drag_region(self):
         """The bar moves the window. Anything clickable in it has to opt out, or
         the click becomes a drag and the menu never opens."""
