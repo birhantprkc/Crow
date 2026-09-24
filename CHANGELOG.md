@@ -35,6 +35,16 @@ Tickets open until robin's live check unless marked closed.
 - **The goal brake judged a turn by its last message** (#258, `d0d2548`) and cut 157 + 52 messages of real work on 2026-09-23 (cold prefills of 106k). A turn that ran tools is never "empty"; two turns are the same only with the same calls and arguments.
 - **A forced answer after the tool budget could be reasoning-only** (#259, `579fd43`): the window showed nothing. The reasoning is surfaced; the brake still reads it as empty.
 - **A subtask stopped while its attempt fails closed "failed"** and memoed the spot dead (#242, `bb81d58`); it closes "interrupted" now.
+- **`render_page` keeps a `?query` / `#fragment` on a local page** (#272). Before this, the whole argument went to `isfile`,
+  so `index.html?view=albedo` came back `no such page` although `index.html` existed. That happened once in the 2026-09-24 diorama run
+  (session.json msg 36/37). The model then saved "a file:// page also rejects a ?query" to memory and dropped the
+  prompt's required `index.html?shot=<view>&w=<px>` screenshot mode. Now the file is checked without the suffix, and the
+  suffix goes back onto a percent-encoded `file://` URL. Drive letters and UNC follow RFC 8089. The URL was unencoded
+  before, so a space or `#` in a file name went raw to Chromium. A missing file names the file, and the #253 console-source
+  hint reads a source URL that carries a query. The #175 byte-identical check keys on the full URL, so two views are two
+  pages. 7 new tests, all red without the fix. The browser receiving the query is tested with a mocked browser only. No
+  live render was run.
+
 
 ## 2.5.0 — 2026-09-23
 
