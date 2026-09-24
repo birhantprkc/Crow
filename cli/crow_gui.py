@@ -8267,10 +8267,10 @@ REMOTE_CSS = """
    seinen Blur-Streifen ~35 pt unter die Statusleiste, ueber den Kopf -- auch
    mit der deckenden Statusleiste (76930c8 half nicht), und
    safe-area-inset-top waechst nicht mit. Also rueckt der Kopf dort um den
-   Streifen tiefer (36 px war zu viel, robin 17:20: 18 px); im Safari-Tab
+   Streifen tiefer (36 px war zu viel, robin 17:20: 18 px, dann 8 px); im Safari-Tab
    gibt es den Streifen nicht. */
 @media (display-mode: standalone){
-  :root{--safe-t:calc(env(safe-area-inset-top,0px) + 18px)}
+  :root{--safe-t:calc(env(safe-area-inset-top,0px) + 8px)}
 }
 html{overflow-x:clip}
 html,body{height:100dvh;overscroll-behavior:none;-webkit-text-size-adjust:100%;

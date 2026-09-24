@@ -13863,7 +13863,7 @@ class RemoteMirrorTests(RemoteCase):
         phone = crow_gui.stamped_page(remote=True)
         at = phone.index("@media (display-mode: standalone)")
         rule = phone[at:phone.index("}", phone.index("{", at) + 1) + 1]
-        self.assertIn("--safe-t:calc(env(safe-area-inset-top,0px) + 18px)", rule)
+        self.assertIn("--safe-t:calc(env(safe-area-inset-top,0px) + 8px)", rule)
         self.assertIn("--safe-t:env(safe-area-inset-top,0px);", phone)
         self.assertNotIn("display-mode: standalone", crow_gui.stamped_page())
 
