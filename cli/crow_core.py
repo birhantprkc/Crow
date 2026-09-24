@@ -3484,18 +3484,14 @@ def context_clear_path(stamp: "str | None" = None) -> str:
 
 
 def crow_log(line: str) -> None:
-    """One line to `logs/crow.log` beside the engine's log. Never raises.
+    """One context-clear line to Crow's log (#263). Never raises.
 
-    #263 needs one place to say what it did that is not the chat; #262 is the
-    ticket for moving Crow's other status lines here.
+    ONE LOG, NOT TWO. This wrote `<state>/logs/crow.log` in bare UTC, without
+    rotation, while #262's `log_note` wrote `LOG_FILE` = `<state>/log/crow.log`
+    with local time and offset, rotated -- both live on 2026-09-24, merged the
+    same morning from two parallel branches. It is #262's writer now.
     """
-    try:
-        folder = os.path.join(os.path.dirname(SESSION_DIR), "logs")
-        os.makedirs(folder, exist_ok=True)
-        with open(os.path.join(folder, "crow.log"), "a", encoding="utf-8") as fh:
-            fh.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), line))
-    except Exception:                       # noqa: BLE001 - a log is not a turn
-        pass
+    log_note(line, "context")
 
 
 def clear_old_results(conversation: "Conversation", context_tokens: int, n_ctx: int,

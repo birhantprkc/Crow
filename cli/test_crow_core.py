@@ -21239,6 +21239,8 @@ class ToolResultClearingTests(unittest.TestCase):
         self.assertEqual(crow_core.clear_before_roll(talk, 190_000, 200_000), 190_000)
 
     def test_the_turn_loop_call_logs_one_line_and_forgets_cleared_reads(self):
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(self.dir, "log", "crow.log")
         talk = _rounds_talk(10, size=60_000)
         crow_core._READ[crow_core._key("src/f0.js")] = (1, 1)
         crow_core._READ[crow_core._key("src/f9.js")] = (1, 1)
@@ -21246,11 +21248,14 @@ class ToolResultClearingTests(unittest.TestCase):
         self.assertLess(after, 150_000)
         self.assertNotIn(crow_core._key("src/f0.js"), crow_core._READ)
         self.assertIn(crow_core._key("src/f9.js"), crow_core._READ, "a kept read was dropped")
-        log = os.path.join(os.path.dirname(crow_core.SESSION_DIR), "logs", "crow.log")
-        with open(log, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+        # ONE LOG (#262's): LOG_FILE, local time with offset, tagged [context]
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if "context-clear" in ln]
         self.assertEqual(len(lines), 1, lines)
-        self.assertIn("context-clear: 5 tool results", lines[0])
+        self.assertIn("[context] context-clear: 5 tool results", lines[0])
+        self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4} ")
+        self.assertFalse(os.path.exists(os.path.join(
+            os.path.dirname(crow_core.SESSION_DIR), "logs", "crow.log")), "a second log")
         self.assertIn("tokens freed", lines[0])
         # the next round sets a new base instead of booking the drop as spend
         self.assertTrue(crow_core._GOAL_REBASE)
@@ -21279,6 +21284,8 @@ class ToolResultClearingInTheTurnTests(TurnLoopCase):
         crow_core.context_clear_set(None)
 
     def test_a_round_past_the_trigger_clears_before_the_next_request(self):
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(self.dir, "log", "crow.log")
         talk = _rounds_talk(10, size=4000)
         talk.append("user", "carry on")
         self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
@@ -21301,8 +21308,7 @@ class ToolResultClearingInTheTurnTests(TurnLoopCase):
         a0 = [m for m in self.bodies[0]["messages"] if m["role"] == "assistant"]
         a1 = [m for m in second if m["role"] == "assistant"][:len(a0)]
         self.assertEqual(a0, a1)
-        log = os.path.join(self.dir, "logs", "crow.log")
-        self.assertTrue(os.path.exists(log))
+        self.assertTrue(os.path.exists(crow_core.LOG_FILE))
 
     def test_a_remote_endpoint_is_not_cleared_by_default(self):
         talk = _rounds_talk(10, size=4000)
