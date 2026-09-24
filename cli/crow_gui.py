@@ -10598,6 +10598,16 @@ class Api:
         if start is not None:
             crow_core.goal_trouble_scan(payload, start, self._goal_trouble,
                                         new_step=new_step)
+        # #268 + #277. DIE FANG-SERIE WIRD JEDEN ZUG GEZAEHLT, auch wenn #202
+        # gleich spricht: am 2026-09-24 stand der Render-Zaehler hinter dem
+        # Trouble-Return, und die drei schwarzen Fangs von s97-s111 wurden
+        # nie gesehen. Ohne Zuganfang -- ein Rollover MITTEN im Zug, die neue
+        # Payload beginnt mit der Rollover-Notiz -- ist die ganze Payload der
+        # Rest dieses Zugs; was der Schnitt mitgetragen hat und schon
+        # gezaehlt war, filtert `seen`. Nur die ZAEHLUNG ist vorgezogen, der
+        # Anstoss von #202 hat weiter den Vortritt.
+        crow_core.goal_render_scan(payload, 0 if start is None else start,
+                                   self._goal_renders, new_step=new_step)
         due = crow_core.goal_trouble_due(self._goal_trouble)
         if due:
             # #262: the NUDGE is unchanged and still goes to the
@@ -10612,10 +10622,7 @@ class Api:
         # #268. DERSELBE FANG, IMMER WIEDER: drei feste Fangs in Folge ein
         # Anstoss zum Halbieren, sechs ein erzwungener Rollover, dessen
         # erste Zeile auflistet, was versucht wurde. Nach dem Trouble-Block,
-        # damit #202 unveraendert zuerst spricht.
-        if start is not None:
-            crow_core.goal_render_scan(payload, start, self._goal_renders,
-                                       new_step=new_step)
+        # damit #202 unveraendert zuerst spricht (gezaehlt ist schon, oben).
         stuck = crow_core.goal_render_due(self._goal_renders)
         if stuck is not None:
             text = crow_core.goal_render_nudge(nxt + 1, self._goal_renders,
@@ -10631,8 +10638,11 @@ class Api:
             if stuck == "roll":
                 self._goal_roll_due = True
                 # The cut leaves the loop behind; the one roll stays spent.
+                # #277: the counted paths stay, or the captures the cut
+                # carries would start the next streak.
                 self._goal_renders = {
-                    "rolls": self._goal_renders.get("rolls", 0)}
+                    "rolls": self._goal_renders.get("rolls", 0),
+                    "seen": self._goal_renders.get("seen", [])}
             return text
         # #202. NICHT HUNDERTMAL DERSELBE BLOCK. Der volle Anstoss ist 330 Byte
         # Anweisung; byteweise identisch vor jedem Zug wiederholt ist er selbst

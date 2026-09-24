@@ -18469,6 +18469,17 @@ GOAL_RENDER_ROLL = 6
 # Ein Fang, der zu so viel einer Farbe ist, zeigt kein Bild (gemessen:
 # die schwarzen Diorama-Fangs 0,987-0,998, der fertige Rahmen 0,598-0,704).
 _RENDER_NEAR_BLANK = 0.98
+# #277. SCHWARZ MIT EINEM HELLEN FLECK IST AUCH KEIN BILD. 2026-09-24, Schritt
+# 2 des Diorama-Laufs: neun Fangs von index.html zu luma 0,66-2,35/255 (die
+# metrics-Zeile: 1-2), aber mit HUD-Zeile und kleinem Fleck nur 0,908-0,964
+# einer Farbe -- unter 0,98, also kein Urteil, und jeder setzte die Serie auf
+# null. Die einzige echte Szene des Tages (iso-test.html) lag bei 30,9, die
+# weissen Textseiten bei 251-255. Die Linie bei 4 liegt ueber allem, was
+# schwarz war, und weit unter allem, was ein Bild war; eine Nachtszene, die im
+# Mittel unter 4/255 bleibt, ist auf jedem Schirm schwarz. NUR DUNKEL: eine
+# weisse Textseite ist eine Seite, kein fehlendes Bild.
+_RENDER_DARK_LUMA = 4
+_RENDER_LUMA = re.compile(r"luma mean (\d+)/255")
 _RENDER_SHOT = re.compile(r"^(\S+\.png) -- (\d+) bytes", re.M)
 _RENDER_STUCK_WARNS = ("looks blank", "almost one colour", "byte-identical",
                        "distinct colours in the capture")
@@ -18476,6 +18487,9 @@ _RENDER_STUCK_WARNS = ("looks blank", "almost one colour", "byte-identical",
 # there is a dash, not a sign.
 _RENDER_METRIC_NUM = re.compile(r"\d+(?:\.\d+)?")
 _RENDER_WRITES = ("write_file", "append_file", "edit_file")
+# #277: how many counted capture paths a step remembers (a step of the
+# 2026-09-24 run made 11; a replay or a carry is never older than a turn).
+_RENDER_SEEN_KEEP = 64
 
 
 def render_signature(result: str, target: str = "") -> "dict | None":
@@ -18487,13 +18501,22 @@ def render_signature(result: str, target: str = "") -> "dict | None":
         return None
     path, size = shot.group(1), int(shot.group(2))
     metrics: "list[float]" = []
+    luma = None
     for line in text.splitlines():
         if line.startswith("metrics:") and not line.startswith("metrics: crop"):
             metrics.extend(float(n) for n in _RENDER_METRIC_NUM.findall(line))
+            seen = _RENDER_LUMA.search(line)
+            if seen:
+                luma = int(seen.group(1))
     share = None
     try:
         with open(path, "rb") as fh:
-            share = _png_dominant_share(fh.read(_PNG_DECODE_BUDGET))
+            img = _png_pixels(fh.read(_PNG_DECODE_BUDGET))
+        if img is not None:
+            stats = _pixel_stats(img)
+            share = stats["share"]
+            if luma is None:
+                luma = int(round(stats["luma"]))
     except OSError:
         pass
     warned = next((w for w in _RENDER_STUCK_WARNS if w in text), None)
@@ -18502,8 +18525,10 @@ def render_signature(result: str, target: str = "") -> "dict | None":
         blank = warned
     elif share is not None and share >= _RENDER_NEAR_BLANK:
         blank = "%.1f %% one colour" % (100 * share)
+    elif luma is not None and luma <= _RENDER_DARK_LUMA:
+        blank = "near-black (luma mean %d/255)" % luma                # #277
     return {"target": target, "path": path, "size": size, "share": share,
-            "metrics": metrics, "blank": blank}
+            "metrics": metrics, "blank": blank, "luma": luma}
 
 
 def _render_close(a: float, b: float, rel: float, floor: float) -> bool:
@@ -18538,12 +18563,19 @@ def goal_render_scan(messages: "list | None", start: int,
     index.html seven times with other pages in between; a page never
     captured before in this step is a changed approach and starts at zero.
     A `goal_step` 'done' clears it mid-turn, and `new_step` skips the turn
-    up to that call -- the rules of `goal_trouble_scan`."""
+    up to that call -- the rules of `goal_trouble_scan`.
+
+    #277: `seen` holds the capture paths already counted. The duplicate-call
+    guard replays a result ("you already called render_page ..."), and a
+    rollover carries the last ones across the cut; neither is a new capture,
+    and a caller that scans from the payload's start after a mid-turn cut
+    must not count them twice."""
     state = state if state is not None else {}
     state.setdefault("targets", {})
     state.setdefault("edits", [])
     state.setdefault("rolls", 0)
     state.setdefault("current", None)
+    state.setdefault("seen", [])
     calls: dict = {}
     counting = not new_step
     for message in (messages or [])[max(0, start):]:
@@ -18581,8 +18613,9 @@ def goal_render_scan(messages: "list | None", start: int,
             continue
         target = str(args.get("path") or "")
         sig = render_signature(content, target)
-        if sig is None:
+        if sig is None or sig["path"] in state["seen"]:
             continue
+        state["seen"] = (state["seen"] + [sig["path"]])[-_RENDER_SEEN_KEEP:]
         page = state["targets"].setdefault(
             target, {"last": None, "streak": 0, "tried": [], "said": 0})
         same = render_same(page["last"], sig)
@@ -18638,6 +18671,33 @@ GOAL_BISECT = ("stop editing -- bisect: render a minimal probe (the clear "
                "colour only, then one lit cube), then re-enable the passes one "
                "by one and render after each; the pass that breaks the picture "
                "is the bug.")
+# #277. A BLACK FRAME HAS NOTHING TO COMPARE AN EDIT AGAINST, so the probe
+# must make the pipeline report on itself. The isolation order is the one
+# LearnOpenGL's "Debugging" page teaches (a non-colour value written to the
+# colour output; a framebuffer shown on screen), the checks are the two
+# calls MDN names for a silent render target (getError's
+# INVALID_FRAMEBUFFER_OPERATION, checkFramebufferStatus) plus a readback.
+# Checks, not code: the model writes the probe its own way.
+GOAL_BISECT_BLACK = ("stop editing -- the frame is black, so an edit has "
+                     "nothing to be judged against. Make the pipeline report "
+                     "on itself: render ONE pass in isolation straight to the "
+                     "screen -- the albedo/base colour only, no lighting; then "
+                     "the normals as colour; then the depth. After each draw "
+                     "check gl.getError() and gl.checkFramebufferStatus(), "
+                     "read a few pixels back with gl.readPixels, and log "
+                     "those values to the console (render_page shows it). "
+                     "The first pass that comes back black or reports an "
+                     "error is the bug.")
+
+
+def render_no_signal(sig: "dict | None") -> bool:
+    """#277: does this capture show no picture at all -- near-black, blank,
+    one colour -- rather than a picture that did not change?"""
+    if not sig or not sig.get("blank"):
+        return False
+    luma = sig.get("luma")
+    return (sig["blank"] != "byte-identical"
+            or (luma is not None and luma <= _RENDER_DARK_LUMA))
 
 
 def goal_render_nudge(step: int, state: dict, rolled: bool = False) -> str:
@@ -18646,18 +18706,21 @@ def goal_render_nudge(step: int, state: dict, rolled: bool = False) -> str:
     page = _render_page_state(state) or {}
     tried, streak = page.get("tried") or [], page.get("streak", 0)
     where = os.path.basename(str(state.get("current") or "")) or "the page"
+    black = render_no_signal(page.get("last"))                         # #277
+    bisect = GOAL_BISECT_BLACK if black else GOAL_BISECT
+    what = "showed no picture" if black else "came back the same"
     if not rolled:
-        return ("%s, step %d: the last %d captures of %s came back the same "
-                "(%s) -- %s]" % (GOAL_NUDGE_MARK, step, streak, where,
+        return ("%s, step %d: the last %d captures of %s %s "
+                "(%s) -- %s]" % (GOAL_NUDGE_MARK, step, streak, where, what,
                          "; ".join(t.split(": ", 1)[-1].split(" after ")[0]
-                                   for t in tried[-3:]), GOAL_BISECT))
-    return ("%s, step %d: %d captures of %s in a row came back the same, so "
+                                   for t in tried[-3:]), bisect))
+    return ("%s, step %d: %d captures of %s in a row %s, so "
             "the context was cut to leave that loop behind. What was tried "
             "(Crow's record from the render_page results):\n%s\n"
             "Do not repeat these edits. %s]"
-            % (GOAL_NUDGE_MARK, step, streak, where,
+            % (GOAL_NUDGE_MARK, step, streak, where, what,
                "\n".join("- " + t for t in tried[-8:]),
-               GOAL_BISECT[0].upper() + GOAL_BISECT[1:]))
+               bisect[0].upper() + bisect[1:]))
 
 
 def needs_approval(name: str, mode: str) -> bool:
