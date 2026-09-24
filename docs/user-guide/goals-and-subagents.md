@@ -17,12 +17,12 @@ while it keeps going.
 | | |
 |---|---|
 | Tools | `goal_set(title, steps)` writes the plan, `goal_step(step, status, note)` moves one step |
-| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). `/goal` alone shows where it stands, `/goal off` clears it and its check |
+| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). A line `accept: <criterion>, <criterion>` is the rubric the [judge](../reference/tools.md#judge-266) scores against, not a step (#266). `/goal` alone shows where it stands, `/goal off` clears it and its check |
 | Panel | the first of the pinned cards at the top right of the chat (goal, subtasks, git): title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
 | States | `open` · `running` · `done` · `failed` |
 | Limits | 60 turns for the whole goal, 25 for one step, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202) |
-| `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250) |
+| `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250); on a visual step, refused without a capture from this goal in the note or under the judge's bar (#267) |
 
 **Two tools and not one, because they cost different things.** The plan goes into the pinned head
 of every prompt, so writing one costs a full prefill — the composer says so before it changes
@@ -60,6 +60,30 @@ Two guards now stand in front of `goal_step(..., "done")`:
   user sets one — the model's `goal_set` has no such field.
 
 Not measured: whether the model then finishes the work instead of stopping at the refusal.
+
+**A visual step is done on a picture (#267).** Seen on 2026-09-23: 9/9 `done`, step 8's note
+"Every criterion reads 9+ on the capture", and the capture it named was a small purple box in a
+black frame. The two guards above passed all nine final notes. On a **visual goal** — its title or
+steps name visual work (render, screenshot, html, css, canvas, webgl, scene, diorama, voxel, 3d,
+shader, svg, ui, …), or `goal.json` says `"visual": true` (`false` switches it off) — a `done`
+also needs:
+
+- *A capture from this goal in the note.* A path to a `.png`/`.jpg`/`.webp` that exists and was
+  written after the goal was created. A bare name such as `render-20260923-232855.png` is looked up
+  in `.crow/renders/`. A step that only plans ("Think and plan: … write PLAN.md") is exempt, unless
+  it also builds.
+- *The judge's bar, when a judge scored the step.* If [`judge`](../reference/tools.md#judge-266)
+  stored a verdict on the step, its lowest score must be at least the threshold: **8** by default,
+  `judge_threshold` in `settings.json` (window) or `--judge-threshold N` (terminal). The refusal
+  names the lowest criteria and the judge's three weakest points.
+
+The refusal says what is missing and how to get it: `render_page`, `read_image`, `judge`, and the
+path in the note, or `failed` with a reason when nothing can be rendered. The step nudge says the
+same thing when it hands out a visual step, so the first refusal is not the first time the model
+hears the rule. The goal from 2026-09-23, with its final notes replayed: before 9/9 accepted, after
+6 refused (steps 2–6 with no note, and step 9 with no capture). Step 1 is exempt as planning.
+Steps 7–8 cite real captures and are held by the judge's score. Goals without visual work are
+unchanged.
 
 **Crow's nudges are not your words (#240).** Goal-mode nudges travel as user-role messages and
 carry the model's own plan text. The paths in them used to count as user-named, which released the
@@ -123,6 +147,29 @@ came back; a model that stopped is not told again. The counts belong to the step
 when the step changes, when the model marks it `done`, and when you type a line. A step marked
 `failed` keeps them, because Crow nudges that same step again. Counting happens between turns, so
 a single turn can still spend its 24 tool rounds on the wall before the line arrives.
+
+*The same picture, again (#268).* A debug loop can fail nothing and still go nowhere. Seen on
+2026-09-23, 22:30–22:48: seven captures of `chain.html` in a row at 99.2–99.4 % one colour (a
+black frame with an fps line), with an edit to another pass before each one. Every turn called
+tools and no result was an error, so neither mechanism above fired. Crow therefore also counts,
+per page, the `render_page` captures that came back **stuck**. A capture is stuck when it carries
+a blank verdict (#213 blank or almost one colour, #175 byte-identical, "only N distinct colours"
+from the pixel metrics), when its decoded frame is at least 98 % one colour, or when it nearly
+matches the previous capture of the same page. "Nearly matches" uses the `metrics:` numbers
+within 3 % (or ±2) when the render wrote them. Without them it uses the dominant-colour share
+within 0.005 and the size within 3 %. A page never captured before in the step counts as a changed
+approach and starts at zero.
+
+| Stuck captures of one page | What happens |
+|---|---|
+| 3 | one nudge: *stop editing — bisect: render a minimal probe (the clear colour only, then one lit cube), then re-enable the passes one by one and render after each* |
+| 6 | a forced rollover, even below the threshold. The line it carries lists each stuck capture with its verdict and the files written before it ("render-….png: 99.4 % one colour after writing src/03.js"). One per step; after that, the nudge again every third capture |
+
+The count belongs to the step and is cleared by `goal_step … done`, like the failure classes. The
+flow shows a note each time. It is replayed on the four session files of 2026-09-23: nudges before
+messages 35 and 295 (rollover-210418, `index.html`, three near-identical and then three black
+captures) and 314 (rollover-225111, `chain.html`, the 22:30 streak). No forced roll: each time the
+model moved to another page (`verify-trace.html`, `probe.html`) before a sixth capture.
 
 **The counters are the goal's, not the steps' sum.** Wall clock runs from the first step that
 started, and tokens are what the goal cost across every context it lived in — thinking, tool

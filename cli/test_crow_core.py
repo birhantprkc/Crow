@@ -10565,6 +10565,19 @@ class TheProviderCatalogueTests(unittest.TestCase):
         self.assertEqual(models[1]["context"], 8000)
         self.assertEqual(models[1]["name"], "a/b")
 
+    def test_the_catalogue_keeps_whether_a_model_can_see(self):
+        """#266: `architecture.input_modalities` as OpenRouter declares it;
+        a row that does not say stays without the key."""
+        _FakeCatalogue.body = json.dumps({"data": [
+            {"id": "v/eyes", "architecture": {"input_modalities": ["text", "image"]}},
+            {"id": "t/text", "architecture": {"input_modalities": ["text"]}},
+            {"id": "u/unsaid"}]})
+        models, _problem = crow_core.provider_fetch_models("openrouter", "k")
+        by = {m["id"]: m for m in models}
+        self.assertIs(by["v/eyes"]["vision"], True)
+        self.assertIs(by["t/text"]["vision"], False)
+        self.assertNotIn("vision", by["u/unsaid"])
+
     def test_the_request_says_who_is_asking(self):
         """The lesson of 2026-08-22, applied at the FIRST build of an outgoing
         path rather than after the first 403: `Python-urllib` is on Cloudflare's
@@ -15073,7 +15086,8 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
 class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     """#250. 2026-09-23: goal mode closed 9/9 over a 1.4 KB index.html
     that draws nothing. Step 4's `done` note said "done-with-deviation only in
-    spirit"; step 9 went `failed`, then `done` with no note."""
+    spirit"; step 9 went `failed`, then `done` with no note. The goals here
+    are not visual on purpose: the picture gate has its own class below."""
 
     def setUp(self):
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goaldone-"))
@@ -15089,7 +15103,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         return json.loads(crow_core.tool_goal_step(n, status, note))
 
     def test_a_note_that_says_not_done_is_refused(self):
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         out = self.step(1, "done", "Step treated as done-with-deviation only "
                                    "in spirit; the GLSL work remains queued.")
         self.assertFalse(out["ok"])
@@ -15099,12 +15113,12 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     def test_a_note_with_evidence_passes(self):
         """POSITIVE CONTROL: a plain proof, and a note that mentions a
         failure it fixed, are not refused."""
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         self.assertTrue(self.step(1, "done", "node --check ok; 0 failed of 12 "
                                              "tests; render shows the scene")["ok"])
 
     def test_done_after_failed_needs_a_note(self):
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         self.step(1, "done", "built")
         self.step(2, "failed", "no fps figure can be read")
         out = self.step(2, "done")
@@ -15114,7 +15128,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
 
     def test_the_acceptance_check_holds_the_goal_open(self):
         said, _goal, _ch = crow_core.goal_command(
-            "diorama | build it | verify it | check: exit 3")
+            "parser | build it | verify it | check: exit 3")
         self.assertIn("acceptance check: exit 3", said)
         self.assertIn("Acceptance check", crow_core.goal_block())
         self.assertTrue(self.step(1, "done", "built")["ok"])
@@ -15125,14 +15139,14 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         self.assertNotEqual(crow_core.goal_load().get("status"), "done")
 
     def test_a_passing_check_closes_the_goal(self):
-        crow_core.goal_command("diorama | build it | verify it | check: exit 0")
+        crow_core.goal_command("parser | build it | verify it | check: exit 0")
         self.step(1, "done", "built")
         out = self.step(2, "done", "verified")
         self.assertTrue(out["ok"] and out["complete"], out)
         self.assertEqual(out["acceptance_check"], "passed: exit 0")
 
     def test_the_check_runs_only_on_the_closing_done(self):
-        crow_core.goal_command("diorama | a | b | c | check: exit 0")
+        crow_core.goal_command("parser | a | b | c | check: exit 0")
         with mock.patch.object(crow_core, "tool_run_command",
                                return_value="[exit 0]") as ran:
             self.step(1, "done", "a")
@@ -15144,7 +15158,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     def test_the_check_is_not_in_the_working_area(self):
         """NEGATIVE: goal.json is writable by the model's write_file; a
         command put there runs nothing."""
-        crow_core.goal_command("diorama | a | b | check: exit 0")
+        crow_core.goal_command("parser | a | b | check: exit 0")
         with open(crow_core.goal_path(), encoding="utf-8") as fh:
             self.assertNotIn("exit 0", fh.read())
         crow_core.goal_check_set(None)
@@ -15159,11 +15173,430 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         ran.assert_not_called()
 
     def test_a_replan_keeps_the_users_check_and_off_drops_it(self):
-        crow_core.goal_command("diorama | a | b | check: exit 3")
-        crow_core.tool_goal_set("diorama", ["a", "b", "c"])
+        crow_core.goal_command("parser | a | b | check: exit 3")
+        crow_core.tool_goal_set("parser", ["a", "b", "c"])
         self.assertEqual(crow_core.goal_check_get(), "exit 3")
         crow_core.goal_command("off")
         self.assertIsNone(crow_core.goal_check_get())
+
+
+class _JudgeAnswer:
+    """A fake HTTP answer for `urlopen`, a context manager like the real one."""
+
+    def __init__(self, doc):
+        self.raw = json.dumps(doc).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.raw
+
+
+def _judge_reply(scores, weakest=("tiny", "black", "flat"), fence=True):
+    text = json.dumps({"scores": scores, "weakest": list(weakest),
+                       "verdict": "a small box in a black frame"})
+    if fence:
+        text = "Here you go:\n```json\n%s\n```" % text
+    return {"choices": [{"message": {"content": text}}]}
+
+
+class TheJudgeHasFreshEyesTests(unittest.TestCase):
+    """#266. 2026-09-23: the model scored its own black frame 9+ on every
+    criterion. `judge` sends only the capture and the rubric to a model that
+    never saw the conversation, and stores its scores on the step."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-judge-"))
+        self.state = tempfile.mkdtemp(prefix="crow-judge-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        self.addCleanup(crow_core._TURN_SPOT.clear)
+        crow_core._TURN_SPOT.clear()
+        crow_core._TURN_SPOT.update({
+            "base_url": "http://127.0.0.1:9/v1", "model": "local-maker",
+            "api_key": "x", "remote": False, "headers": {},
+            "transport": crow_core.TRANSPORT_CHAT, "served": "local-maker"})
+
+    def capture(self, name="render-20260924-101010.png", crop=False):
+        path = os.path.join(crow_core._render_dir(), name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + os.urandom(16))
+        if crop:
+            with open(path[:-4] + "-crop.png", "wb") as fh:
+                fh.write(b"\x89PNG\r\n\x1a\n")
+        return path
+
+    # -- the rubric ----------------------------------------------------------
+
+    def test_the_diorama_sentence_is_a_rubric_even_wrapped(self):
+        text = ("2. Look at them critically and score each 1\u201310 against: "
+                "detail density, lighting mood, material realism\n   (wetness), "
+                "reflections, composition, colour harmony, and image "
+                "cleanliness (aliasing, banding, artefacts).\n3. Write the "
+                "scores into PLAN.md")
+        self.assertEqual(crow_core.rubric_from_text(text), [
+            "detail density", "lighting mood", "material realism (wetness)",
+            "reflections", "composition", "colour harmony",
+            "image cleanliness (aliasing, banding, artefacts)"])
+
+    def test_a_criteria_heading_with_bullets_is_a_rubric(self):
+        text = ("# Plan\n\n## Review criteria\n\n- **detail density** \u2014 "
+                "many voxels\n- lighting mood: warm\n- composition\n\n"
+                "## Next\n- not a criterion\n")
+        self.assertEqual(crow_core.rubric_from_text(text),
+                         ["detail density", "lighting mood", "composition"])
+
+    def test_the_users_accept_lines_win_then_plan_then_caller(self):
+        self.assertEqual(crow_core.judge_rubric("a, b")[1], "the caller")
+        self.assertEqual(crow_core.judge_rubric()[0],
+                         list(crow_core.JUDGE_DEFAULT_RUBRIC))
+        with open(os.path.join(self.root, "PLAN.md"), "w") as fh:
+            fh.write("Score each against: depth, mood.\n")
+        self.assertEqual(crow_core.judge_rubric("a, b"), (["depth", "mood"],
+                                                          "PLAN.md"))
+        said, _g, _c = crow_core.goal_command(
+            "scene | build it | check it | accept: neon glows, ground reads wet")
+        self.assertIn("1 accept line for the judge", said)
+        self.assertEqual([s["text"] for s in crow_core.goal_load()["steps"]],
+                         ["build it", "check it"])
+        self.assertEqual(crow_core.judge_rubric("a, b"),
+                         (["neon glows", "ground reads wet"],
+                          "the user's accept lines"))
+        self.assertIn("neon glows", crow_core.goal_block())
+
+    def test_a_replan_keeps_the_accept_lines_and_off_drops_them(self):
+        crow_core.goal_command("scene | a | b | accept: neon glows")
+        crow_core.tool_goal_set("scene", ["a", "b", "c"])
+        self.assertEqual(crow_core.goal_accept_get(), ["neon glows"])
+        crow_core.goal_command("off")
+        self.assertEqual(crow_core.goal_accept_get(), [])
+
+    # -- the images ----------------------------------------------------------
+
+    def test_the_newest_capture_and_its_crop_are_judged(self):
+        old = self.capture("render-20260924-090000.png")
+        os.utime(old, (1, 1))
+        new = self.capture(crop=True)
+        paths, bad = crow_core.judge_images()
+        self.assertIsNone(bad)
+        self.assertEqual(paths, [new, new[:-4] + "-crop.png"])
+
+    def test_no_capture_is_an_error_that_names_render_page(self):
+        paths, bad = crow_core.judge_images()
+        self.assertEqual(paths, [])
+        self.assertIn("render_page", bad)
+        self.assertIn("no such image", crow_core.judge_images("nope.png")[1])
+
+    # -- the answer ----------------------------------------------------------
+
+    def test_a_fenced_answer_is_parsed_matched_and_clamped(self):
+        text = _judge_reply({"Detail density": 12, "lighting-mood": "3",
+                             "composition": 2.4})["choices"][0]["message"]["content"]
+        verdict, bad = crow_core.judge_parse(
+            text, ["detail density", "lighting mood", "composition"])
+        self.assertIsNone(bad)
+        self.assertEqual(verdict["scores"], {"detail density": 10,
+                                             "lighting mood": 3,
+                                             "composition": 2})
+        self.assertEqual(verdict["min"], 2)
+        self.assertEqual(verdict["weakest"], ["tiny", "black", "flat"])
+
+    def test_an_answer_that_scores_too_little_is_no_verdict(self):
+        verdict, bad = crow_core.judge_parse(
+            '{"scores": {"a": 9}}', ["a", "b", "c"])
+        self.assertIsNone(verdict)
+        self.assertIn("1 of 3", bad)
+        self.assertIsNone(crow_core.judge_parse("looks great!", ["a"])[0])
+
+    # -- who judges ----------------------------------------------------------
+
+    def spot(self, model, provider="openrouter"):
+        return {"provider": provider, "model": model, "remote": True,
+                "base_url": "https://example.invalid/v1", "api_key": "k",
+                "headers": {}, "transport": crow_core.TRANSPORT_CHAT}
+
+    def test_the_order_is_pin_then_delegate_chain_then_own_model(self):
+        doc = {"judge": {"provider": "openrouter", "model": "pin/eyes"},
+               "catalog": {"openrouter": {"models": [
+                   {"id": "text/only", "vision": False},
+                   {"id": "fav/eyes", "vision": True}]}}}
+
+        def target(d=None):
+            return self.spot((d.get("delegate") or {}).get("model")
+                             or "fav/eyes"), None
+        with mock.patch.object(crow_core, "delegate_target", side_effect=target), \
+                mock.patch.object(crow_core, "delegate_fallbacks",
+                                  return_value=[self.spot("text/only"),
+                                                self.spot("unsaid/model")]):
+            spots = crow_core.judge_spots(doc)
+        self.assertEqual([s["model"] for s in spots],
+                         ["pin/eyes", "fav/eyes", "unsaid/model", "local-maker"])
+        self.assertIn("fresh context", spots[-1]["how"])
+
+    def test_a_local_pin_asks_no_remote(self):
+        with mock.patch.object(crow_core, "delegate_target") as target:
+            spots = crow_core.judge_spots({"judge": {"provider": "local"}})
+        target.assert_not_called()
+        self.assertEqual([s["model"] for s in spots], ["local-maker"])
+
+    # -- the whole call ------------------------------------------------------
+
+    def test_the_judge_sees_one_message_and_its_scores_land_on_the_step(self):
+        crow_core.goal_command("Neon diorama | plan it | build the scene")
+        crow_core.tool_goal_step(2, "running")
+        self.capture(crop=True)
+        sent = []
+
+        def urlopen(request, timeout=None):
+            sent.append((request.full_url, json.loads(request.data)))
+            return _JudgeAnswer(_judge_reply({"x": 2, "y": 3}))
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[dict(self.spot("v/eyes"),
+                                                  how="the delegate spot")]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
+            out = json.loads(crow_core.tool_judge(criteria="x, y"))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["min"], 2)
+        self.assertFalse(out["passes"])
+        self.assertEqual(out["step"], 2)
+        self.assertEqual(out["rubric_from"], "the caller")
+        url, body = sent[0]
+        self.assertTrue(url.endswith("/chat/completions"))
+        self.assertEqual(len(body["messages"]), 1)
+        parts = body["messages"][0]["content"]
+        self.assertEqual([p["type"] for p in parts],
+                         ["text", "image_url", "image_url"])
+        self.assertIn("build the scene", parts[0]["text"])
+        self.assertIn("enlarged crop", parts[0]["text"])
+        self.assertNotIn("min_p", body)             # remote_body ran
+        stored = crow_core.goal_load()["steps"][1]["judge"]
+        self.assertEqual(stored["min"], 2)
+        self.assertEqual(stored["model"], "openrouter/v/eyes")
+
+    def test_a_dead_spot_falls_through_and_a_blind_local_server_refuses(self):
+        self.capture()
+        calls = []
+
+        def urlopen(request, timeout=None):
+            calls.append(request.full_url)
+            if "example.invalid" in request.full_url:
+                raise urllib.error.HTTPError(
+                    request.full_url, 429, "busy", {},
+                    io.BytesIO(b'{"error": {"message": "rate-limited"}}'))
+            return _JudgeAnswer(_judge_reply({"a": 9, "b": 8}, fence=False))
+        own = dict(crow_core._TURN_SPOT, provider="local", how="own")
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[self.spot("v/eyes"), own]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(crow_core, "refuse_images", return_value=None):
+            out = json.loads(crow_core.tool_judge(criteria="a, b"))
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["passes"])
+        self.assertIn("rate-limited", out["tried_first"][0])
+        self.assertIn("fresh request", out["note"])
+        with mock.patch.object(crow_core, "judge_spots", return_value=[own]), \
+                mock.patch.object(crow_core, "refuse_images",
+                                  return_value="this server cannot see"):
+            out = json.loads(crow_core.tool_judge(criteria="a, b"))
+        self.assertFalse(out["ok"])
+        self.assertIn("cannot see", out["error"])
+
+    def test_judge_is_a_declared_network_tool(self):
+        names = [t["function"]["name"] for t in crow_core.TOOLS]
+        self.assertIn("judge", names)
+        self.assertEqual(crow_core.TOOL_CLASS["judge"], "network")
+        self.assertIs(crow_core.TOOL_IMPL["judge"], crow_core.tool_judge)
+
+
+class TheRenderLoopIsCountedTests(unittest.TestCase):
+    """#268. What makes a capture "stuck": a blank verdict, a decoded frame
+    at 98 % one colour or more, or near-identical metrics of the same page."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-loop-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def black_png(self, name, size=8):
+        import zlib
+        raw = b"".join(b"\x00" + b"\x00\x00\x00" * size for _ in range(size))
+
+        def chunk(kind, body):
+            return (len(body).to_bytes(4, "big") + kind + body
+                    + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+        head = size.to_bytes(4, "big") * 2 + bytes([8, 2, 0, 0, 0])
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                     + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+        return path
+
+    def result(self, path, size=18244, metrics=""):
+        return ("%s -- %d bytes, 1280x720, done, software (swiftshader)\n"
+                "%sread_image it to look at the page." % (path, size, metrics))
+
+    def test_a_decoded_black_frame_is_stuck_without_any_warning(self):
+        """The 22:30 frames were 99.2-99.4 % one colour: under #213's 99.9 %
+        blank line, so no warning -- the decoded share still says it."""
+        sig = crow_core.render_signature(self.result(self.black_png("a.png")),
+                                         "chain.html")
+        self.assertEqual(sig["blank"], "100.0 % one colour")
+
+    def test_a_failed_render_is_not_a_capture(self):
+        self.assertIsNone(crow_core.render_signature(
+            "error: the browser wrote no screenshot (timed out)", "x.html"))
+
+    def test_metrics_decide_when_both_captures_have_them(self):
+        m1 = ("metrics: content box x 530-760, y 220-510 of 1280x720 -- "
+              "coverage 7.2 %% (~65 of the frame's ~895 visual tokens)\n"
+              "metrics: 1480 distinct colours in 9216 sampled px; luma mean "
+              "14/255; luma histogram (8 bins of 32, %%): 93 4 2 1 0 0 0 0\n")
+        m2 = m1.replace("1480 distinct", "1502 distinct")
+        m3 = m1.replace("coverage 7.2", "coverage 61.0")
+        a = crow_core.render_signature(self.result("/x/r1.png", 700000, m1 % ()), "i.html")
+        b = crow_core.render_signature(self.result("/x/r2.png", 400000, m2 % ()), "i.html")
+        c = crow_core.render_signature(self.result("/x/r3.png", 700000, m3 % ()), "i.html")
+        self.assertTrue(crow_core.render_same(a, b), "size differs, metrics agree")
+        self.assertEqual(a["metrics"][:2], [530.0, 760.0], "a range, not a sign")
+        self.assertFalse(crow_core.render_same(a, c))
+        other = dict(b, target="other.html")
+        self.assertFalse(crow_core.render_same(a, other), "another page")
+
+    def test_without_metrics_size_decides(self):
+        a = crow_core.render_signature(self.result("/x/r1.png", 424358), "v.html")
+        b = crow_core.render_signature(self.result("/x/r2.png", 424369), "v.html")
+        c = crow_core.render_signature(self.result("/x/r3.png", 451481), "v.html")
+        self.assertTrue(crow_core.render_same(a, b))
+        self.assertFalse(crow_core.render_same(b, c))
+
+    def test_due_nudges_at_three_rolls_once_at_six(self):
+        state = {"current": "p", "rolls": 0,
+                 "targets": {"p": {"streak": 3, "said": 0, "tried": ["x"]}}}
+        self.assertEqual(crow_core.goal_render_due(state), "nudge")
+        self.assertIsNone(crow_core.goal_render_due(state))
+        state["targets"]["p"]["streak"] = 6
+        self.assertEqual(crow_core.goal_render_due(state), "roll")
+        state["targets"]["p"].update(streak=6, said=0)
+        self.assertEqual(crow_core.goal_render_due(state), "nudge",
+                         "one roll per step, then the nudge")
+        text = crow_core.goal_render_nudge(4, state, rolled=True)
+        self.assertTrue(text.startswith(crow_core.GOAL_NUDGE_MARK))
+        self.assertIn("- x", text)
+        self.assertIn("bisect", text)
+
+
+class AVisualStepNeedsAPictureTests(unittest.TestCase):
+    """#267. 2026-09-23: 9/9 `done`, every note "verified on
+    screen", over a small purple box in a black frame. A visual step's
+    `done` must cite a capture made during this goal, and a judge's lowest
+    score, when there is one, must reach the bar."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-visual-"))
+        self.state = tempfile.mkdtemp(prefix="crow-visual-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        self.addCleanup(crow_core.judge_threshold_set, None)
+        crow_core.goal_command("Neon night market voxel diorama | Think and "
+                               "plan: read this file, write PLAN.md | Build "
+                               "geometry and camera | Verify offline")
+
+    def step(self, n, status, note=""):
+        return json.loads(crow_core.tool_goal_step(n, status, note))
+
+    def capture(self, name="render-20260924-101010.png", age=0.0):
+        path = os.path.join(crow_core._render_dir(), name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG")
+        if age:
+            then = time.time() - age
+            os.utime(path, (then, then))
+        return path
+
+    def test_a_visual_step_without_a_capture_is_refused(self):
+        out = self.step(2, "done", "Verified on screen: the composed frame "
+                                   "shows the diorama through the full chain")
+        self.assertFalse(out["ok"])
+        self.assertIn("cites no capture", out["error"])
+        self.assertIn("judge", out["error"])
+        self.assertIn(".crow/renders/render-", out["error"])
+        self.assertNotEqual(crow_core.goal_load()["steps"][1]["status"], "done")
+
+    def test_a_capture_from_this_goal_passes_by_path_or_by_name(self):
+        path = self.capture()
+        self.assertTrue(self.step(2, "done", "see %s" % path)["ok"])
+        self.capture("render-20260924-111111.png")
+        self.assertTrue(self.step(3, "done", "render-20260924-111111.png "
+                                             "shows it")["ok"])
+
+    def test_a_capture_older_than_the_goal_proves_nothing(self):
+        self.capture(age=3600)
+        out = self.step(2, "done", "render-20260924-101010.png shows it")
+        self.assertFalse(out["ok"])
+        self.assertIn("cites no capture", out["error"])
+
+    def test_a_planning_step_needs_no_picture(self):
+        self.assertTrue(self.step(1, "done", "PLAN.md written")["ok"])
+
+    def test_a_non_visual_goal_is_unchanged(self):
+        """NEGATIVE: a parser is not asked for a screenshot."""
+        crow_core.goal_command("tokenizer | build it | test it")
+        self.assertTrue(self.step(1, "done", "12 of 12 tests pass")["ok"])
+
+    def test_the_visual_flag_overrides_the_guess(self):
+        with open(crow_core.goal_path(), encoding="utf-8") as fh:
+            raw = json.load(fh)
+        raw["goal"]["visual"] = False
+        with open(crow_core.goal_path(), "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+        self.assertTrue(self.step(2, "done", "built")["ok"])
+
+    def judged(self, index, low):
+        goal = crow_core.goal_load()
+        goal["steps"][index]["judge"] = {
+            "model": "vision-x", "min": low,
+            "scores": {"detail density": low, "lighting mood": 9},
+            "weakest": ["the scene fills 7 % of the frame", "black ground",
+                        "no neon"]}
+        crow_core.goal_write(goal)
+
+    def test_a_judge_score_under_the_bar_refuses(self):
+        path = self.capture()
+        self.judged(1, 3)
+        out = self.step(2, "done", "see %s" % path)
+        self.assertFalse(out["ok"])
+        self.assertIn("under the bar of 8", out["error"])
+        self.assertIn("detail density 3", out["error"])
+        self.assertIn("fills 7 %", out["error"])
+
+    def test_a_judge_score_at_the_bar_passes_and_the_bar_moves(self):
+        path = self.capture()
+        self.judged(1, 7)
+        self.assertFalse(self.step(2, "done", "see %s" % path)["ok"])
+        crow_core.judge_threshold_set(7)
+        self.assertTrue(self.step(2, "done", "see %s" % path)["ok"])
+
+    def test_the_threshold_setter_takes_no_nonsense(self):
+        crow_core.judge_threshold_set("x")
+        self.assertEqual(crow_core.JUDGE_THRESHOLD, 8)
+        crow_core.judge_threshold_set(42)
+        self.assertEqual(crow_core.JUDGE_THRESHOLD, 10)
+
+    def test_the_nudge_says_the_rule_on_a_visual_step_only(self):
+        goal = crow_core.goal_load()
+        self.assertIn("judge", crow_core.goal_nudge_evidence(goal, 1))
+        self.assertEqual(crow_core.goal_nudge_evidence(goal, 0), "")
 
 
 class TheGoalOutlivesEverythingTests(unittest.TestCase):

@@ -138,7 +138,7 @@ Everything below is in the screenshot at the top of this page.
 
 | | |
 |---|---|
-| [**Tools**](docs/reference/tools.md) | 27 built in, plus every MCP server you add |
+| [**Tools**](docs/reference/tools.md) | 28 built in, plus every MCP server you add |
 | [**Memory**](docs/user-guide/memory.md) | two plain-text stores, per project and per person, written only after you approve |
 | [**Skills**](docs/user-guide/skills.md) | procedures the model keeps and rewrites; name and description in the prompt, body on request |
 | [**Goals**](docs/user-guide/goals-and-subagents.md) | a plan in the pinned head, the state in a file — it survives a rollover and a restart |
@@ -153,7 +153,7 @@ Everything below is in the screenshot at the top of this page.
 
 ## Tools
 
-27 built in. `/tools` lists them in either surface; the full reference is
+28 built in. `/tools` lists them in either surface; the full reference is
 [docs/reference/tools.md](docs/reference/tools.md).
 
 | group | |
@@ -163,7 +163,7 @@ Everything below is in the screenshot at the top of this page.
 | **Git** | `git_status` · `git_diff` · `git_log` · `git_commit` (stages exactly the paths given) · `git_push` · `github_connect` over the OAuth device flow |
 | **Web** | `web_search` — answer from what you read, a list of links is not an answer · `fetch_url` one page as readable text |
 | **Browser** | `render_page` opens a page in a browser Crow owns and brings back a screenshot plus the console |
-| **Vision** | `read_image` — check your own work when a step says it has to look right |
+| **Vision** | `read_image` — check your own work when a step says it has to look right · `judge` — a separate model that never saw the conversation scores the capture against the rubric (#266) |
 | **Memory** | `memory` add, replace, remove · `skill` read, save, remove · `session_search` over months of archives |
 | **Goals** | `goal_set` writes the plan · `goal_step` moves one step, and costs no prefill. A `done` whose note says it is not done is refused, and a `check:` you set must pass before the goal closes |
 | **Subagents** | `delegate` hands a task out · `subtasks` where they stand · `collect` waits and returns |
