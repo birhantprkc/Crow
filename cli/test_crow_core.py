@@ -14163,6 +14163,12 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
     das Werkzeug bis zum Browserstart; der Browser ist ein Stellvertreter, der
     die Adresse aus argv aufschreibt und ein Bild ablegt."""
 
+
+    def _browser_url(self):
+        # #271 queries nvidia-smi after a software render, so the browser is
+        # not always the last child: take the last argv that opens a page.
+        urls = [a[-1] for a in self.argv if a and str(a[-1]).startswith("file:")]
+        return urls[-1] if urls else None
     def setUp(self) -> None:
         self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-q272-"))
         self.page = os.path.join(self.dir, "index.html")
@@ -14205,13 +14211,13 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
     def test_the_query_reaches_the_browser(self):
         said = self._render("index.html?shot=default&w=960")
         self.assertFalse(said.startswith("error"), said)
-        self.assertEqual(self.argv[-1][-1],
+        self.assertEqual(self._browser_url(),
                          Path(self.page).as_uri() + "?shot=default&w=960")
 
     def test_the_fragment_reaches_the_browser(self):
         said = self._render("index.html#stall")
         self.assertFalse(said.startswith("error"), said)
-        self.assertEqual(self.argv[-1][-1], Path(self.page).as_uri() + "#stall")
+        self.assertEqual(self._browser_url(), Path(self.page).as_uri() + "#stall")
 
     def test_a_missing_file_is_still_no_such_page_and_names_the_file(self):
         said = self._render("gone.html?shot=default")
@@ -14228,8 +14234,8 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
             fh.write("<p>odd")
         said = self._render("odd?x.html")
         self.assertFalse(said.startswith("error"), said)
-        self.assertEqual(self.argv[-1][-1], Path(odd).as_uri())
-        self.assertTrue(self.argv[-1][-1].endswith("odd%3Fx.html"))
+        self.assertEqual(self._browser_url(), Path(odd).as_uri())
+        self.assertTrue(self._browser_url().endswith("odd%3Fx.html"))
 
     def test_different_queries_are_different_captures(self):
         """#175-Nachtrag: byte-gleich gegen DIESELBE Adresse ist ein Verdacht;
