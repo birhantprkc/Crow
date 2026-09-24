@@ -10784,9 +10784,17 @@ class Api:
         client = _client()
         if client != DESKTOP:
             items = self.state_snapshot(client)
-            with self._route_lock:
-                for message in items:
-                    self._push_to(message, (client,))
+            # DELIVERED, NOT PUSHED (robin's iPhone, 2026-09-24: one "no
+            # folder" note became 32 in session.json and 15+ rows on the
+            # phone). The snapshot is a copy of state that is already
+            # recorded; through `push` every note in it was appended to
+            # `_notes` again (and its cost line stamped on the live chat), so
+            # each phone page load doubled the band.
+            remote = self._remote
+            if remote is not None:
+                with self._route_lock:
+                    for message in items:
+                        remote.publish(message, to=[client])
             self._remote_state_push()
             return
         self._page_loads += 1

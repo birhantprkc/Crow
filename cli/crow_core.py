@@ -2559,6 +2559,11 @@ LOG_ONLY_NOTE_PREFIXES = (
     "mode yolo -- ",                        # the mode line at chat open
     "archived: ",                           # the chat file moved to archiv/
     "the goal goes into the head of every prompt",       # GOAL_COST_NOTE
+    # robin, 2026-09-24 (phone screenshot): the "no folder" line (`clear_root`)
+    # is bookkeeping too; the root chip already says "no folder". The start-up
+    # "the last working directory is gone: … running without one" is a `fail`,
+    # not this note, and stays in the chat.
+    "no working directory -- writes are unbounded",
 )
 # The /goal setup echo ("goal: <title> -- 9 steps, acceptance check: …") is
 # log-only too; the status answer "goal: <title> -- 3/9, 12 min so far" that

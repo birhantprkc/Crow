@@ -13790,6 +13790,35 @@ class RemoteMirrorTests(RemoteCase):
         self.assertEqual(len(self.drained(api)), 1)
         self.assertEqual(len(api._remote.got()), 1)
 
+    def test_the_no_folder_note_goes_to_the_log_not_the_chat(self):
+        """robin, 2026-09-24 (phone screenshot): "no working directory --
+        writes are unbounded" is for crow.log. Live, from the phone, it
+        reaches neither view nor the notes band; a chat saved by an earlier
+        build that still carries it does not draw it on replay either."""
+        text = "no working directory -- writes are unbounded"
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        self.addCleanup(setattr, crow_core, "ROOTS_FILE", crow_core.ROOTS_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+        crow_core.ROOTS_FILE = os.path.join(logs, "roots.json")
+        api = self.mirrored()
+        self.a_chat(api)
+        self.as_phone(api.clear_root)
+        for got in (self.drained(api), api._remote.got()):
+            self.assertNotIn(text, [m.get("t") for m in got
+                                    if m.get("k") == "note"])
+        self.assertEqual(api._notes, [], "saved with the chat")
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("[note] " + text, fh.read())
+        # THE OLD BAND: 32 copies in robin's session.json. Replay draws none.
+        old = [{"k": "note", "at": 1, "t": text}] * 32
+        api._remote.published.clear()
+        api._replay(api._conversation.payload(), old)
+        self.assertNotIn(text, [m.get("t") for m in self.drained(api)])
+        self.assertNotIn(text, [m.get("t") for m in api._remote.got()])
+        self.assertEqual(crow_core.clean_notes(old), [])
+
     # -- the snapshot and the late joiner -----------------------------------
     def test_ready_from_a_phone_answers_the_phone_only(self):
         api = self.mirrored()
@@ -13806,6 +13835,27 @@ class RemoteMirrorTests(RemoteCase):
         self.assertIn("what the phone must see",
                       [m.get("t") for m in got if m.get("k") == "user"])
         self.assertEqual(api._page_loads, 0, "a phone counted as a page load")
+
+    def test_a_phone_reload_does_not_record_the_notes_again(self):
+        """robin's iPhone, 2026-09-24: ONE "no folder" note became 32 in
+        session.json (1 at at=1, 31 at at=5) and 15+ rows in the phone's chat.
+        `clear_root` ran once; every phone page load (`ready`) delivered its
+        snapshot through `push`, which records each note in `_notes` again --
+        1 -> 2 -> 4 -> ... -> 32 after five loads. A delivered snapshot is a
+        copy of what is already recorded, never a new note."""
+        api = self.mirrored()
+        self.a_chat(api)
+        api.push({"k": "note", "t": "an ordinary note"})
+        self.assertEqual(len(api._notes), 1)
+        for _ in range(5):
+            api._remote.published.clear()
+            self.as_phone(api.ready)
+            shown = [m for m in api._remote.got()
+                     if m.get("k") == "note" and m.get("t") == "an ordinary note"]
+            self.assertEqual(len(shown), 1, "the phone drew the note %d times"
+                             % len(shown))
+        self.assertEqual(len(api._notes), 1,
+                         "a phone reload recorded the notes again")
 
     def test_the_snapshot_carries_an_open_question_and_the_queued_line(self):
         api = self.mirrored()
