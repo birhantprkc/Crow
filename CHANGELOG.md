@@ -26,6 +26,7 @@ Tickets open until robin's live check unless marked closed.
 
 ### Changed
 
+- **Comments on `presence_penalty`** (nibor1896/crow-nest#111): `SAMPLING_FIELDS` and `stream_reply` no longer say crow-nest reads an absent field as 1.5; that is 0 since crow-nest #91 (`56e0297`), and #111 does not fill it from the model card. No behaviour change: Crow sends 0.0 explicitly.
 - **A line typed during a turn is queued, not a stop** (#264, `d14046f`); in goal mode it goes before the goal nudge.
 - **Rollover archives leave the chat rail** (#261, `d1044f7`) for the archive drawer; a Crow note is never a chat title.
 - **goal_set carries the whole step record** (#260, `b165ffa`): notes, seconds and tokens of a re-declared step survive.

@@ -907,11 +907,14 @@ def reasoning_change_rerenders(current: str | None, wanted: str | None,
 # send, and a manifest is data, not a licence to widen the request body.
 #
 # `presence_penalty` IS THE FIFTH (2026-09-18), AND IT IS HERE BECAUSE ITS ABSENCE
-# WAS A VALUE. crow-nest's `serve` fills an absent field with its data sheet's
-# NON-THINKING row, 1.5, applied over every token of the answer -- while
-# llama-server reads an absent field as 0.0. So the same client ran the same
-# model under two samplers and nobody had chosen either: the rule MIN_P already
-# states, met from the other side. It travels exactly like top_k: absent unless
+# WAS A VALUE. On 2026-09-18 crow-nest's `serve` filled an absent field with its
+# data sheet's NON-THINKING row, 1.5, applied over every token of the answer --
+# while llama-server reads an absent field as 0.0. So the same client ran the
+# same model under two samplers and nobody had chosen either: the rule MIN_P
+# already states, met from the other side. crow-nest has since changed its
+# default (#91, 56e0297: absent = 0; #111 fills temperature/top_p/top_k/min_p
+# from the model card's row, presence_penalty not), and a server default can
+# change again: the field stays, and Crow sends its 0.0 explicitly. It travels exactly like top_k: absent unless
 # the model's manifest entry names it, so no request that exists today changes.
 SAMPLING_FIELDS = ("temperature", "top_p", "min_p", "top_k", "presence_penalty")
 
@@ -6692,8 +6695,9 @@ def stream_reply(
         body["top_k"] = top_k
     if presence_penalty is not None:
         # ABSENT BY DEFAULT, LIKE top_k, AND SENT FOR THE OPPOSITE REASON: not to
-        # add a penalty but to stop a server adding its own. crow-nest reads an
-        # absent field as 1.5 over the whole answer, llama-server as 0.0 -- see
+        # add a penalty but to stop a server adding its own. crow-nest read an
+        # absent field as 1.5 over the whole answer until #91 (56e0297; 0 since,
+        # not taken from the model card by #111), llama-server reads 0.0 -- see
         # SAMPLING_FIELDS. 0.0 IS A VALUE and must travel, hence `is not None`.
         body["presence_penalty"] = presence_penalty
     # #225: a fixed point is sent its word on every request.
