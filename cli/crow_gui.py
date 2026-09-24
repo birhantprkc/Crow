@@ -8425,7 +8425,8 @@ body:not([data-git="shut"]) #panels{z-index:95}   /* out of #panels' stacking co
 #goalpanel.shut .gm{max-width:5.2em;overflow:hidden}     /* "2/5 · …" -> "2/5" */
 #goalpanel.shut .gh .st:empty{display:none}
 #subpanel{border-radius:12px}
-#subpanel .sph{min-height:var(--tap);padding:0 0 0 5px}
+#subpanel .sph{min-height:var(--tap);padding:0 0 0 5px;
+  margin-right:-10px}     /* over #subpanel's 10 px: its X lines up with the goal's */
 #subpanel.shut{max-height:var(--tap)}
 
 /* ---- composer (robin, 2026-09-24): ONE row, like iMessage ----------------

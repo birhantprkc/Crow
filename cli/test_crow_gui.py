@@ -13661,6 +13661,8 @@ console.log(JSON.stringify(out));
         # ...and the goal bar moves below the pill while the header is out
         self.assertIn("body.m-auto:is(.m-hid,.m-rev) #panels{padding-top:40px}",
                       crow_gui.REMOTE_CSS)
+        # robin: the subtasks card's X sits under the goal's X (#subpanel pads 10 px)
+        self.assertIn("margin-right:-10px}", crow_gui.REMOTE_CSS)
         for kind, passive in out["touch"]:
             self.assertNotEqual(kind, "touchmove")
             self.assertTrue(passive, kind)
