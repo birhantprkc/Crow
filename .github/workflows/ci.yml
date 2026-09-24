@@ -61,10 +61,10 @@ jobs:
             # `ruff check .` below cannot walk into the interpreter it is run by.
             python3 -m venv --system-site-packages .venv
             PY="$PWD/.venv/bin/python"
-            echo "SUITES=test_crow_core test_crow test_crow_gui" >> "$GITHUB_ENV"
+            echo "SUITES=test_crow_core test_crow test_crow_gui test_crow_remote" >> "$GITHUB_ENV"
           else
             PY=python
-            echo "SUITES=test_crow_core test_crow" >> "$GITHUB_ENV"
+            echo "SUITES=test_crow_core test_crow test_crow_remote" >> "$GITHUB_ENV"
           fi
           echo "PY=$PY" >> "$GITHUB_ENV"
           "$PY" -m pip install --quiet --upgrade pip

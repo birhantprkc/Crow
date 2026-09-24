@@ -1327,3 +1327,109 @@ def updater_command(script: str, install: str | None = None) -> list[str]:
         return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-File", script, "-NoPause"]
     return ["bash", script]
+
+
+# ------------------------------------------------------------ the LAN (#249) ---
+
+# Interfaces that are never "the home network": container bridges, VPN
+# tunnels, VM host-only nets. /remote binds ONE address, and binding one of
+# these would either be unreachable from the phone or reachable from further
+# away than the home Wi-Fi -- tailscale* is the second kind, and the ticket
+# rules out access from outside the LAN.
+_LAN_SKIP = ("lo", "docker", "veth", "br-", "tun", "tap", "tailscale", "vbox",
+             "virbr", "wg", "zt", "vmnet", "lxc", "lxd", "podman", "cni", "flannel")
+
+
+def _rfc1918(ip: str) -> bool:
+    import ipaddress
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return False
+    return any(addr in ipaddress.IPv4Network(n)
+               for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def _parse_ip_json(text: str) -> list[tuple[str, str]]:
+    """`ip -j -4 addr` output -> [(interface, IPv4)], every address, unfiltered."""
+    import json
+    try:
+        links = json.loads(text or "[]")
+    except ValueError:
+        return []
+    out = []
+    for link in links if isinstance(links, list) else []:
+        name = link.get("ifname") or ""
+        for a in link.get("addr_info") or []:
+            if a.get("family") == "inet" and a.get("local"):
+                out.append((name, a["local"]))
+    return out
+
+
+def _ioctl_addresses() -> list[tuple[str, str]]:
+    """The same list without iproute2: SIOCGIFADDR per interface, stdlib only.
+
+    One address per interface (the primary), which is all a home machine has.
+    """
+    import fcntl
+    import socket
+    import struct
+    out = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        for _, name in socket.if_nameindex():
+            try:
+                raw = fcntl.ioctl(s.fileno(), 0x8915,            # SIOCGIFADDR
+                                  struct.pack("256s", name.encode()[:15]))
+            except OSError:
+                continue                                         # no IPv4 on it
+            out.append((name, socket.inet_ntoa(raw[20:24])))
+    return out
+
+
+def lan_addresses(query=None, sys_net: str = "/sys/class/net") -> list[tuple[str, str]]:
+    """(interface, IPv4) pairs /remote may bind, best candidate first.
+
+    WHERE, NOT WHETHER: this lists and orders, the caller picks (the dialog
+    can switch). Loopback, link-local and the _LAN_SKIP families are dropped;
+    what remains is ordered RFC1918 before anything else, then physical
+    (/sys/class/net/<if>/device exists -- a real NIC or Wi-Fi card) before
+    virtual, then by name, so a home machine's Wi-Fi or Ethernet address is
+    first.
+
+    LINUX asks iproute2 (`ip -j -4 addr`, present on every distribution this
+    runs on) and falls back to an ioctl per interface. `query` replaces the
+    `ip` call for the tests. WINDOWS is stage 3: a best effort through the
+    host name's addresses, with no interface names.
+    """
+    if IS_WINDOWS:
+        import socket
+        try:
+            found = [("", info[4][0]) for info in
+                     socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)]
+        except OSError:
+            found = []
+    else:
+        try:
+            text = query() if query else _run_query(["ip", "-j", "-4", "addr"])
+        except Exception:                  # noqa: BLE001 - the fallback answers
+            text = None
+        found = _parse_ip_json(text) if text else []
+        if not found and query is None:
+            try:
+                found = _ioctl_addresses()
+            except Exception:              # noqa: BLE001 - no LAN is an answer, not a crash
+                found = []
+    seen, out = set(), []
+    for name, ip in found:
+        if (name, ip) in seen or ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        if name and name.startswith(_LAN_SKIP):
+            continue
+        seen.add((name, ip))
+        out.append((name, ip))
+
+    def physical(name: str) -> bool:
+        return bool(name) and os.path.exists(os.path.join(sys_net, name, "device"))
+
+    out.sort(key=lambda p: (not _rfc1918(p[1]), not physical(p[0]), p[0], p[1]))
+    return out
