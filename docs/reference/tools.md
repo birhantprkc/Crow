@@ -143,6 +143,22 @@ as the entry and an `.html` out built just as clean and rendered one colour: the
 `boot(canvas, opts)` and needs `<canvas id="c">`, and that page has neither — the trap the
 warning above names (0.13 s with the exports probe, `exports: boot`).
 
+### `read_file` (#301)
+
+`read_file(path, start_line?, end_line?)` — UTF-8 text, whole or a line range, capped at 16,000 characters.
+
+| | |
+|---|---|
+| binary (#301) | the first 8,000 bytes are sniffed before either branch reads: a NUL byte (git's `buffer_is_binary` rule), or a PNG / JPEG / GIF / WebP / BMP / `%PDF-` signature, is a refusal, whatever the extension. No ratio heuristic, so multi-byte UTF-8 split at the edge stays text |
+| image | `error: <path> is a PNG image (543x768, 502,797 bytes) -- read_file returns text only; use read_image to see it` (size for PNG and GIF); a name `read_image` does not accept adds `copy it to a .png name first` |
+| PDF | `… is a PDF document (N bytes) -- …; get its text with run_command (pdftotext <file> - \| head -200)` |
+| other binary | `… is a binary file (N bytes, NUL bytes in its first 8,000) -- …; inspect it with run_command (file <file>; xxd <file> \| head)` |
+| not marked read | a refused file is not recorded for the read-before-write rule (#215) |
+
+Measured before the fix (2026-09-25 lighthouse run, session msg 8): `read_file reference/island.png` returned
+16,056 characters (~5,946 tokens) of the PNG decoded as UTF-8; the model then saved "read_image returns raw bytes"
+into `.crow/MEMORY.md`.
+
 ### `read_image` (#170)
 
 `read_image(path)` — the model's own way to a picture; `/image`, drop and Ctrl+V are the
@@ -157,6 +173,7 @@ user's.
 | no projector | `refuse_images` checks `/props` before the block is attached; without `--mmproj` the sentence comes back instead of an image (a picture to a blind server is HTTP 500, not a recoverable tool error) |
 | size | none of its own — the server caps at `--image-max-tokens` (4,096) |
 | small scene (#265) | a PNG whose content sits on a near-uniform background and covers under 50 % of the frame gets a **second** block: the content box plus a margin, nearest-neighbour enlarged to a 1024-px long edge (≤ 4×, ≤ ~1,024 visual tokens). The frame stays first and unchanged; the text says `TWO images`, the coverage (`the content fills 8 % of the 1280x720 frame`), the crop box and the scale |
+| missing crop (#301) | `read_image <stamp>-crop.png` when only `<stamp>.png` exists: `error: no such image: … -- render_page writes a -crop.png only when the content covers under 50 % of the frame (its result then has a 'metrics: crop' line); this capture has none: read_image <frame>` |
 
 How the content box is found: 16-px cells, each cell's mean colour against the per-channel
 median of the outer ring of cells (the ring must be ≥ 60 % ground, else no claim); a cell off

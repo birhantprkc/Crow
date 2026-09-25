@@ -15773,6 +15773,112 @@ class ASmallSceneGetsAnEnlargedSecondViewTests(unittest.TestCase):
                         src.index('"read_image it to look at the page."'))
 
 
+class ReadFileRefusesBinaryTests(unittest.TestCase):
+    """#301. read_file handed a PNG back as 16,000 characters of mojibake: the
+    2026-09-25 lighthouse run read reference/island.png that way, blamed
+    read_image ("comes back as RAW BYTES") and saved that into MEMORY.md.
+    A binary file is now refused by its content, and the line names the tool
+    that can open it."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-bin-")
+        crow_core.take_image_ride()
+
+    def tearDown(self) -> None:
+        crow_core.take_image_ride()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, name: str, data: bytes) -> str:
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return path
+
+    def png(self, name="island.png", width=54, height=76) -> str:
+        data = ASmallSceneGetsAnEnlargedSecondViewTests._png(
+            width, height, lambda x, y: (x * 4 % 256, y * 3 % 256, 90))
+        return self.write(name, data)
+
+    def test_a_png_is_refused_with_its_size_and_read_image_named(self):
+        path = self.png()
+        out = crow_core.tool_read_file(path)
+        self.assertTrue(out.startswith("error: %s is a PNG image (54x76, "
+                                       % path), out)
+        self.assertIn("{:,} bytes".format(os.path.getsize(path)), out)
+        self.assertIn("read_file returns text only; use read_image to see it",
+                      out)
+        self.assertNotIn("\ufffd", out)
+        self.assertLess(len(out), 300)
+
+    def test_the_line_range_branch_refuses_too(self):
+        out = crow_core.tool_read_file(self.png(), start_line=1, end_line=5)
+        self.assertIn("is a PNG image", out)
+        self.assertNotIn("1: ", out)
+
+    def test_content_decides_not_the_extension(self):
+        out = crow_core.tool_read_file(self.png("island.dat"))
+        self.assertIn("is a PNG image", out)
+        self.assertIn("copy it to a .png name first", out)
+
+    def test_a_jpeg_header_is_an_image(self):
+        path = self.write("photo.jpg", b"\xff\xd8\xff\xe0\x00\x10JFIF\x00"
+                          + b"\x11" * 200)
+        out = crow_core.tool_read_file(path)
+        self.assertIn("is a JPEG image (", out)
+        self.assertIn("use read_image", out)
+
+    def test_a_pdf_names_pdftotext(self):
+        path = self.write("doc.pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n")
+        out = crow_core.tool_read_file(path)
+        self.assertIn("is a PDF document (", out)
+        self.assertIn("pdftotext", out)
+
+    def test_a_nul_in_the_first_8000_bytes_is_binary(self):
+        path = self.write("blob.bin", b"a" * 7000 + b"\x00" + b"b" * 100)
+        out = crow_core.tool_read_file(path)
+        self.assertIn("is a binary file (7,101 bytes, NUL bytes in its first "
+                      "8,000)", out)
+        self.assertIn("run_command", out)
+
+    def test_text_reads_as_before_even_split_utf8_at_the_edge(self):
+        """NEGATIVE PROBE (OpenHands#5038): a multi-byte character across the
+        sniff boundary, an ASCII 'GIF89a' opening and a NUL after the first
+        8,000 bytes are all still text."""
+        body = "x" * 7999 + "\u00e4\u00f6\u00fc gr\u00fc\u00dfe\n"
+        path = self.write("umlaut.md", body.encode("utf-8"))
+        self.assertEqual(crow_core.tool_read_file(path), body)
+        path = self.write("gif.txt", b"GIF89a is a header, not this file\n")
+        self.assertEqual(crow_core.tool_read_file(path),
+                         "GIF89a is a header, not this file\n")
+        path = self.write("late.txt", b"y" * 8000 + b"\x00")
+        self.assertTrue(crow_core.tool_read_file(path).startswith("yyy"))
+
+    def test_missing_files_and_directories_answer_as_before(self):
+        out = crow_core.tool_read_file(os.path.join(self.dir, "nope.txt"))
+        self.assertTrue(out.startswith("error: no such file:"), out)
+        self.assertIn("is a directory -- use list_dir",
+                      crow_core.tool_read_file(self.dir))
+
+    def test_the_declaration_says_read_image(self):
+        desc = next(t["function"]["description"] for t in crow_core.TOOLS
+                    if t["function"]["name"] == "read_file")
+        self.assertIn("binary file is refused", desc)
+        self.assertIn("read_image", desc)
+
+    def test_a_missing_crop_names_the_rule_and_the_frame(self):
+        """#301: the model asked twice for a -crop.png of a capture that
+        covered 68.6 %; the bare 'no such image' did not say why."""
+        frame = self.png("render-20260925-142722.png")
+        crop = frame[:-4] + "-crop.png"
+        out = crow_core.tool_read_image(crop)
+        self.assertIn("error: no such image: %s" % crop, out)
+        self.assertIn("only when the content covers under 50 %", out)
+        self.assertIn("read_image %s" % frame, out)
+        lone = os.path.join(self.dir, "render-1-crop.png")
+        self.assertEqual(crow_core.tool_read_image(lone),
+                         "error: no such image: %s" % lone)
+
+
 class ATurnsBillOutlivesTheCutTests(unittest.TestCase):
     """#171. Die Timing-Zeile war reine Bildschirmausgabe.
 

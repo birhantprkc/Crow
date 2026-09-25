@@ -940,7 +940,8 @@ TOOLS = [
     _fn("read_file",
         "Read a UTF-8 text file. Give start_line and end_line for a range -- everything "
         "read costs prefill time, so read the part you need, not the whole file. "
-        "search_text returns line numbers for exactly this.",
+        "search_text returns line numbers for exactly this. An image or other binary "
+        "file is refused -- look at an image with read_image.",
         {"path": dict(_STR, description="Path to the file."),
          "start_line": {"type": "integer", "description": "First line, 1-based."},
          "end_line": {"type": "integer", "description": "Last line, inclusive."}}, ["path"]),
@@ -11966,6 +11967,15 @@ def tool_read_image(path: str, **_) -> str:
     """
     path = _rooted(path)                            # #177
     if not os.path.isfile(path):
+        # #301: a crop is written only for a small scene; the model asked
+        # twice for one that never existed and got the bare line below.
+        frame = path[:-len("-crop.png")] + ".png"
+        if path.endswith("-crop.png") and os.path.isfile(frame):
+            return ("error: no such image: %s -- render_page writes a "
+                    "-crop.png only when the content covers under %d %% of "
+                    "the frame (its result then has a 'metrics: crop' line); "
+                    "this capture has none: read_image %s"
+                    % (path, round(100 * _CROP_MAX_COVER), frame))
         return "error: no such image: %s" % path
     try:
         if os.path.getsize(path) > IMAGE_MAX_BYTES:
@@ -12011,6 +12021,72 @@ def tool_read_image(path: str, **_) -> str:
     return said
 
 
+# #301. A TEXT READER THAT MEETS BYTES SAYS SO. read_file opened every file as
+# UTF-8 with errors="replace", so a PNG came back as 16,000 characters of
+# mojibake: the 2026-09-25 lighthouse run read reference/island.png that way,
+# concluded "read_image returns raw bytes" and saved it into .crow/MEMORY.md.
+# The rule is git's (xdiff-interface.c buffer_is_binary: a NUL in the first
+# 8,000 bytes) plus magic numbers for what has a better tool. No ratio of
+# "suspicious" bytes: OpenHands' binaryornot sample refused valid UTF-8
+# Chinese text split at its edge (software-agent-sdk#5038).
+_SNIFF_BYTES = 8000
+_BINARY_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "PNG image", ".png"),
+    (b"\xff\xd8\xff", "JPEG image", ".jpg"),
+    (b"GIF87a", "GIF image", ".gif"),
+    (b"GIF89a", "GIF image", ".gif"),
+    (b"%PDF-", "PDF document", None),
+)
+
+
+def _binary_kind(head: bytes) -> "tuple[str, str | None] | None":
+    """#301. (kind, image extension or None) for the first bytes of a file
+    that is not text, None for text. An ASCII magic (GIF, BM, %PDF-) alone is
+    not enough except for PDF: a text file may start with "GIF89a"; a real
+    GIF or BMP has a NUL in its header."""
+    nul = b"\0" in head[:_SNIFF_BYTES]
+    for magic, kind, ext in _BINARY_MAGIC:
+        if head.startswith(magic) and (nul or magic[0] >= 0x80 or ext is None):
+            return kind, ext
+    if nul and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "WebP image", ".webp"
+    if nul and head[:2] == b"BM":
+        return "BMP image", ".bmp"
+    if nul:
+        return "binary file", None
+    return None
+
+
+def _binary_refusal(path: str, head: bytes, size: int) -> "str | None":
+    """#301. The one-line refusal read_file gives a binary file, or None."""
+    found = _binary_kind(head)
+    if found is None:
+        return None
+    import struct
+    kind, ext = found
+    facts = []
+    if kind == "PNG image" and len(head) >= 24 and head[12:16] == b"IHDR":
+        w, h = struct.unpack(">II", head[16:24])
+        facts.append("%dx%d" % (w, h))
+    elif kind == "GIF image" and len(head) >= 10:
+        w, h = struct.unpack("<HH", head[6:10])
+        facts.append("%dx%d" % (w, h))
+    facts.append("{:,} bytes".format(size))
+    if kind == "binary file":
+        facts.append("NUL bytes in its first {:,}".format(_SNIFF_BYTES))
+    said = "error: %s is a %s (%s) -- read_file returns text only; " % (
+        path, kind, ", ".join(facts))
+    if ext is not None:
+        if os.path.splitext(path)[1].lower() in IMAGE_TYPES:
+            return said + "use read_image to see it"
+        return said + ("use read_image to see it -- read_image goes by the "
+                       "name, so copy it to a %s name first" % ext)
+    if kind == "PDF document":
+        return said + ("get its text with run_command "
+                       "(pdftotext <file> - | head -200)")
+    return said + "inspect it with run_command (file <file>; xxd <file> | head)"
+
+
 def tool_read_file(path: str, start_line: int | None = None, end_line: int | None = None,
                    **_) -> str:
     """Read a file, or a range of its lines.
@@ -12023,6 +12099,15 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
     turns that into seconds.
     """
     path = _rooted(path)                            # #177
+    try:                                            # #301: sniff before reading
+        with open(path, "rb") as fh:
+            head = fh.read(_SNIFF_BYTES)
+            size = os.fstat(fh.fileno()).st_size
+    except OSError:
+        head = b""                                  # the reads below say why
+    refusal = _binary_refusal(path, head, size) if head else None
+    if refusal is not None:
+        return refusal
     if start_line is not None or end_line is not None:
         lo = max(1, int(start_line or 1))
         hi = int(end_line) if end_line is not None else lo + 200

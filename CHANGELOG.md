@@ -95,6 +95,15 @@ The reasoning is in the commit and on the issue.
   (window and phone), skipped has its own colour (`--skip`, violet), a dashed ring with a skip glyph and the word
   "skipped". Running keeps amber with a dot. A paused step shows a red pause glyph, and the head reads
   "Paused · step N".
+- **`read_file` refuses images and other binary files, and names `read_image`** (#301, 2026-09-25). A file whose
+  first 8,000 bytes hold a NUL, or that starts with a PNG/JPEG/GIF/WebP/BMP/PDF signature, is detected by its
+  content, not its extension. It gets one line instead of bytes decoded as text: `error: …/island.png is a PNG image
+  (543x768, 502,797 bytes) -- read_file returns text only; use read_image to see it`. A PDF names `pdftotext`, other
+  binaries `file`/`xxd`. Before: the 2026-09-25 lighthouse run got 16,056 characters (~5,946 tokens) of mojibake for
+  `reference/island.png`, blamed `read_image` and saved "read_image returns raw bytes" into `.crow/MEMORY.md`.
+  UTF-8 text reads as before, including a multi-byte character at the 8,000-byte edge. `read_image` on a missing
+  `-crop.png` whose frame exists now says a crop is written only under 50 % coverage and names the frame. Before: a
+  bare `no such image`, twice in the same run. Not measured live.
 
 ## 2.6.0 — 2026-09-24
 
