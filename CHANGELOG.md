@@ -5,6 +5,22 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 2.7.0 — 2026-09-25
+
+**Goal runs stop skipping silently, render_page renders on the GPU only, and voxel dioramas get a path-tracing
+kit.** A failed goal step climbs a classified ladder and then pauses and asks robin; the judge answers a frozen
+yes/no/unknown checklist on clock-stepped frames; a skip is never stored as done (#294–#296). render_page drops the
+SwiftShader fallback, captures up to 4 frames at controlled page time with pixel prechecks, borrows VRAM from an
+idle crow-nest serve around the capture, and lets path-traced kit pages converge for up to 120 s (#293, #297,
+#302). The voxel kit vendors three-gpu-pathtracer with a skill, a scaffold, animation, a photo mode, a props
+registry and a diorama checker, opt-in with `install.sh --pathtracer` / `install.ps1 -PathTracer` (#298, #299,
+#304). Also: `read_file` refuses binary files and names `read_image` (#301), `--root` survives the restored chat
+(#303), and scrollbars show only while used (#305).
+
+Everything on local `main` since 2.6.0 (21d7505): 21 commits, 12 tickets (#293–#299, #301–#305), 2026-09-25.
+Most numbers come from the 2026-09-24/25 diorama and lighthouse goal runs. #300 (image generation beside a live
+session) is not in this release. Tickets are released pending robin's live check.
+
 ### Added
 
 - **Voxel kit: path-traced voxel dioramas as one offline page** (#298, 2026-09-25).
@@ -46,7 +62,6 @@ The reasoning is in the commit and on the issue.
   Before: under serve, 0.07–0.5 GiB free (#271, #293, crow-nest#117) and every capture refused. Tested against a
   fake serve only; not measured live.
 
-
 - **Frozen per-step checklist for the judge, with yes/no/unknown, frames, a precheck and reference images**
   (#295, 2026-09-25). Each visual step gets a checklist when it starts. It comes from `accept:` lines
   (`accept: 5: <item>` binds to step 5), or the model writes it once with `goal_step(n, "running", checklist=[…])`,
@@ -65,6 +80,15 @@ The reasoning is in the commit and on the issue.
 
 ### Changed
 
+- **Voxel kit: live mode path-traces the island; a person's page fills the window** (#299 follow-up, 9e4daa4,
+  2026-09-25). LIVE (the default) now path-traces the static island, which keeps converging while the camera rests,
+  and rasterises only the animated parts (`d.part`) on top, depth-tested against the island. `?mode=raster` (alias
+  `preview`) keeps #299's flat raster preview, and `check_diorama.py` takes its motion and repeat captures there,
+  because the accumulating path tracer would make a still scene "move". A page opened by a person (`ui` not 0)
+  fills the window at `devicePixelRatio` (cap 2) and follows resizes; `ui=0` (Crow's captures, the checker) keeps
+  the fixed `width` × `height` at pixel ratio 1. Before: robin opened the flat raster preview after a 6/6 run and it
+  looked nothing like the photos, and the fixed 1024×1024 canvas at pixel ratio 1 looked pixelated on his scaled
+  1440p screen. Node tests for the mode parser and the checker only; the live mode is not measured on the GPU.
 - **Scrollbars show only while their strip is scrolled or pointed at** (#305, 2026-09-25). Every scroll container in
   the window and the phone mirror — the chat, the per-turn stats line (`[24 rounds | … tok/s | prefill …]`), code
   blocks, tables, the Code/Tool-Calls, git, goal and Subtasks panels, the rail, settings, menus — now draws a
@@ -83,7 +107,6 @@ The reasoning is in the commit and on the issue.
   152 still hands WebGL to SwiftShader under `--disable-gpu`, even without `--enable-unsafe-swiftshader` (measured,
   the smoke above); the renderer check is what caught it. On Windows the renderer cannot be read (no DevTools pipe),
   so it says `unverified`, and `frames` > 1 is refused there.
-
 
 - **render_page lets path-traced kit pages wait up to 120 s** (#302, 2026-09-25). A local page that carries the
   voxel kit's `[crow-pt]` marker gets a `wait_ms` ceiling of 120,000; every other page keeps 20,000 (#213). The
@@ -133,6 +156,27 @@ The reasoning is in the commit and on the issue.
   borrow). Before: on 2026-09-25 ~15:35 the lighthouse goal's `check.sh` failed all 10 checks with the ENVIRONMENT
   error at 280 MiB free while serve held the card, and `crow.log` had no `render:` line for it; render_page inside the
   same turn had borrowed 582 MiB twice minutes earlier. Covered by 3 tests, red without the fix; not verified live.
+
+### Known limitations
+
+- **Agent-built dioramas stay far below the references, and robin did not accept them.** The voxel kit renders
+  reference-grade stills: proven with a hand-built scene (2026-09-25, RTX 5090). In the 2026-09-25
+  lighthouse goal run the agent-built diorama stayed far below robin's reference images: crude props, a flat
+  pond, and a lighthouse beam that read as a windmill. robin did not accept the result.
+- **The diorama gates do not measure visual quality against references.** `check_diorama.py` and the judge's
+  checklist measure the GPU, sample counts, prop counts and kinds, voxels, coverage, motion, repeatability, a
+  near-uniform/near-black precheck and page errors. A page can pass every gate and still look nothing like the
+  reference; `reference:` items are advisory until calibrated, and `--reference` only prints luma/saturation.
+- **Live checks pending for every ticket in this release** (#293–#299, #301–#305): unit tests, node runs, a fake
+  serve and GPU smokes of the scaffold only. The lend (#297, #304) was tested against a fake serve; the path-traced
+  live mode (9e4daa4) and the 120 s wait (#302) were not run on the GPU for this release.
+- **Windows**: render_page cannot read the renderer there (no DevTools pipe), says `unverified` and refuses
+  `frames` > 1 (#293). `install.ps1 -PathTracer`, `install.ps1 -Selftest` and `tools/pack-release.ps1` were not run
+  for this release (no PowerShell on the Linux release machine).
+- `check_gui_prereqs` (not in CI) reports 2 of 3 prerequisites: point (ii), 26 glyph problems over the 2 shipped
+  Google Sans Code faces, unchanged since 2.6.0.
+- Not in this release: #300 (image generation beside a live session: decision open). Still open from 2.5.0: the
+  Windows installer bundle (#196); `sampling_no_thinking`'s presence_penalty 1.5 (#246).
 
 ## 2.6.0 — 2026-09-24
 
