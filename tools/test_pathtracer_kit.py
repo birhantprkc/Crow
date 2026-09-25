@@ -37,6 +37,12 @@ KIT = os.path.join(REPO, "kits", "pathtracer")
 sys.path.insert(0, HERE)
 import check_pathtracer_kit as checker  # noqa: E402
 
+sys.path.insert(0, KIT)
+try:
+    import check_diorama as diorama  # noqa: E402
+except ImportError:                  # the #298 kit has no checker: the cases below go red
+    diorama = None
+
 NODE = shutil.which("node")
 
 HARNESS = r"""
@@ -106,6 +112,32 @@ const bad = [];
 try { new VoxelGrid().put(0, 0, 0, 'red'); } catch (e) { bad.push('colour'); }
 try { new VoxelGrid().put(0, 0, 0, '#ff0000', 'shiny'); } catch (e) { bad.push('kind'); }
 out.refused = bad;
+
+// #299: the props registry, the coverage maths, the mode parser
+if (kit.coverage) {
+  const { coverage, parseMode, propKind } = kit;
+  const p = new VoxelGrid();
+  p.box(0, 0, 0, 3, 0, 3, '#777777');                       // terrain: 4 x 4 columns, top y = 0
+  const crate = p.prop('crate', () => p.box(0, 1, 0, 1, 2, 1, '#aa7744'));
+  const outer = p.prop('lamp post', () => { p.box(3, 1, 3, 3, 4, 3, '#222222'); p.prop('lantern', () => p.put(3, 5, 3, '#ffcc66', 'emit')); });
+  p.prop('bird', () => p.put(2, 9, 0, '#ffffff'));          // high above one column: still covers it
+  p.prop('ghost', () => { p.put(1, 7, 3, '#123456'); p.clear(1, 7, 3, 1, 7, 3); });
+  p.prop('path stone', () => p.put(0, 0, 3, '#999999'));    // set INTO the terrain's top
+  p.prop('dirt', () => p.put(1, 1, 2, '#553311'));
+  p.put(1, 1, 2, '#553311');                                // re-laid outside any prop: terrain now
+  out.crate = crate; out.outer = outer;
+  out.summary = p.propSummary().map((r) => [r.name, r.voxels]);
+  out.cov = coverage(p);
+  const empty = new VoxelGrid(); empty.prop('only', () => empty.put(0, 0, 0, '#ffffff'));
+  out.covEmpty = coverage(empty);
+  out.modes = ['', '?mode=photo&t=2.5', '?mode=foto', '?mode=live&t=4', '?mode=photo&t=-1', '?mode=photo&t=abc',
+               '?mode=PHOTO&ui=0', '?mode=xyz&t=1'].map((q) => parseMode(q));
+  out.kinds = ['Rock 3', 'rock#12', 'rock_7', 'grass tuft 12', 'crate', '42'].map(propKind);
+  const bad = [];
+  try { p.prop('', () => {}); } catch (e) { bad.push('name'); }
+  try { p.prop('x'); } catch (e) { bad.push('fn'); }
+  out.propRefused = bad;
+}
 console.log(JSON.stringify(out));
 """
 
@@ -172,6 +204,167 @@ class VoxelKitTests(unittest.TestCase):
 
     def test_a_colour_that_is_not_hex_and_an_unknown_kind_are_refused(self):
         self.assertEqual(self.out["refused"], ["colour", "kind"])
+
+
+@unittest.skipUnless(NODE, "node is not on PATH")
+class PropsCoverageModeTests(unittest.TestCase):
+    """#299: the props registry, coverage and the URL modes, in node against the
+    real voxel-kit.js. Red on the #298 kit (no g.prop / coverage / parseMode)."""
+
+    @classmethod
+    def setUpClass(cls):
+        VoxelKitTests.setUpClass()
+        cls.out = VoxelKitTests.out
+
+    def test_the_kit_has_the_registry(self):
+        self.assertIn("cov", self.out, "voxel-kit.js exports no coverage() -- the #299 registry is missing")
+
+    def test_a_prop_records_its_voxels_and_bbox(self):
+        self.assertIn("crate", self.out)
+        self.assertEqual(self.out["crate"], {"name": "crate", "voxels": 8,
+                                             "bbox": {"min": [0, 1, 0], "max": [1, 2, 1]}})
+
+    def test_nested_props_count_for_both(self):
+        """The lantern inside the lamp post is its own prop AND part of the post."""
+        self.assertEqual(self.out["outer"]["voxels"], 5)
+        self.assertEqual(self.out["outer"]["bbox"], {"min": [3, 1, 3], "max": [3, 5, 3]})
+
+    def test_a_cleared_or_retaken_cell_leaves_the_prop(self):
+        """'ghost' cleared its own voxel; 'dirt' was re-laid outside any prop and
+        is terrain now; 'path stone' replaced a terrain cell and stays a prop."""
+        self.assertEqual(self.out["summary"], [["crate", 8], ["lantern", 1], ["lamp post", 5], ["bird", 1],
+                                               ["ghost", 0], ["path stone", 1], ["dirt", 0]])
+
+    def test_coverage_counts_columns_with_a_prop_above_the_top_terrain_cell(self):
+        """16 terrain columns. Covered: the crate's 4, the post's 1, the bird's 1.
+        (0,3): the path stone replaced the top cell -- terrain there is gone, the
+        column is not terrain any more. (1,2): 'dirt' re-laid as terrain, top y=1,
+        nothing above -> bare. 6 of 15."""
+        self.assertEqual(self.out["cov"], {"coverage": 6 / 15, "terrainColumns": 15, "coveredColumns": 6})
+
+    def test_coverage_without_terrain_is_none(self):
+        self.assertEqual(self.out["covEmpty"], {"coverage": None, "terrainColumns": 0, "coveredColumns": 0})
+
+    def test_mode_parsing(self):
+        modes = [(m["mode"], m["t"], m["ui"], m["forced"]) for m in self.out["modes"]]
+        self.assertEqual(modes, [("live", 0, True, False), ("photo", 2.5, True, True), ("photo", 0, True, True),
+                                 ("live", 4, True, True), ("photo", 0, True, True), ("photo", 0, True, True),
+                                 ("photo", 0, False, True), ("live", 1, True, False)])
+
+    def test_prop_kinds_drop_trailing_numbers(self):
+        self.assertEqual(self.out["kinds"], ["rock", "rock", "rock", "grass tuft", "crate", "42"])
+
+    def test_a_prop_needs_a_name_and_a_function(self):
+        self.assertEqual(self.out["propRefused"], ["name", "fn"])
+
+
+def _fake_render(mode="gpu", renderer="ANGLE (NVIDIA, Vulkan 1.4.341 (NVIDIA GeForce RTX 5090), NVIDIA)",
+                 probe=None, precheck=None, extra_console=()):
+    """A render_page result as tool_render_page writes it (#293 record line,
+    Chromium's console lines with their `", source:` tail)."""
+    record = {"render_mode": mode, "renderer": renderer, "frames": ["/x/render-1.png"], "contact_sheet": None,
+              "precheck": precheck if precheck is not None else
+              {"uniform": False, "distinct_colours": 30000, "one_colour_pct": 3.1, "dark_pct": 12.0,
+               "clipped_pct": 0.4, "max_frame_diff": None, "identical_frames": None}}
+    lines = ["render: " + json.dumps(record), "/x/render-1.png -- 1000 bytes, 1024x1024, done", "console (last 3):"]
+    lines += ["console: %s" % c for c in extra_console]
+    if probe is not None:
+        lines.append('console: "[crow-pt] samples=10 spp/s=14.5 lost=0 despeckled=3", source: file:///x/index.html (8537)')
+        lines.append('console: "[crow-scene] %s", source: file:///x/index.html?mode=photo&t=2 (8537)' % json.dumps(probe))
+    return "\n".join(lines)
+
+
+GOOD_SCENE = {"voxels": 70000, "triangles": 90000, "props": 45, "propKinds": 14, "propVoxels": 20000,
+              "coverage": 0.62, "terrainColumns": 5000, "parts": 30, "animated": True, "errors": 0,
+              "samples": 290, "samplesPerSecond": 14.5, "renderer": "ANGLE (NVIDIA ...)", "error": None}
+OPTS = {"min_props": 40, "min_voxels": 60000, "min_coverage": 0.5, "min_kinds": 12, "min_samples": 200}
+MOVING = [(0, 1, 1.2), (0, 2, 1.3), (0, 3, 0.9), (1, 2, 1.2), (1, 3, 1.3), (2, 3, 1.1)]
+
+
+class DioramaCheckerTests(unittest.TestCase):
+    """#299: kits/pathtracer/check_diorama.py on fake render results -- the
+    parsing and every verdict, no browser."""
+
+    def setUp(self):
+        self.assertIsNotNone(diorama, "kits/pathtracer/check_diorama.py is missing (#299)")
+
+    def cap(self, mode="live", render_mode="gpu", **kw):
+        probe = dict(GOOD_SCENE, mode=mode, **kw.pop("scene", {}))
+        text = _fake_render(mode=render_mode, probe=probe, **kw)
+        return {"text": text, "record": diorama.parse_record(text), "probe": diorama.parse_probe(text)}
+
+    def verdicts(self, live=None, photo=None, diffs=MOVING, repeat=True, opts=OPTS):
+        live = live or self.cap("live")
+        photo = photo or self.cap("photo")
+        return {name: ok for name, ok, _ in diorama.evaluate(live, photo, opts, diffs=diffs, repeat=repeat)}
+
+    def failed(self, **kw):
+        return sorted(k for k, ok in self.verdicts(**kw).items() if not ok)
+
+    def test_the_record_and_the_probe_are_parsed_from_the_result_text(self):
+        text = _fake_render(probe=dict(GOOD_SCENE, mode="photo", t=2))
+        self.assertEqual(diorama.parse_record(text)["render_mode"], "gpu")
+        probe = diorama.parse_probe(text)
+        self.assertEqual((probe["mode"], probe["t"], probe["props"], probe["coverage"]), ("photo", 2, 45, 0.62))
+        self.assertIsNone(diorama.parse_probe("render: {}\nconsole: [crow-scene] {not json"))
+        self.assertIsNone(diorama.parse_record("error: no such page"))
+
+    def test_the_last_probe_line_wins(self):
+        text = _fake_render(probe=dict(GOOD_SCENE, mode="photo", samples=10))
+        text += '\nconsole: "[crow-scene] %s", source: x (1)' % json.dumps(dict(GOOD_SCENE, mode="photo", samples=300))
+        self.assertEqual(diorama.parse_probe(text)["samples"], 300)
+
+    def test_a_good_dense_animated_gpu_page_passes_every_check(self):
+        self.assertEqual(self.failed(), [])
+        self.assertEqual(len(self.verdicts()), 11)
+
+    def test_software_rendering_fails_gpu(self):
+        self.assertEqual(self.failed(photo=self.cap("photo", renderer="ANGLE (Google, SwiftShader Device)")), ["gpu"])
+        self.assertIn("gpu", self.failed(live=self.cap("live", render_mode="unavailable")))
+
+    def test_too_few_samples_props_kinds_voxels_or_coverage_fail_their_check(self):
+        scene = {"samples": 150, "props": 12, "propKinds": 5, "voxels": 20000, "coverage": 0.2}
+        self.assertEqual(self.failed(live=self.cap("live", scene=scene), photo=self.cap("photo", scene=scene)),
+                         ["coverage", "kinds", "props", "samples", "voxels"])
+
+    def test_no_terrain_fails_coverage(self):
+        scene = {"coverage": None, "terrainColumns": 0}
+        self.assertEqual(self.failed(photo=self.cap("photo", scene=scene)), ["coverage"])
+
+    def test_one_still_pair_or_no_animation_fails_motion(self):
+        still = MOVING[:5] + [(2, 3, 0.2)]
+        self.assertEqual(self.failed(diffs=still), ["motion"])
+        self.assertEqual(self.failed(live=self.cap("live", scene={"animated": False})), ["motion"])
+        self.assertEqual(self.failed(diffs=None), ["motion"])
+
+    def test_a_non_repeating_capture_fails_repeat_and_a_skipped_one_is_absent(self):
+        self.assertEqual(self.failed(repeat=False), ["repeat"])
+        self.assertNotIn("repeat", self.verdicts(repeat=None))
+
+    def test_a_uniform_or_black_photo_fails_photo(self):
+        black = {"uniform": False, "distinct_colours": 40, "one_colour_pct": 60, "dark_pct": 97.0,
+                 "clipped_pct": 0, "max_frame_diff": None, "identical_frames": None}
+        self.assertEqual(self.failed(photo=self.cap("photo", precheck=black)), ["photo"])
+
+    def test_page_errors_fail_errors(self):
+        uncaught = ['"Uncaught TypeError: x is undefined", source: file:///x/index.html (12)']
+        self.assertEqual(self.failed(live=self.cap("live", extra_console=uncaught)), ["errors"])
+        self.assertEqual(self.failed(photo=self.cap("photo", scene={"errors": 2})), ["errors"])
+        self.assertEqual(self.failed(photo=self.cap("photo", scene={"error": "setScene: bad"})), ["errors"])
+
+    def test_no_probe_line_fails_probe_errors_and_motion(self):
+        text = _fake_render(probe=None)
+        live = {"text": text, "record": diorama.parse_record(text), "probe": None}
+        # motion too: without the live probe nothing says the scene is animated
+        self.assertEqual(self.failed(live=live), ["errors", "motion", "probe"])
+
+    def test_the_wrong_mode_fails_probe(self):
+        self.assertEqual(self.failed(photo=self.cap("live")), ["probe"])
+
+    def test_pair_diffs_counts_pixels_over_the_channel_delta(self):
+        a = [(10, 10, 10)] * 100
+        b = [(10, 10, 10)] * 98 + [(40, 10, 10), (30, 10, 10)]      # one over 25, one at 20
+        self.assertEqual(diorama.pair_diffs([a, b, a]), [(0, 1, 1.0), (0, 2, 0.0), (1, 2, 1.0)])
 
 
 class CheckerTests(unittest.TestCase):
