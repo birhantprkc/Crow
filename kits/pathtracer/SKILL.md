@@ -76,6 +76,9 @@ EffectComposer, no shaders.
      `width`/`height` = the canvas size. `read_image` the contact sheet: the beam, the water
      and the particles must be in different places in the 4 frames.
    - Photo: `render_page` `index.html?mode=photo&t=2&ui=0`, `wait_ms` 20000, one frame.
+     Night or dark scenes with small lights need more samples: use `wait_ms` 60000-90000
+     (kit pages may wait up to 120000; ~15 samples/s at 1024^2). Never shrink the scene to
+     fit a short capture -- the page itself keeps converging in the browser.
      Read the console lines:
      - `renderer:` must name the GPU (NVIDIA/AMD/Intel), not SwiftShader/llvmpipe;
      - `[crow-pt] samples=` should be >= 200 at 20 s (measured ~15 samples/s at 1024x1024 on

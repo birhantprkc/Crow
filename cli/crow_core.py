@@ -965,8 +965,10 @@ TOOLS = [
          "wait_ms": {"type": "integer",
                      "description": "How long the page runs after loading before the "
                                     "screenshot, in real milliseconds. Default 4000, "
-                                    "max 20000. A larger value never rescues a page "
-                                    "too heavy to draw -- make the scene cheaper."},
+                                    "max 20000 (120000 for a page built with the "
+                                    "path-tracing kit, whose photo converges with time). "
+                                    "A larger value never rescues a page too heavy to "
+                                    "draw -- make the scene cheaper."},
          "width": {"type": "integer", "description": "Viewport width, default 1280."},
          "height": {"type": "integer", "description": "Viewport height, default 800."},
          "frames": {"type": "integer",
@@ -10678,6 +10680,14 @@ def _render_dir() -> str:
 RENDER_LOAD_S = 15          # bis zum load-Ereignis, danach wird trotzdem gefangen
 RENDER_CAPTURE_S = 10       # fuer den EINEN Frame des Fangs (Software: ~0,8 s gemessen)
 RENDER_WAIT_MAX_MS = 20000  # echte Zeit; mehr kauft keinen Frame, nur Warten
+# #302 (2026-09-25): EXCEPT for a progressive path tracer. A page built with the
+# voxel kit (#298/#299) accumulates ~15 samples/s at 1024^2 on the RTX 5090, so
+# every second DOES buy image quality: the lighthouse run's night scene held
+# 295 samples at the 20 s cap and stayed grainy while the same page converges in
+# a browser. Such pages (they carry the kit's `[crow-pt]` console marker) may
+# wait up to 120 s; every other page keeps the 20 s cap above (#213).
+RENDER_WAIT_PT_MAX_MS = 120000
+RENDER_PT_MARKER = "[crow-pt]"
 
 
 def _render_stall_advice(gl: str, wait: int) -> str:
@@ -11199,6 +11209,20 @@ RENDER_RETURN_WAIT_S = 1.0
 _RENDER_LENT: dict = {}
 
 
+def _render_wait_cap(page_file: "str | None") -> int:
+    """#302: the wait_ms ceiling for this page. A local page built with the
+    path-tracing kit converges with time, so it gets RENDER_WAIT_PT_MAX_MS;
+    anything else (remote URLs included) keeps RENDER_WAIT_MAX_MS."""
+    if not page_file:
+        return RENDER_WAIT_MAX_MS
+    try:
+        with open(page_file, "rb") as fh:
+            head = fh.read(4 << 20)
+    except OSError:
+        return RENDER_WAIT_MAX_MS
+    return RENDER_WAIT_PT_MAX_MS if RENDER_PT_MARKER.encode() in head else RENDER_WAIT_MAX_MS
+
+
 def _render_lend_root() -> "str | None":
     """#297: this turn's endpoint as a server root, when it is a LOCAL one
     (not remote, loopback host); None otherwise -- a remote provider's card
@@ -11581,7 +11605,7 @@ def _render_page(path: str, wait_ms: int | None = None,
 
     # #213-NACHTRAG: wait_ms ist ECHTE Zeit nach dem Laden und hat einen
     # Deckel, der kein Eskalationsraum ist (siehe RENDER_WAIT_MAX_MS).
-    wait = max(200, min(int(wait_ms or 4000), RENDER_WAIT_MAX_MS))
+    wait = max(200, min(int(wait_ms or 4000), _render_wait_cap(page_file)))
     w = max(200, min(int(width or 1280), 4096))
     h = max(200, min(int(height or 800), 4096))
     # #293: frames and their page-time step.

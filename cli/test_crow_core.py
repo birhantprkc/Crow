@@ -23768,3 +23768,29 @@ class ChatTitleSkipsCrowNotesTests(unittest.TestCase):
                     {"role": "user", "content": "the typed one"}]
         self.assertEqual(crow_core.chat_title(messages), "the typed one")
         self.assertIsNone(crow_core.chat_title(messages[:2]))
+
+
+class RenderWaitCapForPathTracedPages(unittest.TestCase):
+    """#302: a page built with the path-tracing kit may wait up to 120 s; others keep 20 s."""
+
+    def _page(self, body):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "index.html")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return p
+
+    def test_a_kit_page_gets_the_long_ceiling(self):
+        p = self._page("<script>console.log('[crow-pt] samples=1')</script>")
+        self.assertEqual(crow_core._render_wait_cap(p), crow_core.RENDER_WAIT_PT_MAX_MS)
+        self.assertEqual(crow_core.RENDER_WAIT_PT_MAX_MS, 120000)
+
+    def test_any_other_page_keeps_the_20_s_ceiling(self):
+        p = self._page("<canvas></canvas><script>requestAnimationFrame(()=>{})</script>")
+        self.assertEqual(crow_core._render_wait_cap(p), crow_core.RENDER_WAIT_MAX_MS)
+        self.assertEqual(crow_core._render_wait_cap(None), crow_core.RENDER_WAIT_MAX_MS)
+        self.assertEqual(crow_core._render_wait_cap("/no/such/file.html"), crow_core.RENDER_WAIT_MAX_MS)
+
+    def test_the_clamp_uses_the_page_ceiling(self):
+        src = inspect.getsource(crow_core._render_page)
+        self.assertIn("_render_wait_cap(page_file)", src)
