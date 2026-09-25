@@ -122,6 +122,10 @@ crow_core.SECRETS_FILE = os.path.join(_NOWHERE, "secrets.json")
 crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
+# #298: the kit of THIS checkout would seed its skill into every case that
+# lists skills. The cases that want the kit take _REAL_KIT explicitly.
+_REAL_KIT = crow_core.PATHTRACER_KIT
+crow_core.PATHTRACER_KIT = os.path.join(_NOWHERE, "kits", "pathtracer")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
 # #262: Crow's own log file, never the real one under the state dir.
 crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
@@ -7085,6 +7089,11 @@ class SeededSkillTests(unittest.TestCase):
         self.addCleanup(setattr, crow_core, "SKILLS_DIR", self._skills)
         # LEFT MISSING ON PURPOSE -- that absence is the state being tested.
         crow_core.SKILLS_DIR = os.path.join(self.dir, "skills")
+        # No kit here: the builtin seed is what this class holds. The kit's
+        # skill has its own ledger rule and KitSkillTests below.
+        self._kit = crow_core.PATHTRACER_KIT
+        self.addCleanup(setattr, crow_core, "PATHTRACER_KIT", self._kit)
+        crow_core.PATHTRACER_KIT = os.path.join(self.dir, "no-kit")
 
     def test_a_machine_with_no_skills_gets_the_shipped_one(self):
         """Without it the only guidance is one sentence in the tool description,
@@ -7121,6 +7130,111 @@ class SeededSkillTests(unittest.TestCase):
             self.assertIn("When", description, name)
             self.assertIsNone(crow_core.memory_threat(description), name)
             self.assertGreater(len(body), 500, name)
+
+
+class KitSkillTests(unittest.TestCase):
+    """#298: the voxel-diorama skill that ships with kits/pathtracer.
+
+    It must reach machines that ALREADY have a skills directory (every existing
+    install), which the builtin rule -- seed when the directory is absent --
+    cannot do. So a ledger: seeded once per name, OFF, refreshed only while the
+    user has not touched it, never resurrected after a delete.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-kitskill-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._skills, self._kit = crow_core.SKILLS_DIR, crow_core.PATHTRACER_KIT
+        self.addCleanup(setattr, crow_core, "SKILLS_DIR", self._skills)
+        self.addCleanup(setattr, crow_core, "PATHTRACER_KIT", self._kit)
+        crow_core.SKILLS_DIR = os.path.join(self.dir, "skills")
+        crow_core.PATHTRACER_KIT = os.path.join(self.dir, "kits", "pathtracer")
+        os.makedirs(crow_core.PATHTRACER_KIT)
+        self.kit_text("1. Copy @CROW_KITS@/pathtracer/scaffold.")
+
+    def kit_text(self, body: str, desc: str = "When asked for a voxel diorama: use the kit.") -> None:
+        with open(os.path.join(crow_core.PATHTRACER_KIT, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: voxel-diorama\ndescription: %s\n---\n\n%s\n" % (desc, body))
+
+    def names(self):
+        return [s["name"] for s in crow_core.skills()]
+
+    def test_an_existing_skills_directory_gets_the_kit_skill_switched_off(self):
+        """The upgrade path: the directory exists (the builtin seed will never
+        run again), and the kit skill still arrives -- off, so it costs the
+        prompt nothing until somebody switches it on."""
+        os.makedirs(crow_core.SKILLS_DIR)
+        self.assertEqual(self.names(), ["voxel-diorama"])
+        self.assertFalse(crow_core.read_skill("voxel-diorama")["enabled"])
+        self.assertEqual(crow_core.skill_block(), "")
+        self.assertTrue(os.path.isfile(os.path.join(crow_core.SKILLS_DIR, crow_core.SKILL_LEDGER)))
+
+    def test_a_fresh_machine_gets_the_builtin_on_and_the_kit_skill_off(self):
+        self.assertEqual(self.names(), ["skill-creator", "voxel-diorama"])
+        block = crow_core.skill_block()
+        self.assertIn("skill-creator", block)
+        self.assertNotIn("voxel-diorama", block)
+
+    def test_a_deleted_kit_skill_does_not_come_back(self):
+        """NEGATIVE: the ledger remembers it was written once."""
+        os.makedirs(crow_core.SKILLS_DIR)
+        crow_core.skills()
+        crow_core.tool_skill("remove", name="voxel-diorama")
+        self.assertEqual(self.names(), [])
+        self.kit_text("a newer kit text")
+        self.assertEqual(self.names(), [])
+
+    def test_an_untouched_copy_follows_a_newer_kit_and_keeps_its_switch(self):
+        os.makedirs(crow_core.SKILLS_DIR)
+        self.assertEqual(crow_core.enable_kit_skill(), "enabled")
+        self.kit_text("2. The new step.")
+        crow_core.skills()
+        got = crow_core.read_skill("voxel-diorama")
+        self.assertIn("The new step", got["body"])
+        self.assertTrue(got["enabled"])
+
+    def test_an_edited_copy_is_never_overwritten(self):
+        """NEGATIVE: the user's own wording beats a newer kit text."""
+        os.makedirs(crow_core.SKILLS_DIR)
+        crow_core.skills()
+        crow_core.write_skill("voxel-diorama", "When I say so.", "my own steps", False)
+        self.kit_text("2. The new step.")
+        crow_core.skills()
+        self.assertEqual(crow_core.read_skill("voxel-diorama")["body"], "my own steps")
+
+    def test_enable_says_enabled_then_already_and_missing_without_a_kit(self):
+        """What install.sh --pathtracer and install.ps1 -PathTracer print from.
+        On a machine that never started Crow it seeds the builtin too, so the
+        skills directory it creates is never one that holds only the kit skill."""
+        self.assertEqual(crow_core.enable_kit_skill(), "enabled")
+        self.assertEqual(crow_core.enable_kit_skill(), "already")
+        self.assertIn("skill-creator", self.names())
+        self.assertIn("voxel-diorama", crow_core.skill_block())
+        crow_core.PATHTRACER_KIT = os.path.join(self.dir, "none")
+        crow_core.SKILLS_DIR = os.path.join(self.dir, "skills2")
+        self.assertEqual(crow_core.enable_kit_skill(), "missing")
+
+    def test_read_fills_in_the_kits_path_and_the_file_keeps_the_placeholder(self):
+        """An install that moves keeps a true body: the path is filled in at
+        read time and never written into SKILL.md."""
+        crow_core.enable_kit_skill()
+        got = json.loads(crow_core.tool_skill("read", name="voxel-diorama"))
+        self.assertIn(os.path.join(self.dir, "kits") + "/pathtracer/scaffold", got["body"])
+        self.assertNotIn(crow_core.KITS_PLACEHOLDER, got["body"])
+        self.assertIn(crow_core.KITS_PLACEHOLDER, crow_core.read_skill("voxel-diorama")["body"])
+
+    def test_the_shipped_kit_skill_holds_the_skill_rules(self):
+        """The real kits/pathtracer/SKILL.md: a description the prompt can carry,
+        and the measured rules in the body."""
+        with open(os.path.join(_REAL_KIT, "SKILL.md"), encoding="utf-8") as fh:
+            head, body = crow_core.parse_skill(fh.read())
+        desc = head["description"]
+        self.assertLessEqual(len(desc), crow_core.SKILL_DESC_CHARS)
+        self.assertTrue(desc.startswith("When"))
+        self.assertIsNone(crow_core.memory_threat(desc))
+        for words in ("64 voxels wide", "8-16 voxels", "vertexColors", "addLamp",
+                      "build_bundle", "render_page", crow_core.KITS_PLACEHOLDER):
+            self.assertIn(words, body)
 
 
 class SessionSearchTests(unittest.TestCase):
@@ -18836,6 +18950,10 @@ class BuildBundleTests(unittest.TestCase):
         os.environ["FAKE_ARGV_LOG"] = self.argv_log
         for key in ("FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS", "FAKE_ORPHAN_PID"):
             os.environ.pop(key, None)
+        # No kit unless a case asks for it (the module preamble points it
+        # nowhere): the kit's two aliases would sit in every argv compared below.
+        self._kit = _REAL_KIT
+        self.addCleanup(setattr, crow_core, "PATHTRACER_KIT", crow_core.PATHTRACER_KIT)
 
     def tearDown(self):
         os.chdir(self._old)
@@ -19062,6 +19180,62 @@ class BuildBundleTests(unittest.TestCase):
         inline = [c for c in calls if c["stdin"] is not None][0]
         self.assertEqual(inline["stdin"], "import './main.js';")
         self.assertEqual(os.path.realpath(inline["cwd"]), os.path.realpath(self.root))
+
+    def test_the_kit_names_reach_esbuild_as_aliases_of_the_installed_kit(self):
+        """#298: `import ... from 'crow-voxel-kit'` resolves to the kit in
+        <install>/kits/pathtracer -- no copy of the library in the working area,
+        no import map for the model to get right."""
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        crow_core.PATHTRACER_KIT = self._kit
+        self._write("src/scene.js", "import { VoxelGrid } from 'crow-voxel-kit';\n")
+        self._write("src/index.html", "<html><head></head><body>"
+                                      "<script type=\"module\" src=\"scene.js\"></script></body></html>")
+        out = crow_core.tool_build_bundle("src/index.html", "index.html")
+        self.assertIn("0 error(s)", out)
+        aliases = [a for a in self._calls()[0]["argv"] if a.startswith("--alias:")]
+        self.assertEqual(aliases, [
+            "--alias:crow-pathtracer=" + os.path.join(self._kit, "crow-pathtracer.js"),
+            "--alias:crow-voxel-kit=" + os.path.join(self._kit, "voxel-kit.js")])
+        # a module entry gets them too
+        crow_core.tool_build_bundle("src/scene.js", "scene.iife.js", global_name="S")
+        self.assertIn("--alias:crow-voxel-kit=" + os.path.join(self._kit, "voxel-kit.js"),
+                      self._calls()[1]["argv"])
+
+    def test_a_page_import_map_beats_the_kit_name_and_no_kit_means_no_alias(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        crow_core.PATHTRACER_KIT = self._kit
+        self._write("index.src.html", (
+            "<html><head><script type=\"importmap\">{\"imports\": "
+            "{\"crow-voxel-kit\": \"./my-kit.js\"}}</script></head><body>"
+            "<script type=\"module\">import 'crow-voxel-kit';</script></body></html>"))
+        crow_core.tool_build_bundle("index.src.html", "index.html")
+        argv = self._calls()[0]["argv"]
+        self.assertIn("--alias:crow-voxel-kit=" + os.path.join(self.root, "my-kit.js"), argv)
+        crow_core.PATHTRACER_KIT = os.path.join(self.caches, "no-kit")
+        self.assertEqual(crow_core.kit_aliases(), {})
+
+    def test_the_real_esbuild_builds_the_kit_scaffold_into_one_offline_page(self):
+        """ONE REAL RUN of the shipped scaffold, skipped where no esbuild exists:
+        the page must come out import-free with the kit, the library and its
+        licence comment inside."""
+        os.environ["PATH"] = self._saved[2] or ""
+        crow_core._esbuild_caches = self._saved[1]
+        exe = crow_core.find_esbuild(self.root)[0]
+        if not exe:
+            self.skipTest("no esbuild on this machine")
+        crow_core.PATHTRACER_KIT = self._kit
+        for name in ("index.html", "scene.js"):
+            with open(os.path.join(self._kit, "scaffold", name), encoding="utf-8") as fh:
+                self._write(os.path.join("src", name), fh.read())
+        out = crow_core.tool_build_bundle("src/index.html", "index.html")
+        self.assertIn("0 error(s), 0 warning(s)", out)
+        self.assertIn("self-contained", out)
+        with open(os.path.join(self.root, "index.html"), encoding="utf-8") as fh:
+            page = fh.read()
+        self.assertNotIn("type=\"module\"", page)
+        self.assertIn("[crow-pt]", page)                 # the kit's probe line
+        self.assertIn("@license", page)                  # three.js's notice travels along
+        self.assertGreater(len(page), 500_000)           # the library is inside
 
     def test_a_module_entry_to_a_page_says_the_page_is_bare_and_names_the_exports(self):
         """#212 follow-up, the .js-entry trap: diorama's src/app.js bundled to an

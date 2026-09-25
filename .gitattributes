@@ -25,3 +25,10 @@
 # them is the reference implementation the template is derived from; it is
 # evidence too, not source we edit.
 manifests/0731-encoding/** -text
+
+# The vendored path-tracing bundle and its licence texts (#298) are held
+# against the sha256 in kits/pathtracer/kit.json -- by install.sh, install.ps1,
+# pack-release.ps1 and tools/check_pathtracer_kit.py. With core.autocrlf a
+# Windows checkout would add a CR per line and every one of those goes red.
+kits/pathtracer/crow-pathtracer.js -text
+kits/pathtracer/LICENSE.* -text

@@ -8325,6 +8325,77 @@ because it will still be chosen."""),
 )
 
 
+# #298. SKILLS THAT SHIP WITH A KIT, and why they are seeded differently.
+#
+# A kit is a folder under <install>/kits/ with a SKILL.md beside what it ships
+# (kits/pathtracer: the vendored three.js path tracer and the voxel kit). Its
+# skill arrives on machines that ALREADY HAVE a skills directory -- every
+# existing install -- so the directory-absent rule above cannot carry it. It is
+# seeded through a ledger instead: `.seeded` in the skills directory, name ->
+# sha256 of the body as written.
+#
+# SEEDED OFF. A disabled skill costs the prompt nothing (skill_block skips it),
+# so a user who never asked for voxel dioramas pays zero tokens for this. The
+# settings sheet shows the row, and `install.sh --pathtracer` / `install.ps1
+# -PathTracer` switch it on through set_skill_enabled -- the same act as the
+# switch in the sheet.
+#
+# ONCE PER NAME, AND UPDATED ONLY WHILE UNTOUCHED. A deleted kit skill stays
+# deleted (the ledger remembers it was written); an edited one is kept as the
+# user left it; one whose body is still exactly what was seeded follows a newer
+# kit text, keeping its on/off switch.
+PATHTRACER_KIT = os.path.join(INSTALL_ROOT, "kits", "pathtracer")
+PATHTRACER_SKILL = "voxel-diorama"
+SKILL_LEDGER = ".seeded"
+# In a kit skill's body: the absolute path of <install>/kits, filled in by
+# `skill read`, never written into the file -- an install that moves keeps a
+# body that is still true.
+KITS_PLACEHOLDER = "@CROW_KITS@"
+
+
+def _body_sha(body: str) -> str:
+    return hashlib.sha256(body.strip().encode("utf-8")).hexdigest()
+
+
+def _seed_kit_skills() -> int:
+    """Write or refresh the kit skills per the ledger. Returns how many were written."""
+    ledger_path = os.path.join(SKILLS_DIR, SKILL_LEDGER)
+    try:
+        with open(ledger_path, encoding="utf-8") as fh:
+            ledger = json.load(fh)
+        if not isinstance(ledger, dict):
+            ledger = {}
+    except (OSError, ValueError):
+        ledger = {}
+    wrote, changed = 0, False
+    for name, kit in ((PATHTRACER_SKILL, PATHTRACER_KIT),):
+        source = os.path.join(kit, SKILL_FILE)
+        try:
+            with open(source, encoding="utf-8") as fh:
+                head, body = parse_skill(fh.read())
+        except OSError:
+            continue                        # the kit is not installed here
+        new_sha = _body_sha(body)
+        have = read_skill(name)
+        if name not in ledger:
+            if have is None:
+                write_skill(name, head.get("description") or "", body, enabled=False)
+                wrote += 1
+            ledger[name] = new_sha          # a hand-made namesake is kept as it is
+            changed = True
+        elif (have is not None and ledger[name] != new_sha
+              and _body_sha(have["body"]) == ledger[name]):
+            write_skill(name, head.get("description") or "", body, have["enabled"])
+            ledger[name] = new_sha
+            wrote += 1
+            changed = True
+    if changed:
+        os.makedirs(SKILLS_DIR, exist_ok=True)
+        with open(ledger_path, "w", encoding="utf-8") as fh:
+            json.dump(ledger, fh, indent=1, sort_keys=True)
+    return wrote
+
+
 def seed_skills() -> int:
     """Write the shipped skills, ONCE, the first time this machine has any.
 
@@ -8333,12 +8404,31 @@ def seed_skills() -> int:
     FILE would mean a skill the user deleted came back at the next start, and a
     deletion that undoes itself is not a deletion. Deleting the whole directory
     does bring them back -- that is a documented reset, not an accident.
+    Kit skills follow their own ledger rule, above.
     """
-    if os.path.isdir(SKILLS_DIR):
-        return 0
-    for name, description, body in BUILTIN_SKILLS:
-        write_skill(name, description, body)
-    return len(BUILTIN_SKILLS)
+    wrote = 0
+    if not os.path.isdir(SKILLS_DIR):
+        for name, description, body in BUILTIN_SKILLS:
+            write_skill(name, description, body)
+        wrote = len(BUILTIN_SKILLS)
+    return wrote + _seed_kit_skills()
+
+
+def enable_kit_skill(name: str = PATHTRACER_SKILL) -> str:
+    """For the installers' opt-in flag: 'enabled', 'already' or 'missing'.
+
+    Seeds first, so a machine that never started Crow gets the builtin skills
+    AND the kit skill, not a skills directory holding only this one -- which
+    would read as "has had skills" and skip the builtin seed for good.
+    """
+    seed_skills()
+    skill = read_skill(name)
+    if skill is None:
+        return "missing"
+    if skill["enabled"]:
+        return "already"
+    set_skill_enabled(name, True)
+    return "enabled"
 
 
 def skill_dir(name: str) -> str:
@@ -8398,7 +8488,7 @@ def skills() -> "list[dict]":
     sheet has to draw the ones that are off, or they cannot be switched on."""
     seed_skills()
     try:
-        names = sorted(os.listdir(SKILLS_DIR))
+        names = sorted(n for n in os.listdir(SKILLS_DIR) if n != SKILL_LEDGER)
     except OSError:
         return []
     out = []
@@ -8481,8 +8571,9 @@ def tool_skill(action: str, name: "str | None" = None,
                                "error": "no skill named %r. There is: %s"
                                         % (name, ", ".join(s["name"] for s in skills())
                                            or "(none)")})
+        body = skill["body"].replace(KITS_PLACEHOLDER, os.path.dirname(PATHTRACER_KIT))
         return json.dumps({"success": True, "name": skill["name"],
-                           "description": skill["description"], "body": skill["body"]})
+                           "description": skill["description"], "body": body})
 
     if action == "save":
         if not name or not SKILL_NAME.match(name):
@@ -13290,6 +13381,25 @@ def _import_map_aliases(body: str, base: str) -> "tuple[dict[str, str], list[str
     return aliases, skipped
 
 
+# #298. THE KIT'S TWO NAMES, resolved by the bundler and not by the page.
+# `import ... from 'crow-voxel-kit'` in the model's scene reaches the installed
+# kit without a copy of the 958 KB library in the working area and without an
+# import map the model has to get right. The kit file imports the library by a
+# relative path, so one alias per name is the whole wiring. A page's own import
+# map for the same name wins -- it is the more specific statement.
+KIT_MODULES = (("crow-voxel-kit", "voxel-kit.js"), ("crow-pathtracer", "crow-pathtracer.js"))
+
+
+def kit_aliases() -> "dict[str, str]":
+    """Bare kit names -> absolute files, for the kits installed here."""
+    out = {}
+    for name, file in KIT_MODULES:
+        path = os.path.join(PATHTRACER_KIT, file)
+        if os.path.isfile(path):
+            out[name] = path
+    return out
+
+
 def _bundle_may_replace(path: str) -> bool:
     """May a build overwrite what stands at `path`?
 
@@ -13494,7 +13604,7 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
             return text, css
 
         if not page:
-            js, css = _build(entry, {})
+            js, css = _build(entry, kit_aliases())
             if js is None:
                 result = None
             elif out_html:
@@ -13519,7 +13629,7 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
             with open(entry, encoding="utf-8", errors="replace") as fh:
                 html = fh.read()
             script_rx = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
-            aliases: "dict[str, str]" = {}
+            aliases: "dict[str, str]" = kit_aliases()
             for attrs, body in script_rx.findall(html):
                 if (_html_attr(attrs, "type") or "").lower() == "importmap":
                     found, skipped = _import_map_aliases(body, base)

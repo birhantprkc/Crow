@@ -131,6 +131,8 @@ crow_core.SECRETS_FILE = os.path.join(_NOWHERE, "secrets.json")
 crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
+# #298: no kit skill seeded from this checkout into the cases.
+crow_core.PATHTRACER_KIT = os.path.join(_NOWHERE, "kits", "pathtracer")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
 # #262: Crow's own log file, never the real one under the state dir.
 crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")

@@ -491,6 +491,21 @@ if (-not (Test-Path (Join-Path $stage 'cli\fonts\OFL.txt'))) {
     throw "cli/fonts/OFL.txt missing from the package -- the typeface may not be redistributed without it"
 }
 
+# THE VOXEL KIT (#298): kits\pathtracer ships in every package, beside cli\,
+# because crow_core resolves it as <install>\kits\pathtracer -- the same step as
+# the manifests above. install.ps1 -PathTracer only switches its skill on. The
+# three MIT notices travel with the bundle or the bundle does not travel.
+Copy-Item -LiteralPath (Join-Path $repo 'kits') -Destination (Join-Path $stage 'kits') -Recurse
+foreach ($f in @('crow-pathtracer.js', 'kit.json', 'voxel-kit.js', 'SKILL.md',
+                 'LICENSE.three', 'LICENSE.three-mesh-bvh', 'LICENSE.three-gpu-pathtracer')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $stage "kits\pathtracer\$f"))) {
+        throw "kits/pathtracer/$f missing from the package -- the kit or its licence notice would ship incomplete"
+    }
+}
+$kitWant = (Get-Content -LiteralPath (Join-Path $stage 'kits\pathtracer\kit.json') -Raw | ConvertFrom-Json).bundle.sha256
+$kitHave = (Get-FileHash -LiteralPath (Join-Path $stage 'kits\pathtracer\crow-pathtracer.js') -Algorithm SHA256).Hash
+if ($kitHave -ne $kitWant.ToUpperInvariant()) { throw "kits/pathtracer/crow-pathtracer.js does not match kit.json" }
+
 # 4 - the gate: nothing in the package may need something outside it
 $final = Test-PackageComplete -Dumpbin $dumpbin -Files (Get-ChildItem $binOut -File).FullName
 if ($final.Count -gt 0) {

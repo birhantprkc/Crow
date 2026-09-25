@@ -98,6 +98,11 @@ jobs:
         run: |
           "$PY" tools/check_operating_point.py
 
+      - name: the path-tracing kit -- bundle, licences, NOTICE, mesher (#298)
+        run: |
+          "$PY" tools/check_pathtracer_kit.py
+          "$PY" tools/test_pathtracer_kit.py
+
       - name: install.sh selftest
         if: runner.os == 'Linux'
         run: bash install.sh --selftest

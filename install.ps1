@@ -41,6 +41,15 @@ Print what is still missing for the phone's HTTPS address over Tailscale
 downloads and elevates nothing. From the one-liner:
     &([scriptblock]::Create((irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1))) -Tailscale
 
+.PARAMETER PathTracer
+Also switch on the voxel-diorama skill (#298): the model builds path-traced
+voxel scenes as one offline page with the kit in kits\pathtracer (three.js +
+three-gpu-pathtracer, shipped with every package, ~1 MB). The flag verifies the
+kit against its kit.json, switches the skill on through the client's own code
+(the same switch as the Skills page in the settings) and says whether an
+esbuild is there for build_bundle. On an install that is already current it
+does only that and changes nothing else. Off, a skill costs the prompt nothing.
+
 .PARAMETER NoPause
 Do not wait for ENTER at the end. The wait exists so the last screen -- the model
 to fetch and the two commands to run -- is still there to read; a script driving
@@ -64,7 +73,8 @@ param(
     [switch] $Force,
     [switch] $NoPause,
     [switch] $Selftest,
-    [switch] $Tailscale
+    [switch] $Tailscale,
+    [switch] $PathTracer
 )
 
 $ErrorActionPreference = "Stop"
@@ -1059,6 +1069,79 @@ function Show-TailscaleSteps {
 
 
 # ---------------------------------------------------------------------------
+# The voxel kit (-PathTracer, #298)
+# ---------------------------------------------------------------------------
+# The kit ships in every package (kits\pathtracer) and MANIFEST.json already
+# verifies its bytes on an install. The flag switches its skill on; this check
+# exists for the run that installs nothing (-PathTracer on a current install).
+
+function Test-PathTracerKit {
+    <#
+    'ok' | 'missing' | 'corrupt': the bundle against the sha256 in kit.json.
+    Pure over a directory, so the selftest drives all three.
+    #>
+    param([string] $KitDir)
+    $json = Join-Path $KitDir "kit.json"
+    $bundle = Join-Path $KitDir "crow-pathtracer.js"
+    if (-not (Test-Path -LiteralPath $json) -or -not (Test-Path -LiteralPath $bundle)) { return "missing" }
+    try { $want = (Get-Content -LiteralPath $json -Raw | ConvertFrom-Json).bundle.sha256 } catch { return "corrupt" }
+    $have = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash
+    if ($want -and $have -eq $want.ToUpperInvariant()) { return "ok" }
+    return "corrupt"
+}
+
+function Invoke-PathTracerKit {
+    <#
+    Switch the voxel-diorama skill on with the client's own function and say
+    what happened; without -PathTracer, one line on how to switch it on.
+    #>
+    param([string] $InstallTo, [string] $PythonPath, [bool] $Enable)
+    $kit = Join-Path $InstallTo "kits\pathtracer"
+    # The client's config directory is %LOCALAPPDATA%\Crow whatever -InstallTo says
+    # (crow_platform.config_dir), so the skill is looked for there.
+    $skill = Join-Path $env:LOCALAPPDATA "Crow\skills\voxel-diorama\SKILL.md"
+    $isOn = (Test-Path -LiteralPath $skill) -and -not (Select-String -LiteralPath $skill -Pattern '^enabled: false$' -Quiet)
+    if (-not $Enable) {
+        if ($isOn) { Write-Item "voxel kit" "the voxel-diorama skill is on" "ok" }
+        else { Write-Item "voxel kit" "installed, skill off -- -PathTracer switches it on" }
+        return
+    }
+    $verdict = Test-PathTracerKit -KitDir $kit
+    if ($verdict -ne "ok") {
+        Write-Item "voxel kit" "kits\pathtracer is $verdict -- reinstall with -Force" "warn"
+        return
+    }
+    Write-Item "voxel kit" "crow-pathtracer.js matches kit.json" "ok"
+    if (-not $PythonPath) {
+        Write-Item "voxel kit" "no Python -- switch the skill on in the window's settings, Skills page" "warn"
+        return
+    }
+    $cli = Join-Path $InstallTo "cli"
+    $code = "import sys; sys.path.insert(0, sys.argv[1]); import crow_core; " +
+            "print(crow_core.enable_kit_skill()); " +
+            "exe = crow_core.find_esbuild(sys.argv[2])[0]; print(exe or '')"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $out = @(& $PythonPath -c $code $cli $InstallTo 2>$null)
+    } catch {
+        $out = @()
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    $global:LASTEXITCODE = 0
+    $state = if ($out.Count -gt 0) { "$($out[0])".Trim() } else { "" }
+    switch ($state) {
+        "enabled" { Write-Item "voxel kit" "the voxel-diorama skill is switched on" "ok" }
+        "already" { Write-Item "voxel kit" "the voxel-diorama skill was already on" "ok" }
+        default   { Write-Item "voxel kit" "could not switch the skill on -- use the Skills page in the settings" "warn" }
+    }
+    $esb = if ($out.Count -gt 1) { "$($out[1])".Trim() } else { "" }
+    if ($esb) { Write-Item "voxel kit" "build_bundle has an esbuild: $esb" "ok" }
+    else { Write-Item "voxel kit" "no esbuild found -- build_bundle cannot inline the kit into a page (Node's npx cache, a node_modules, PATH, or `"bundler`" in settings.json)" "warn" }
+}
+
+# ---------------------------------------------------------------------------
 # Selftest
 # ---------------------------------------------------------------------------
 
@@ -1463,6 +1546,30 @@ function Invoke-Selftest {
     }
     C "no settings file reads 8765"               ((Get-RemotePort (Join-Path $env:TEMP "crow-selftest-absent.json")) -eq 8765)
 
+    # -PathTracer (#298): the kit verdict, all three answers.
+    $kd = Join-Path $env:TEMP ("crow-selftest-kit-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $kd | Out-Null
+    try {
+        $b = Join-Path $kd "crow-pathtracer.js"
+        Set-Content -LiteralPath $b -Value "export const x = 1;" -Encoding ascii -NoNewline
+        $h = (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath (Join-Path $kd "kit.json") -Value ('{"bundle": {"sha256": "' + $h + '"}}') -Encoding ascii
+        C "pathtracer: a bundle that matches kit.json is 'ok'" ((Test-PathTracerKit -KitDir $kd) -eq "ok")
+        Set-Content -LiteralPath $b -Value "export const x = 2;" -Encoding ascii -NoNewline
+        C "NEGATIVE: pathtracer: one changed byte is 'corrupt'" ((Test-PathTracerKit -KitDir $kd) -eq "corrupt")
+    } finally {
+        Remove-Item -LiteralPath $kd -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    C "NEGATIVE: pathtracer: no kit is 'missing'" ((Test-PathTracerKit -KitDir (Join-Path $env:TEMP "crow-selftest-nokit")) -eq "missing")
+    if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot "kits\pathtracer\kit.json"))) {
+        C "pathtracer: this checkout's kit matches its kit.json" ((Test-PathTracerKit -KitDir (Join-Path $PSScriptRoot "kits\pathtracer")) -eq "ok")
+    }
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        $me = Get-Content -LiteralPath $PSCommandPath -Raw
+        C "pathtracer: the switch is declared and documented" (
+            $me.Contains('[switch] $PathTracer') -and $me.Contains('.PARAMETER PathTracer'))
+    }
+
     Write-Host ""
     $total = $script:sOk + $script:sRed
     if ($script:sRed -gt 0) { Write-Host "RESULT: $($script:sRed) of $total FAILED" -ForegroundColor Red; return 1 }
@@ -1570,6 +1677,9 @@ if (Test-Path $InstallTo) {
         switch ($decision.Action) {
             'uptodate' {
                 Write-Item "already current" $decision.Message "ok"
+                if ($PathTracer) {
+                    Invoke-PathTracerKit -InstallTo $InstallTo -PythonPath $facts.PythonPath -Enable $true
+                }
                 Write-Host ""
                 Write-Host "  Nothing was changed. Pass -Force to reinstall the same version." -ForegroundColor DarkGray
                 Exit-Run 0
@@ -1859,6 +1969,8 @@ if ($InstallTo) {
         Write-Host "             the window downloads it on the first click instead" -ForegroundColor White
     }
 }
+
+Invoke-PathTracerKit -InstallTo $InstallTo -PythonPath $facts.PythonPath -Enable ([bool] $PathTracer)
 
 Write-Step "What is left to do"
 
