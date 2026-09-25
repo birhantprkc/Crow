@@ -145,7 +145,16 @@ crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 _PINNED: dict = {}
 
 
+# #297: NO CASE LENDS A REAL SERVE'S VRAM. render_page asks this turn's
+# local endpoint for a loan below the VRAM bound, and a turn case leaves
+# `_TURN_SPOT` pointing at 127.0.0.1:<port> -- on robin's machine a live
+# serve may answer there. The pin makes every case "no local endpoint";
+# TheRenderLendsVramTests puts the real lookup back against its fake server.
+_REAL_LEND_ROOT = crow_core._render_lend_root
+
+
 def setUpModule() -> None:
+    crow_core._render_lend_root = lambda: None
     for module in (crow, crow_core):
         for name, value in list(vars(module).items()):
             if isinstance(value, str) and value.startswith("\033"):
@@ -161,6 +170,7 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
+    crow_core._render_lend_root = _REAL_LEND_ROOT
     for (module_name, name), value in _PINNED.items():
         setattr(sys.modules[module_name], name, value)
     _PINNED.clear()
@@ -14434,7 +14444,8 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.dir = tempfile.mkdtemp(prefix="crow-render-t-")
-        self.src = inspect.getsource(crow_core.tool_render_page)
+        self.src = (inspect.getsource(crow_core.tool_render_page)
+                    + inspect.getsource(crow_core._render_page))   # #297
         # DER WAECHTER PRUEFT DEN CODE, NICHT DIE ERKLAERUNG. Der Docstring
         # NENNT `taskkill /IM`, um zu sagen, dass es das hier nicht gibt -- ein
         # Muster, das an seinem eigenen Kommentar rot wird, ist genau der
@@ -14699,7 +14710,8 @@ class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
     und die WARN-Form, mit der beides vor die Pixel des Ergebnisses tritt."""
 
     def setUp(self) -> None:
-        self.src = inspect.getsource(crow_core.tool_render_page)
+        self.src = (inspect.getsource(crow_core.tool_render_page)
+                    + inspect.getsource(crow_core._render_page))   # #297
 
     # -- die Schalter ------------------------------------------------------
 
@@ -15054,7 +15066,7 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
                 self.assertNotIn(escalation, low)
 
     def test_the_tool_uses_the_pipe_and_a_ceiling_that_does_not_follow_wait(self):
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("devtools_pipe", src)
         self.assertIn("--remote-debugging-pipe", src)
         self.assertIn("_render_over_devtools", src)
@@ -15076,7 +15088,7 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
         command-line screenshot, never reach _Devtools (whose select() takes
         sockets only there)."""
         self.assertIsNone(crow_platform.devtools_pipe())
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("--virtual-time-budget=", src)
         self.assertIn("--screenshot=", src)
 
@@ -15406,7 +15418,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
         self.assertEqual(api, {})
 
     def test_the_tool_puts_the_hints_under_the_warnings(self):
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("_console_hints(_console_lines(log_text, 0), api,", src)
         self.assertIn("api=api", src)
         self.assertLess(src.index("said = _capture_warnings("),
@@ -15641,7 +15653,7 @@ class ASmallSceneGetsAnEnlargedSecondViewTests(unittest.TestCase):
                                                      "flat-crop.png")))
 
     def test_render_page_puts_the_metrics_in_its_result(self):
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("_capture_metrics(shot, pixels)", src)
         self.assertLess(src.index("said.extend(metrics)"),
                         src.index('"read_image it to look at the page."'))
@@ -23120,6 +23132,263 @@ class TheRenderToolIsGpuOnlyTests(unittest.TestCase):
         self.assertEqual(self.argv, [])
         self.assertTrue(said.startswith("error: ENVIRONMENT"), said)
         self.assertIn("frames > 1 needs the DevTools pipe", said)
+
+
+class _FakeLendServe(http.server.BaseHTTPRequestHandler):
+    """#297: crow-nest#117's lend API, scripted per case. Every request
+    lands in the server's `events` list, in arrival order."""
+
+    def log_message(self, *_):
+        pass
+
+    def _send(self, status, doc):
+        raw = json.dumps(doc).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        size = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(size) or b"{}")
+        srv = self.server
+        if self.path == "/v1/crow/vram/lend":
+            srv.events.append(("lend", body))
+            time.sleep(getattr(srv, "lend_delay", 0))
+            status, doc = srv.lend
+            self._send(status, doc)
+        elif self.path == "/v1/crow/vram/return":
+            srv.events.append(("return", body))
+            status = srv.returns.pop(0) if srv.returns else 200
+            self._send(status, {"returned_mib": 664.0, "remap_ms": 3.5,
+                                "lent_s": 1.0} if status == 200
+                       else {"error": "remap failed"})
+        elif self.path == "/v1/chat/completions":
+            srv.events.append(("chat", None))
+            self._send(200, {"choices": [{"message": {"content": "ok"}}]})
+        else:
+            self._send(404, {"error": "not found"})
+
+
+class TheRenderLendsVramTests(unittest.TestCase):
+    """#297 / crow-nest#117. Below the VRAM bound render_page borrows the
+    shortfall from this turn's local serve, gives it back in tool_render_page's
+    `finally` after the browser is gone, and the judge asks only after the
+    return. Anything but a 200 leaves #293's ENVIRONMENT error as it was."""
+
+    LENT = {"lent_mib": 664.0, "requested_mib": 664, "free_vram_mib": 768.0,
+            "release_ms": 4.2, "regions": 5, "ttl_s": 119}
+
+    def setUp(self) -> None:
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-t297-"))
+        with open(os.path.join(self.dir, "index.html"), "w", encoding="utf-8") as fh:
+            fh.write("<p>hi")
+        self.root = crow_core.get_root()
+        crow_core.set_root(self.dir)
+        self.addCleanup(crow_core.set_root, self.root)
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for name in ("CROW_RENDER_GL", "CROW_RENDER_ANGLE"):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ.pop(name, None)
+        self.addCleanup(crow_core._RENDER_RIDE.clear)
+        self.addCleanup(crow_core._LAST_CAPTURES.clear)
+        self.addCleanup(crow_core._RENDER_LENT.clear)
+        crow_core._RENDER_LENT.clear()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeLendServe)
+        self.server.daemon_threads = True
+        self.server.events = []
+        self.server.lend = (200, dict(self.LENT))
+        self.server.returns = []
+        threading.Thread(target=self.server.serve_forever, args=(0.05,),
+                         daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = "http://127.0.0.1:%d/v1" % self.server.server_address[1]
+        self.addCleanup(crow_core._TURN_SPOT.clear)
+        self.spot(self.base)
+        # The module pins the lookup to None (setUpModule); these cases
+        # need the real one, against the fake serve above.
+        patcher = mock.patch.object(crow_core, "_render_lend_root", _REAL_LEND_ROOT)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(crow_core, "RENDER_RETURN_WAIT_S", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def spot(self, base, remote=False):
+        crow_core._TURN_SPOT.clear()
+        crow_core._TURN_SPOT.update({"base_url": base, "model": "crow",
+                                     "api_key": "x", "remote": remote,
+                                     "headers": {}, "served": "crow"})
+
+    def events(self):
+        return [e[0] for e in self.server.events]
+
+    def _render(self, readings, browser=None, **kw):
+        """render_page with the free-VRAM readings in order (the last one
+        repeats) and a fake browser that writes its screenshot."""
+        test = self
+        readings = list(readings)
+        png = crow_core._png_encode(
+            40, 30, 2, [b"".join(bytes(((x * 5) % 256, (y * 7) % 256, 90))
+                                 for x in range(40)) for y in range(30)])
+
+        def free():
+            return readings.pop(0) if len(readings) > 1 else readings[0]
+
+        class Browser:
+            pid, returncode = 4242, 0
+
+            def __init__(self, argv, **_):
+                test.server.events.append(("browser", None))
+                shot = [a for a in argv if a.startswith("--screenshot=")]
+                if shot:
+                    with open(shot[0].split("=", 1)[1], "wb") as fh:
+                        fh.write(png)
+
+            def wait(self, timeout=None):
+                test.server.events.append(("closed", None))
+                return 0
+
+        with mock.patch.object(crow_core, "find_browser", lambda: "/bin/chromium"), \
+                mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
+                mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
+                mock.patch.object(crow_platform, "gpu_free_mib", free), \
+                mock.patch.object(crow_platform, "gpu_card",
+                                  lambda: TheRenderIsGpuOnlyTests.CARD), \
+                mock.patch.object(crow_core.subprocess, "Popen", browser or Browser):
+            return crow_core.tool_render_page("index.html", **kw)
+
+    def test_a_loan_brackets_the_capture_and_the_judge_comes_after(self):
+        said = self._render([104, 768])
+        self.assertTrue(said.startswith("render: "), said)
+        self.assertEqual(TheRenderToolIsGpuOnlyTests._record(said)["free_mib"], 768)
+        self.assertEqual(self.events(), ["lend", "browser", "closed", "return"])
+        # The ask: the shortfall + 256 MiB; the TTL: two ANGLE attempts of
+        # (15 s load + 4 s wait + 10 s capture + 0.5 s frame + 15 s close) + 30 s.
+        self.assertEqual(self.server.events[0][1], {"mib": 512 - 104 + 256,
+                                                    "ttl_s": 119})
+        self.assertEqual(crow_core._RENDER_LENT, {})
+        crow_core._judge_ask({"base_url": self.base, "model": "crow",
+                              "remote": False}, "rate it", [])
+        self.assertEqual(self.events(),
+                         ["lend", "browser", "closed", "return", "chat"])
+
+    def test_the_judge_gives_a_loan_left_open_back_first(self):
+        crow_core._RENDER_LENT.update({"root": self.base[:-len("/v1")],
+                                       "lent_mib": 664.0, "asked": 664,
+                                       "at": time.monotonic()})
+        crow_core._judge_ask({"base_url": self.base, "model": "crow",
+                              "remote": False}, "rate it", [])
+        self.assertEqual(self.events(), ["return", "chat"])
+
+    def test_the_loan_comes_back_when_the_browser_raises(self):
+        class Broken:
+            def __init__(self, argv, **_):
+                raise RuntimeError("spawn failed")
+
+        with self.assertRaises(RuntimeError):
+            self._render([104, 768], browser=Broken)
+        self.assertEqual(self.events(), ["lend", "return"])
+        self.assertEqual(crow_core._RENDER_LENT, {})
+
+    def test_the_loan_comes_back_after_a_timeout(self):
+        test = self
+
+        class Hangs:
+            pid, returncode = 4242, None
+            waits = []
+
+            def __init__(self, argv, **_):
+                test.server.events.append(("browser", None))
+
+            def wait(self, timeout=None):
+                Hangs.waits.append(timeout)
+                if len(Hangs.waits) == 1:
+                    raise subprocess.TimeoutExpired("chromium", timeout)
+                test.server.events.append(("closed", None))
+                return -9
+
+            def kill(self):
+                pass
+
+        with mock.patch.object(crow_platform, "terminate_tree", lambda proc: None):
+            said = self._render([104, 768], browser=Hangs)
+        self.assertIn("timed out", said)
+        self.assertEqual(self.events(), ["lend", "browser", "closed", "return"])
+
+    def test_a_503_on_return_is_retried(self):
+        self.server.returns = [503, 200]
+        self._render([104, 768])
+        self.assertEqual(self.events(),
+                         ["lend", "browser", "closed", "return", "return"])
+
+    def test_lent_but_still_short_returns_and_says_so(self):
+        self.server.lend = (200, dict(self.LENT, lent_mib=100.0))
+        said = self._render([104, 204])
+        self.assertTrue(said.startswith("error: ENVIRONMENT -- "), said)
+        self.assertIn("lending was tried: the model server lent 100 MiB", said)
+        self.assertIn("204 MiB were free after it", said)
+        self.assertEqual(TheRenderToolIsGpuOnlyTests._record(said)["free_mib"], 204)
+        self.assertEqual(self.events(), ["lend", "return"])
+
+    def test_a_refused_lend_keeps_todays_error_and_returns_nothing(self):
+        for status in (404, 409, 501, 400):
+            with self.subTest(status=status):
+                self.server.events.clear()
+                self.server.lend = (status, {"error": "no"})
+                said = self._render([104, 2000])
+                self.assertTrue(said.startswith("error: ENVIRONMENT -- "), said)
+                self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+                self.assertNotIn("lending was tried", said)
+                self.assertEqual(self.events(), ["lend"])
+
+    def test_no_answer_keeps_todays_error(self):
+        self.spot("http://127.0.0.1:9/v1")      # discard port, nothing listens
+        said = self._render([104, 2000])
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertNotIn("lending was tried", said)
+        self.assertEqual(crow_core._RENDER_LENT, {})
+
+    def test_a_lend_that_timed_out_is_returned_anyway(self):
+        """serve may read the lend after Crow gave up on it: the idempotent
+        return follows, so no loan waits out its TTL unasked."""
+        self.server.lend_delay = 0.5
+        with mock.patch.object(crow_core, "RENDER_LEND_HTTP_S", 0.1):
+            said = self._render([104, 2000])
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertNotIn("lending was tried", said)
+        deadline = time.monotonic() + 3
+        while "return" not in self.events() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.events(), ["lend", "return"])
+        self.assertEqual(crow_core._RENDER_LENT, {})
+
+    def test_a_remote_endpoint_is_never_asked(self):
+        self.spot(self.base, remote=True)
+        said = self._render([104, 2000])
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertEqual(self.events(), [])
+        self.assertIsNone(crow_core._render_lend_root())
+        self.spot("http://192.0.2.7:8099/v1")   # local provider, other host
+        self.assertIsNone(crow_core._render_lend_root())
+        self.spot("http://localhost:8099/v1")
+        self.assertEqual(crow_core._render_lend_root(), "http://localhost:8099")
+
+    def test_enough_free_vram_asks_for_nothing(self):
+        said = self._render([2000])
+        self.assertTrue(said.startswith("render: "), said)
+        self.assertEqual(self.events(), ["browser", "closed"])
+
+    def test_a_software_pin_asks_for_nothing(self):
+        os.environ["CROW_RENDER_GL"] = "swiftshader"
+        said = self._render([104, 2000])
+        self.assertIn("CROW_RENDER_GL=swiftshader", said)
+        self.assertEqual(self.events(), [])
 
 
 @unittest.skipUnless(shutil.which("node"), "node is not on PATH")

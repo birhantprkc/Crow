@@ -33,7 +33,7 @@ A **second web view with its own top-level browsing context**, not an iframe.
 | folded away | hidden, not destroyed, and **no page kept** (#279): the view goes to `about:blank`, so no WebGL keeps the card. Unfolding or restoring the window loads the tab's entry again (a render tab: its capture). A render while folded fills the render tab and does not unfold the panel |
 | crash (#279) | a crashed page (`web-process-terminated`) is taken out of the window and the window is redrawn. A page someone was looking at is reloaded once; a second crash of the same load is not reloaded (#204). The line goes to `crow.log`, not the chat |
 | during a turn (#279) | while a turn runs on the local model server, the panel's view uses WebKit's `hardware-acceleration-policy` `NEVER` (no GPU, CPU rendering; a WebGL page may look wrong or slow until the turn ends), then `ALWAYS` again. The chat page keeps the GPU. A remote endpoint leaves the panel alone |
-| render_page (#279, #293) | an open panel, or one holding a page, counts as a second GPU client: render_page takes the card only with ≥ 1,536 MiB free instead of 512, and otherwise returns an ENVIRONMENT error with no image (it renders on the GPU only) |
+| render_page (#279, #293) | an open panel, or one holding a page, counts as a second GPU client: render_page takes the card only with ≥ 1,536 MiB free instead of 512 (a local crow-nest serve is asked to lend the shortfall first, #297), and otherwise returns an ENVIRONMENT error with no image (it renders on the GPU only) |
 
 ## Controls
 
