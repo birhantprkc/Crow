@@ -4,7 +4,10 @@
 // dimension, every object inside g.prop('name', ...), one palette colour per
 // material (never vertexColors), lamps through addLamp, emission <= 1, time
 // only from the animate callback's t.
-// The page opens LIVE (animated preview); P or ?mode=photo&t=2 path-traces it.
+// The page opens LIVE (the island path-traced, the moving parts rasterised on
+// top); P or ?mode=photo&t=2 path-traces all of it, ?mode=raster is the flat
+// preview. width/height is the capture canvas (ui=0); a person's window fills
+// the screen at the display's pixel ratio.
 import { VoxelGrid, createDiorama, hash } from 'crow-voxel-kit';
 
 // ---- palette: few, clean colours (MagicaVoxel style) -----------------------

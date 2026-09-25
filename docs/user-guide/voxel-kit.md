@@ -9,7 +9,7 @@ vendored path tracer. The model never writes a ray tracer or a shader.
 
 <div align="center">
 <img src="../images/voxel-kit-scaffold.png" alt="The kit's scaffold room in photo mode, path traced: teal walls, plank floor, cabinet with a pinwheel, table, plant, floor lamp, window" width="400">
-<img src="../images/voxel-kit-live-frames.png" alt="Four live-mode frames of the scaffold 0.5 s apart: the pinwheel turns" width="400">
+<img src="../images/voxel-kit-live-frames.png" alt="Four raster-preview frames of the scaffold 0.5 s apart: the pinwheel turns" width="400">
 </div>
 
 ## Switch it on
@@ -37,7 +37,7 @@ vendored path tracer. The model never writes a ray tracer or a shader.
 | 3 | plans the grid, palette and props (density rule below) |
 | 4 | writes `src/scene.js` with `crow-voxel-kit` |
 | 5 | `build_bundle` entry `src/index.html`, out `index.html`: one offline file |
-| 6 | `render_page index.html?mode=live&ui=0` with `frames` 4 (motion), `render_page index.html?mode=photo&t=2&ui=0` with `wait_ms` 20000 (the photo), reads the `[crow-pt]` / `[crow-scene]` console lines, then `read_image` against the reference |
+| 6 | `render_page index.html?mode=raster&ui=0` with `frames` 4 (motion), `render_page index.html?mode=photo&t=2&ui=0` with `wait_ms` 20000, 60000–120000 on dark scenes (the photo), reads the `[crow-pt]` / `[crow-scene]` console lines, then `read_image` against the reference |
 | 7 | or all of it at once: `check_diorama.py index.html` (below) |
 
 `import … from 'crow-voxel-kit'` and `'crow-pathtracer'` are resolved by `build_bundle` to the
@@ -63,13 +63,16 @@ the same name wins.
 
 | | |
 |---|---|
-| LIVE (default) | rasterised preview of the same scene and materials: real lights, soft shadow maps (`PCFShadowMap` + `shadow.radius`), the dome as environment, no bloom. Runs `d.animate` every frame. Area and key lights get raster stand-ins (a wide spot, a directional light) |
-| PHOTO | the animation paused at t, the scene posed once, the path tracer converging (the rules above: despeckle, context-loss restore) |
+| LIVE (default) | the static island path-traced, converging while the camera rests; only the animated parts (`d.part`) rasterised on top, depth-tested against the island, lit by a dome fill and a key light. Runs `d.animate` every frame |
+| PHOTO | the animation paused at t, the scene posed once, the path tracer converging on everything, parts included (the rules above: despeckle, context-loss restore) |
+| RASTER (`?mode=raster`) | the flat rasterised preview of #299: real lights, soft shadow maps (`PCFShadowMap` + `shadow.radius`), the dome as environment, no bloom; area and key lights get raster stand-ins. Deterministic under the frozen clock, so the motion check uses it |
 | switch | key **P**, or the small **Foto** / **Live** button bottom right (shows only while the pointer is over the page) |
 | `?mode=photo&t=2` | opens as the photo of t = 2 s (for a judge) |
-| `?mode=live` | the preview |
-| `&ui=0` | no button at all |
-| camera | drag orbits around the target, wheel or pinch zooms (0.5×–3×); in photo mode a camera change restarts the accumulation (`updateCamera()`) |
+| `?mode=live` | the live view |
+| `?mode=raster` | the flat preview |
+| `&ui=0` | no button at all, and the fixed `width` × `height` canvas |
+| canvas | opened by a person (`ui` not 0): fills the window at `devicePixelRatio` (cap 2) and follows resizes; with `ui=0` (Crow's captures, the checker) the fixed `width` × `height` at pixel ratio 1 |
+| camera | drag orbits around the target, wheel or pinch zooms (0.5×–3×); in live and photo mode a camera change restarts the accumulation (`updateCamera()`) |
 | time | only the page clock (the rAF timestamp): under render_page's frozen clock (#293) 4 frames differ and a second capture repeats them byte for byte |
 
 ## Not empty (#299)
@@ -95,7 +98,7 @@ The skill's targets: ≥ 40 props of ≥ 12 kinds, ≥ 60,000 voxels, coverage �
 | `.box(x0,y0,z0, x1,y1,z1, …)` · `.clear(…)` | corners inclusive |
 | `.cyl(cx,cz, r, y0,y1, …)` · `.blob(cx,cy,cz, rx,ry,rz, …)` | vertical cylinder · ellipsoid |
 | `hash(x,y,z)` | stable value in [0,1) for colour variation |
-| `createDiorama(grid, opts)` | `width` `height` (1024), `voxelSize` (0.4), `background` (`#ddd6c8`), `fov` (14), `direction` ([1, 0.82, 1]), `zoom`, `fStop` (3.2), `bounces` (6), `despeckle` (true), `shadows` (true), `shadowRadius` (4), `orbit` (true), `minZoom` (0.5), `maxZoom` (3), `liveLight` (1, live light scale) |
+| `createDiorama(grid, opts)` | `width` `height` (1024, the capture canvas with `ui=0`), `fit` (true: a person's page fills the window), `voxelSize` (0.4), `background` (`#ddd6c8`), `fov` (14), `direction` ([1, 0.82, 1]), `zoom`, `fStop` (3.2), `bounces` (6), `despeckle` (true), `shadows` (true), `shadowRadius` (4), `orbit` (true), `minZoom` (0.5), `maxZoom` (3), `liveLight` (1, live light scale) |
 | `.addLamp({x, z, bottom, top})` | solid glowing shade from `bottom` to `top`, closed top, spot light below it; returns the light rig |
 | `.addAreaLight({at, lookAt, intensity, width, height})` | soft rectangle light, voxel coordinates, e.g. daylight outside a window; returns the light rig |
 | `.addSpot({at, lookAt, colour, intensity, angle, penumbra, shadow})` | spot light, `angle` = half-angle in degrees; returns the light rig (`rig.rotation.y = t` sweeps a beam) |
@@ -103,7 +106,7 @@ The skill's targets: ≥ 40 props of ≥ 12 kinds, ≥ 60,000 voxels, coverage �
 | `.part(name, grid, {pivot})` | an animated part from its own grid → `THREE.Group` turning around `pivot`; `userData.home` = start position |
 | `.animate((t, dt, scene) => …)` | every live frame, and once at the photo's t; `t` in seconds of page time |
 | `.start()` | meshes, lights, camera, the chosen mode; returns `{scene, camera, renderer, pathTracer, probe, setMode, mode, time}` |
-| `.setMode('live' \| 'photo')` | what P does |
+| `.setMode('live' \| 'photo' \| 'raster')` | P toggles live and photo |
 | `window.__SCENE__` | `voxels` `staticVoxels` `faces` `triangles` `materials` `lights` `size` `props` `propCount` `propKinds` `propVoxels` `coverage` `terrainColumns` `parts` `animated` `mode` `t` `errors` |
 | `window.__PT__` | `renderer` `mode` `samples` `samplesPerSecond` `fps` `lost` `restored` `despeckled` `error` |
 | console | `[crow-scene] {json}` at start, first live frame, every mode switch and every 5 s; `[crow-pt] samples=…` (photo) / `[crow-live] fps=…` (live) every 5 s |
@@ -111,7 +114,7 @@ The skill's targets: ≥ 40 props of ≥ 12 kinds, ≥ 60,000 voxels, coverage �
 ## Checker
 
 `kits/pathtracer/check_diorama.py <built index.html>`: renders through Crow's own `render_page`
-(4 live frames twice, one photo at `wait_ms` 20000), prints PASS/FAIL per check, exit 0 only when
+(4 raster-preview frames twice, one photo at `wait_ms` 20000), prints PASS/FAIL per check, exit 0 only when
 all pass, 2 on a setup error.
 
 | check | passes when |
@@ -121,8 +124,8 @@ all pass, 2 on a setup error.
 | samples | photo ≥ `--min-samples` (200) |
 | props · kinds · voxels | ≥ `--min-props` (40) · `--min-kinds` (12) · `--min-voxels` (60000) |
 | coverage | ≥ `--min-coverage` (0.5) |
-| motion | animated, and all 6 pairs of the 4 live frames differ in > 0.5 % of pixels (channel delta > 25) |
-| repeat | the second live capture is byte-identical (`--no-repeat` skips) |
+| motion | animated, and all 6 pairs of the 4 raster-preview frames differ in > 0.5 % of pixels (channel delta > 25) |
+| repeat | the second raster-preview capture is byte-identical (`--no-repeat` skips) |
 | photo | not near-uniform, < 90 % near-black |
 | errors | no `Uncaught` / `[crow-error]` console line, `errors` 0, no setScene failure |
 
@@ -139,7 +142,7 @@ default `$CROW_SERVE_URL`, else `http://127.0.0.1:8099/v1`; `none` = never borro
 | samples/s | 13.0 at 10 s, 14.3 at 40 s, scaffold room (26,627 voxels, 46,168 triangles, 23 materials), headless Chromium 152, ANGLE/Vulkan, RTX 5090, 2026-09-25 |
 | proof scene | ~15 samples/s at 9,124 and at 59,964 triangles; PSNR 60 s vs 180 s = 39.79 dB (HD5) |
 | page size | 970,310 bytes (scaffold, built with esbuild 0.28.2); 981,292 bytes with the #299 kit (esbuild 0.25.5) |
-| live preview | 60 fps (vsync cap) on the scaffold, headless Chromium, ANGLE/Vulkan, RTX 5090, 1024×1024, 2026-09-25 |
+| raster preview | 60 fps (vsync cap) on the scaffold (#299's live mode, now `?mode=raster`), headless Chromium, ANGLE/Vulkan, RTX 5090, 1024×1024, 2026-09-25 |
 | photo after 20 s | 289 samples (14.5 samples/s), scaffold with the pinwheel part, same machine |
 | bundle | `crow-pathtracer.js` 958,266 bytes, sha256 in `kits/pathtracer/kit.json` |
 

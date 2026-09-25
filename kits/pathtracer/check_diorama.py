@@ -14,7 +14,8 @@ clock of #293), reads the `render: {json}` line and the kit's console probe
   voxels     >= --min-voxels voxels (main grid + parts)
   coverage   terrain coverage >= --min-coverage (share of the terrain's top cells
              with a prop above them; voxel-kit.js coverage())
-  motion     the scene is animated and every pair of the 4 live frames differs in
+  motion     the scene is animated and every pair of the 4 preview frames
+             (?mode=raster, the flat raster preview) differs in
              more than 0.5 % of its pixels (a pixel differs when a channel moves by
              more than 25 of 255 -- #293's precheck line)
   repeat     a second live capture is byte-identical frame by frame (the
@@ -109,6 +110,12 @@ def pair_diffs(frames):
     return out
 
 
+# The clock-stepped motion/repeat captures: the flat raster preview (#299's old
+# live mode). Live mode now path-traces the island under the moving parts.
+MOTION_QUERY = "?mode=raster&ui=0"
+MOTION_MODES = ("raster", "live")
+
+
 def evaluate(live, photo, opts, diffs=None, repeat=None):
     """[(name, ok, detail)] from two parsed captures.
 
@@ -125,7 +132,7 @@ def evaluate(live, photo, opts, diffs=None, repeat=None):
     out.append(("gpu", gpu_ok(lr) and gpu_ok(pr),
                 "live %s / photo %s: %s" % (lr.get("render_mode", "no record"), pr.get("render_mode", "no record"),
                                             str(pr.get("renderer") or lr.get("renderer") or lr.get("reason") or pr.get("reason"))[:120])))
-    out.append(("probe", bool(lp) and bool(pp) and lp.get("mode") == "live" and pp.get("mode") == "photo",
+    out.append(("probe", bool(lp) and bool(pp) and lp.get("mode") in MOTION_MODES and pp.get("mode") == "photo",
                 "live %s, photo %s" % ("mode=%s" % lp.get("mode") if lp else "NO [crow-scene] line",
                                        "mode=%s t=%s" % (pp.get("mode"), pp.get("t")) if pp else "NO [crow-scene] line")))
     scene = pp or lp or {}
@@ -324,10 +331,13 @@ def main(argv=None):
     # free). Name the local serve the same way a turn does.
     bind_lend_spot(core, a.serve)
     name = os.path.basename(page)
+    # The motion and repeat captures use the raster preview: since 2026-09-25 the
+    # default live mode path-traces the static island, and its accumulating
+    # samples would make a still scene "move" and differ run to run.
     opts = {"min_props": a.min_props, "min_voxels": a.min_voxels, "min_coverage": a.min_coverage,
             "min_kinds": a.min_kinds, "min_samples": a.min_samples}
 
-    live = capture(core, name + "?mode=live&ui=0", frames=4, frame_ms=a.frame_ms, wait_ms=2000,
+    live = capture(core, name + MOTION_QUERY, frames=4, frame_ms=a.frame_ms, wait_ms=2000,
                    width=a.size, height=a.size)
     frames = (live["record"] or {}).get("frames") or []
     samples = frame_samples(core, frames) if len(frames) == 4 else None
@@ -335,7 +345,7 @@ def main(argv=None):
     repeat = None
     if not a.no_repeat and len(frames) == 4:
         first = [sha(f) for f in frames]
-        again = capture(core, name + "?mode=live&ui=0", frames=4, frame_ms=a.frame_ms, wait_ms=2000,
+        again = capture(core, name + MOTION_QUERY, frames=4, frame_ms=a.frame_ms, wait_ms=2000,
                         width=a.size, height=a.size)
         second = [sha(f) for f in ((again["record"] or {}).get("frames") or [])]
         repeat = len(second) == 4 and None not in first and first == second

@@ -191,12 +191,13 @@ export function parseMode(search = '') {
   const q = new URLSearchParams(search);
   const asked = (q.get('mode') || '').trim().toLowerCase();
   const photo = asked === 'photo' || asked === 'foto';
+  const raster = asked === 'raster' || asked === 'preview';
   const tv = Number(q.get('t'));
   return {
-    mode: photo ? 'photo' : 'live',
+    mode: photo ? 'photo' : (raster ? 'raster' : 'live'),
     t: q.has('t') && Number.isFinite(tv) && tv >= 0 ? tv : 0,
     ui: q.get('ui') !== '0',
-    forced: photo || asked === 'live',
+    forced: photo || raster || asked === 'live',
   };
 }
 
@@ -548,7 +549,15 @@ export function createDiorama(grid, opts = {}) {
     }
 
     // Camera: telephoto PhysicalCamera, near-isometric, slight depth of field.
-    const cam = new PhysicalCamera(o.fov, o.width / o.height, 1, 10000);
+    // A person opening the page gets the whole window at the display's real
+    // resolution (2026-09-25: a fixed 1024x1024 canvas at pixel ratio 1 looked
+    // pixelated on robin's scaled 1440p screen). Checkers pass ui=0 and keep the
+    // fixed width x height, so captures stay comparable.
+    const fit = url.ui && o.fit !== false && typeof window !== 'undefined';
+    const size = () => fit ? [Math.max(200, window.innerWidth), Math.max(200, window.innerHeight)] : [o.width, o.height];
+    let [W, H] = size();
+    const dpr = fit ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+    const cam = new PhysicalCamera(o.fov, W / H, 1, 10000);
     const target = new THREE.Vector3(0, ext[1] * 0.4, 0);
     const dist = (radius / Math.sin((o.fov * Math.PI) / 360)) * 1.02 / o.zoom;
     cam.position.copy(target).addScaledVector(new THREE.Vector3(...o.direction).normalize(), dist);
@@ -561,7 +570,7 @@ export function createDiorama(grid, opts = {}) {
     if (problems.length) throw new Error('the scene would not path-trace cleanly:\n  ' + problems.join('\n  '));
 
     const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
-    renderer.setPixelRatio(1); renderer.setSize(o.width, o.height);
+    renderer.setPixelRatio(dpr); renderer.setSize(W, H);
     renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.shadowMap.enabled = !!o.shadows; renderer.shadowMap.type = THREE.PCFShadowMap;      // rule 8
     if (!document.getElementById('crow-kit-css')) {
@@ -570,7 +579,7 @@ export function createDiorama(grid, opts = {}) {
     }
     const holder = document.createElement('div');
     holder.className = 'crow-holder';
-    Object.assign(holder.style, { width: o.width + 'px', height: o.height + 'px' });
+    Object.assign(holder.style, fit ? { width: '100vw', height: '100vh', overflow: 'hidden' } : { width: o.width + 'px', height: o.height + 'px' });
     holder.appendChild(renderer.domElement);
     o.parent.appendChild(holder);
     const gl = renderer.getContext();
@@ -647,19 +656,57 @@ export function createDiorama(grid, opts = {}) {
     let overlay = null, octx = null;
     if (o.despeckle) {
       overlay = document.createElement('canvas');
-      overlay.width = o.width; overlay.height = o.height;
+      overlay.width = renderer.domElement.width; overlay.height = renderer.domElement.height;
+      Object.assign(overlay.style, { width: W + 'px', height: H + 'px' });
       Object.assign(overlay.style, { position: 'absolute', left: '0', top: '0', pointerEvents: 'none', display: 'none' });
       holder.appendChild(overlay);
       octx = overlay.getContext('2d', { willReadFrequently: true });
     }
 
-    const liveLoop = (my) => (ts) => {
+    // LIVE (default, 2026-09-25): the static island is path-traced and keeps
+    // converging while the camera rests; only the animated parts (d.part) are
+    // rasterised on top, depth-tested against the island. robin opened the old
+    // flat raster preview after a 6/6 run and it looked nothing like the photos:
+    // the view people open must carry the photo's light. `?mode=raster` keeps
+    // the old flat preview for debugging.
+    const partsScene = new THREE.Scene();
+    const depthOnly = new THREE.MeshBasicMaterial({ colorWrite: false });
+    const partsFill = new THREE.HemisphereLight(o.domeTop, o.domeBottom, 1.2);
+    partsScene.add(partsFill);
+    const partsKey = new THREE.DirectionalLight(o.keyColour, 1.5);
+    partsKey.position.set(radius, radius * 1.4, radius * 0.4);
+    partsScene.add(partsKey);
+    const partsTo = (home) => { for (const rec of parts) home.add(rec.group); };
+    const rasterLoop = (my) => (ts) => {
       if (my !== gen) return;
       const now = typeof ts === 'number' ? ts : performance.now();
       t = Math.max(lastT, tBase + now / 1000);
       runAnimators(t, t - lastT); lastT = t;
       info.t = t;
       renderer.render(scene, cam);
+      liveFrames++;
+      if (firstLive) { firstLive = false; probeLine(); }
+      requestAnimationFrame(rasterLoop(my));
+    };
+    const liveLoop = (my) => (ts) => {
+      if (my !== gen) return;
+      const now = typeof ts === 'number' ? ts : performance.now();
+      t = Math.max(lastT, tBase + now / 1000);
+      runAnimators(t, t - lastT); lastT = t;
+      info.t = t;
+      renderer.autoClear = true;
+      pt.renderSample();                                // the island, path-traced, accumulating
+      probe.samples = pt.samples;
+      probe.seconds = (performance.now() - t0) / 1000;
+      probe.samplesPerSecond = probe.seconds > 0 ? +(probe.samples / probe.seconds).toFixed(1) : 0;
+      renderer.autoClear = false;
+      renderer.clearDepth();
+      const bg = scene.background;
+      scene.background = null; scene.overrideMaterial = depthOnly;
+      renderer.render(scene, cam);                      // depth of the island only
+      scene.overrideMaterial = null; scene.background = bg;
+      renderer.render(partsScene, cam);                 // the moving parts on top
+      renderer.autoClear = true;
       liveFrames++;
       if (firstLive) { firstLive = false; probeLine(); }
       requestAnimationFrame(liveLoop(my));
@@ -673,30 +720,45 @@ export function createDiorama(grid, opts = {}) {
       requestAnimationFrame(photoLoop(my));
     };
 
-    const enterLive = () => {
-      mode = 'live'; gen++;
-      probe.mode = info.mode = 'live';
+    const enterRaster = () => {
+      mode = 'raster'; gen++;
+      probe.mode = info.mode = 'raster';
+      partsTo(scene);
       setLights('live');
       if (overlay) overlay.style.display = 'none';
       tBase = t - performance.now() / 1000; lastT = t;
       liveFrames = 0; fpsFrom = performance.now();
       renderer.render(scene, cam);                    // a first frame even before rAF
+      requestAnimationFrame(rasterLoop(gen));
+    };
+    const enterLive = () => {
+      mode = 'live'; gen++;
+      probe.mode = info.mode = 'live';
+      partsTo(partsScene);                            // the path tracer sees the static island only
+      setLights('photo');
+      if (overlay) overlay.style.display = 'none';
+      ensurePT();
+      try { pt.setScene(scene, cam); pt.reset(); probe.error = null; } catch (e) { probe.error = String(e); console.error('[crow-pt] setScene failed:', e); }
+      probe.samples = 0; t0 = performance.now();
+      tBase = t - performance.now() / 1000; lastT = t;
+      liveFrames = 0; fpsFrom = performance.now();
       requestAnimationFrame(liveLoop(gen));
     };
     const enterPhoto = () => {
       mode = 'photo'; gen++;
       probe.mode = info.mode = 'photo';
+      partsTo(scene);                                 // the photo path-traces the parts too
       setLights('photo');
       ensurePT();
       try { pt.setScene(scene, cam); pt.reset(); probe.error = null; } catch (e) { probe.error = String(e); console.error('[crow-pt] setScene failed:', e); }
       probe.samples = 0; t0 = performance.now();
-      if (overlay) { octx.clearRect(0, 0, o.width, o.height); overlay.style.display = ''; }
+      if (overlay) { octx.clearRect(0, 0, overlay.width, overlay.height); overlay.style.display = ''; }
       requestAnimationFrame(photoLoop(gen));
     };
     const setMode = (m) => {
-      if (m !== 'live' && m !== 'photo') throw new Error(`mode '${m}' -- use 'live' or 'photo'`);
+      if (m !== 'live' && m !== 'photo' && m !== 'raster') throw new Error(`mode '${m}' -- use 'live', 'photo' or 'raster'`);
       if (m === mode && started) return;
-      if (m === 'photo') enterPhoto(); else enterLive();
+      if (m === 'photo') enterPhoto(); else if (m === 'raster') enterRaster(); else enterLive();
       if (button) button.textContent = m === 'photo' ? 'Live' : 'Foto';
       probeLine();
     };
@@ -705,17 +767,26 @@ export function createDiorama(grid, opts = {}) {
     renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); probe.lost++; });
     renderer.domElement.addEventListener('webglcontextrestored', () => {
       probe.restored++;
-      if (mode === 'photo' && pt) { try { pt.setScene(scene, cam); pt.reset(); } catch (e) { probe.error = String(e); } }
+      if ((mode === 'photo' || mode === 'live') && pt) { try { pt.setScene(scene, cam); pt.reset(); } catch (e) { probe.error = String(e); } }
     });
 
     // Despeckle on the overlay canvas, once a second, photo mode only (rule 5).
     if (overlay) setInterval(() => {
       if (mode !== 'photo' || !pt || pt.samples <= 8) return;
       octx.drawImage(renderer.domElement, 0, 0);
-      const img = octx.getImageData(0, 0, o.width, o.height);
-      probe.despeckled = despeckle(img.data, o.width, o.height);
+      const img = octx.getImageData(0, 0, overlay.width, overlay.height);
+      probe.despeckled = despeckle(img.data, overlay.width, overlay.height);
       octx.putImageData(img, 0, 0);
     }, 1000);
+
+    if (fit) window.addEventListener('resize', () => {
+      [W, H] = size();
+      renderer.setSize(W, H);
+      cam.aspect = W / H; cam.updateProjectionMatrix();
+      if (overlay) { overlay.width = renderer.domElement.width; overlay.height = renderer.domElement.height;
+                     Object.assign(overlay.style, { width: W + 'px', height: H + 'px' }); }
+      if ((mode === 'photo' || mode === 'live') && pt) { pt.updateCamera(); probe.samples = 0; t0 = performance.now(); }
+    });
 
     // ---- orbit: drag / touch turns around the target, wheel or pinch zooms ----
     const sph = new THREE.Spherical().setFromVector3(cam.position.clone().sub(target));
@@ -728,7 +799,7 @@ export function createDiorama(grid, opts = {}) {
       cam.focusDistance = sph.radius;
       cam.near = Math.max(0.1, sph.radius - radius * 4); cam.far = sph.radius + radius * 4;
       cam.updateProjectionMatrix();
-      if (mode === 'photo' && pt) { pt.updateCamera(); probe.samples = 0; t0 = performance.now(); if (octx) octx.clearRect(0, 0, o.width, o.height); }
+      if ((mode === 'photo' || mode === 'live') && pt) { pt.updateCamera(); probe.samples = 0; t0 = performance.now(); if (octx) octx.clearRect(0, 0, overlay.width, overlay.height); }
     };
     const pointers = new Map();
     let pinch = 0;
@@ -787,7 +858,7 @@ export function createDiorama(grid, opts = {}) {
     // live preview's first frame too.
     runAnimators(t, 0);
     started = true;
-    if (mode === 'photo') enterPhoto(); else enterLive();
+    if (mode === 'photo') enterPhoto(); else if (mode === 'raster') enterRaster(); else enterLive();
     refreshInfo();
 
     console.log(`[crow-pt] ${info.voxels} voxels, ${info.triangles} triangles, ${info.materials} materials, renderer: ${probe.renderer}`);

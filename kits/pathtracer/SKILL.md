@@ -8,13 +8,16 @@ and `crow-voxel-kit`, a voxel grid + mesher + studio. It gives global illuminati
 and contact shadows, colour bleeding and a lamp glow with no shader code of your own.
 Kit folder: `@CROW_KITS@/pathtracer` (scaffold in `scaffold/`, API in `voxel-kit.js`).
 
-The page has TWO MODES. It opens in LIVE mode: an animated raster preview (real lights,
-soft shadow maps, the same materials) that runs your `d.animate` callback every frame and
-can be orbited with the mouse. PHOTO mode pauses the animation at t and path-traces the
-frame until it converges. Key P or the small "Foto"/"Live" button switch. URL:
-`index.html?mode=photo&t=2` opens the photo of t = 2 s, `?mode=live` the preview, `&ui=0`
-hides the button. The kit is the only renderer code you need: no OrbitControls, no
-EffectComposer, no shaders.
+The page opens in LIVE mode: the static island is path-traced and keeps converging while
+the camera rests, and only the animated parts (`d.part`) are rasterised on top; your
+`d.animate` callback runs every frame and the mouse orbits. PHOTO mode pauses the animation
+at t and path-traces the whole frame, parts included, until it converges. Key P or the
+small "Foto"/"Live" button switch. URL: `index.html?mode=photo&t=2` opens the photo of
+t = 2 s, `?mode=live` the live view, `?mode=raster` the old flat raster preview (for the
+motion check), `&ui=0` hides the button. Opened by a person, the page fills the window at
+the display's pixel ratio (cap 2); with `ui=0` (Crow's captures, the checker) it keeps the
+fixed `width` x `height` canvas. The kit is the only renderer code you need: no
+OrbitControls, no EffectComposer, no shaders.
 
 ## Steps
 
@@ -72,12 +75,12 @@ EffectComposer, no shaders.
    deliverable; it opens offline from file://. Edit `src/`, build again, never patch
    `index.html`.
 6. Verify:
-   - Motion: `render_page` `index.html?mode=live&ui=0`, `frames` 4, `frame_ms` 500,
+   - Motion: `render_page` `index.html?mode=raster&ui=0`, `frames` 4, `frame_ms` 500,
      `width`/`height` = the canvas size. `read_image` the contact sheet: the beam, the water
      and the particles must be in different places in the 4 frames.
    - Photo: `render_page` `index.html?mode=photo&t=2&ui=0`, `wait_ms` 20000, one frame.
-     Night or dark scenes with small lights need more samples: use `wait_ms` 60000-90000
-     (kit pages may wait up to 120000; ~15 samples/s at 1024^2). Never shrink the scene to
+     Night or dark scenes with small lights need more samples: use `wait_ms` 60000-120000
+     (60-120 s; kit pages may wait up to 120000; ~15 samples/s at 1024^2). Never shrink the scene to
      fit a short capture -- the page itself keeps converging in the browser.
      Read the console lines:
      - `renderer:` must name the GPU (NVIDIA/AMD/Intel), not SwiftShader/llvmpipe;
@@ -92,7 +95,9 @@ EffectComposer, no shaders.
    - The whole check in one command (a goal's `check:`):
      `python3 @CROW_KITS@/pathtracer/check_diorama.py index.html` -- PASS/FAIL per check
      (gpu, samples, props, kinds, voxels, coverage, motion, repeat, photo, errors), exit 0
-     only when all pass.
+     only when all pass. It borrows VRAM from the local crow-nest serve like a Crow turn:
+     `--serve URL` (default `$CROW_SERVE_URL`, else http://127.0.0.1:8099/v1; `none` =
+     never borrow). Dark scenes: add `--wait-ms 90000 --min-samples 1000`.
    `window.__SCENE__` (voxels, props with bbox, coverage, parts, animated, mode) and
    `window.__PT__` (samples, samplesPerSecond, fps, renderer, lost) hold the same numbers.
 7. Fix what the check found in `src/scene.js` and repeat 5-6. Change content and light,
@@ -109,7 +114,7 @@ EffectComposer, no shaders.
 - Bright emissive voxels are fireflies (the library does not importance-sample them).
   Keep `emit` dim (the kit caps emissiveIntensity at 1) and light with lamps/spots/area
   lights. Fireflies/particles may be `emit` voxels; they glow, they do not light.
-- Animation from `Date.now()`, `Math.random()` or `setInterval` counters: the 4 live frames
+- Animation from `Date.now()`, `Math.random()` or `setInterval` counters: the 4 preview frames
   do not repeat and Crow's motion check cannot trust them. Only `t` (and `dt`).
 - The source page `src/index.html` shows nothing from file:// (module imports are
   blocked). Always render the built `index.html`.

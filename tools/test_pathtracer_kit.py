@@ -131,7 +131,7 @@ if (kit.coverage) {
   const empty = new VoxelGrid(); empty.prop('only', () => empty.put(0, 0, 0, '#ffffff'));
   out.covEmpty = coverage(empty);
   out.modes = ['', '?mode=photo&t=2.5', '?mode=foto', '?mode=live&t=4', '?mode=photo&t=-1', '?mode=photo&t=abc',
-               '?mode=PHOTO&ui=0', '?mode=xyz&t=1'].map((q) => parseMode(q));
+               '?mode=PHOTO&ui=0', '?mode=xyz&t=1', '?mode=raster&ui=0', '?mode=preview'].map((q) => parseMode(q));
   out.kinds = ['Rock 3', 'rock#12', 'rock_7', 'grass tuft 12', 'crate', '42'].map(propKind);
   const bad = [];
   try { p.prop('', () => {}); } catch (e) { bad.push('name'); }
@@ -249,7 +249,8 @@ class PropsCoverageModeTests(unittest.TestCase):
         modes = [(m["mode"], m["t"], m["ui"], m["forced"]) for m in self.out["modes"]]
         self.assertEqual(modes, [("live", 0, True, False), ("photo", 2.5, True, True), ("photo", 0, True, True),
                                  ("live", 4, True, True), ("photo", 0, True, True), ("photo", 0, True, True),
-                                 ("photo", 0, False, True), ("live", 1, True, False)])
+                                 ("photo", 0, False, True), ("live", 1, True, False),
+                                 ("raster", 0, False, True), ("raster", 0, True, True)])
 
     def test_prop_kinds_drop_trailing_numbers(self):
         self.assertEqual(self.out["kinds"], ["rock", "rock", "rock", "grass tuft", "crate", "42"])
@@ -360,6 +361,13 @@ class DioramaCheckerTests(unittest.TestCase):
 
     def test_the_wrong_mode_fails_probe(self):
         self.assertEqual(self.failed(photo=self.cap("live")), ["probe"])
+
+    def test_motion_is_captured_on_the_raster_preview(self):
+        """2026-09-25: live mode path-traces the static island, whose
+        accumulating samples would make a still scene 'move'; the clock-stepped
+        motion/repeat captures use ?mode=raster, and its probe passes."""
+        self.assertEqual(diorama.MOTION_QUERY, "?mode=raster&ui=0")
+        self.assertEqual(self.failed(live=self.cap("raster")), [])
 
     def test_pair_diffs_counts_pixels_over_the_channel_delta(self):
         a = [(10, 10, 10)] * 100
