@@ -197,11 +197,19 @@ the plan, the file carries the state — see
 mark stay, so the whole stretch is billed when it closes (#275). A `note` given with `running` is
 stored on the step; `done`/`failed` replace it with theirs.
 
-`failed` sends a step back **once** (#289). The answer carries `retry`, and the next nudge quotes
-the note. A second `failed` on the same step makes it `skipped`: the answer carries `skipped`, and
-`next_step` names the step after it. A skipped step counts as not done, and the engine moves past
-it. A goal whose steps are all `done` or `skipped` ends "complete with N skipped" (`ended` in the
-answer), never `done`. The user skips a step with `/goal skip <n> [reason]`.
+`failed` never skips a step (#294, replacing #289's skip on the second `failed`). The answer
+carries `failure` (`class`, `counted`, `action`) and `then`, the sentence saying what comes next.
+The class comes from the step's last capture, not from the note. On a GPU step, a capture that is
+software-rendered, `unavailable`, blank or frozen is *environment*. Anything else is *capability*.
+Environment: two retries, then a pause. Capability: a reflection (`goal_step(n, "running",
+note="reflection: …")`), then attempt 3 in a fresh context, then `goal_step(n, "split",
+substeps=[2–3 items])`. Sub-steps are reported with `goal_step(n, "done"|"failed", note, sub=k)`,
+and a failed sub-step pauses. While the goal is paused, `goal_step`, `goal_set` and `judge` refuse.
+`checklist=[…]` with `running` writes the step's checklist once (#295); a second write is refused
+and the answer shows the frozen one. A step the user skipped cannot be set `done` or `running` by
+the model; `/goal redo <n>` takes the skip back (#296). A goal whose steps are all `done` or
+`skipped` ends "complete with N skipped" (`ended` in the answer), never `done`. Only the user skips
+a step: `/goal skip <n> [reason]`.
 
 A `done` is not taken on the model's word alone (#250). `goal_step(…, "done", note)` is refused
 when its own note reports a failure ("in spirit", "with deviation", "cannot be created",
@@ -215,25 +223,29 @@ off` drops it. Replayed on the 10 real `done` calls of 2026-09-23: 6 refused, th
 notes passed.
 
 On a visual goal (#267), `done` on a step that makes something to look at must cite a capture
-written during this goal (a path, or a bare `render-….png` name from `.crow/renders/`). If `judge`
-scored the step, its lowest score must reach `judge_threshold` (default 8). Steps that only plan
+written during this goal (a path, or a bare `render-….png` name from `.crow/renders/`). A step
+with a frozen checklist also needs a `judge` verdict with every must-item "yes" (#295). A verdict
+stored before the checklist (v2.6.0) is still held to `judge_threshold` (default 8). Steps that only plan
 are exempt. `"visual": true|false` in `goal.json` overrides the keyword guess. See
 [goals and subagents](../user-guide/goals-and-subagents.md).
 
-### `judge` (#266)
+### `judge` (#266, #295)
 
-`judge(images="", criteria="", step=None)` has a separate model with fresh eyes score a capture of
-visual work. The judge receives **one** request containing the image(s), the rubric, the goal's
-title and the step's text. It never receives the conversation: the maker's own story ("the black
-screen was a viewport leak, now fixed") is exactly what talked the maker into its own score.
-Seen on 2026-09-23: "Every criterion reads 9+ on the capture" over a small box in a black frame.
+`judge(images="", criteria="", step=None)` has a separate model with fresh eyes check a capture of
+visual work against the step's **frozen checklist**. The judge receives **one** request containing
+the image(s), the checklist, the goal's title and the step's text. It never receives the
+conversation: the maker's own story ("the black screen was a viewport leak, now fixed") is exactly
+what talked the maker into its own score. Seen on 2026-09-23: "Every criterion reads 9+ on the
+capture" over a small box in a black frame.
 
 | | |
 |---|---|
-| Images | default: the newest `render-*.png` in `.crow/renders/`, plus its `-crop.png` when the render wrote one (the content enlarged); up to 4 |
-| Rubric | the user's `accept:` lines from `/goal`, else criteria written in `PLAN.md` (a heading naming criteria or a rubric with bullets, or a sentence "score … against: a, b, c."), else `criteria`, else a default visual rubric. The model can only supply a rubric where none is written down. Without `accept:` lines the step's own text leads as `delivers: <step>`; `PLAN.md`, `criteria` or the default only add to it (#286) |
-| Answer | JSON: `scores` (1–10 per criterion), `min`, `threshold`, `passes`, `weakest` (three points), `verdict`, `judge` and `chosen_as`, `rubric_from` (e.g. `the step + the caller`), `images`, `step` |
-| Stored | on the step in `goal.json` (`judge`: model, scores, min, weakest, verdict, images, `rubric_source`, `criteria` as judged, time), where [`goal_step`](#goals-165) reads it (#267) |
+| Precheck (#295) | before any model is asked. It checks the render's `render_mode`: `unavailable`, or `software` on a GPU step (webgl, shader, 3d, voxel, ray…, diorama, three.js; `"gpu": true\|false` in goal.json overrides). It checks the render's `precheck`: `uniform`, under 16 `distinct_colours`, `dark_pct` ≥ 98, or `identical_frames` on a step that needs motion (animate, rain, splash, steam, weather, particles, …). It checks the first image's own pixels: ≥ 98 % one colour, luma mean ≤ 4, under 16 colours. A hit is an **environment** failure: `class: environment`, `judge_called: false`, and the step's retry/pause rung ([goals](#goals-165)) |
+| Images | the newest `render-*.png` in `.crow/renders/` by default. When `render_page` recorded clock-stepped `frames` for it, those frames go instead (up to 4); else its `contact_sheet` with the capture; else the capture plus its `-crop.png`. The render facts are read from the result's `render: {…}` line (the #293 contract) in `run_tool`, and stored on the running step as `capture`. Reference images come last |
+| Checklist | frozen once per step (`checklist`, `checklist_from`, `checklist_at` in goal.json). It comes from the user's `accept:` lines when the step starts (`accept: 5: <item>` binds to step 5, an unnumbered line to every visual step), else the model's `goal_step(n, "running", checklist=[…])`, else the first `judge` call (`criteria`, or "the frame shows the scene itself"). Except under `accept:` lines, `delivers: <step>` leads (#286). `optional:` items do not gate. `criteria` on a later call changes nothing |
+| References | `/goal … \| reference: <image> -- <criterion>` (at most 2, stored in `goal-references.json` in the session directory, never in goal.json). Each adds the advisory item "as good as the reference image <name> on: <criterion>" and sends the image after the capture, for a pairwise answer |
+| Answer | JSON: `checklist` (yes/no/unknown per item), `evidence` (one line per item), `passes` (every must-item yes), `overall` (1–10, secondary), `weakest`, `verdict`, `judge`, `chosen_as`, `checklist_from`, `images`, `step`. On a miss: `failure` and `next` (reflect / fresh context / split / pause). `fresh_context_only: true` when the actor's own weights judged. An answer in the old `scores` form is read against `judge_threshold` |
+| Stored | on the step in `goal.json` (`judge`: model, checklist, evidence, must, pass, no, unknown, images, references, time). Items answered yes join the step's `passed`, which the no-progress timer watches (#294) |
 | Class | `network`: the capture leaves the machine when a remote model judges |
 
 **Who judges**, strongest reachable first, and never inside the maker's context:
@@ -249,8 +261,9 @@ Seen on 2026-09-23: "Every criterion reads 9+ on the capture" over a small box i
    refused up front when the server's `/props` says it cannot see. On a one-slot local server it
    also costs the next turn a cold prefill, and the result says so.
 
-A spot that fails (rate limit, 403, no JSON, fewer than half the criteria scored) hands on to the
-next one, and the answer lists it under `tried_first`.
+A spot that fails (rate limit, 403, no JSON, fewer than half the checklist answered) hands on to the
+next one, and the answer lists it under `tried_first`. When no spot answers, that is an environment
+failure of the step (#294).
 
 Measured on 2026-09-24 on `render-20260923-232855.png` (the diorama frame the model had scored
 9+), with the prompt's seven criteria and four free OpenRouter vision models pinned in turn. All

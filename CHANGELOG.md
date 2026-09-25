@@ -5,6 +5,45 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Added
+
+- **Frozen per-step checklist for the judge, with yes/no/unknown, frames, a precheck and reference images**
+  (#295, 2026-09-25). Each visual step gets a checklist when it starts. It comes from `accept:` lines
+  (`accept: 5: <item>` binds to step 5), or the model writes it once with `goal_step(n, "running", checklist=[…])`,
+  or the first `judge` call writes it. A second write is refused, and a replan keeps it. The judge answers each item
+  yes/no/unknown with one line of evidence. `done` needs every must-item "yes" (`optional:` items do not gate).
+  "unknown" twice on one step pauses the goal. When the render recorded clock-stepped `frames` or a
+  `contact_sheet`, the judge sees them. A capture that is software-rendered on a GPU step, uniform, black, under 16
+  colours, or frozen on a step that needs motion never reaches the judge model: it is an environment failure.
+  `reference: <image> -- <criterion>` in `/goal` sends robin's reference image for a pairwise item. These items are
+  advisory until calibrated. Before, on 2026-09-25, 8 judge calls on steps 5–8 used criteria the model wrote at
+  judge time, each scored 1–10 on one software frame. Not measured live.
+- **Step budget and no-progress timer** (#294). A goal step gets 60 min of active wall clock (`goal_step_minutes`,
+  `CROW_GOAL_STEP_MINUTES`). A step with a checklist pauses after 10 nudges with no item newly passed
+  (`goal_no_progress_turns`, `CROW_GOAL_NO_PROGRESS_TURNS`). The clock stops while the goal is paused. On
+  2026-09-24/25 step 5 carried 8 idle night hours (43,130 s). Not measured live.
+
+### Changed
+
+- **A failed goal step is never skipped by the engine; it climbs a ladder and then pauses and asks** (#294,
+  2026-09-25, replaces #289's skip). Each failure has a class. *Environment* (render_mode unavailable, software on a
+  GPU step, blank or identical frames, no judge answered): two retries 15 s apart, then pause. *Capability* (a valid
+  capture the judge does not pass): a written reflection, then attempt 3 in a fresh context, then a split into 2–3
+  sub-steps (`goal_step(n, "split", substeps=[…])`, reported with `sub`), then pause. The 25-turn and 60-turn caps
+  and the budget pause too. On every pause the model writes robin a report: what it found, why it cannot go on,
+  2–3 proposals, and whether he has more input. The report is shown in the window and on the phone. Only a typed
+  line resumes. Before: the 2026-09-24/25 diorama run ended "complete with 4 skipped", with steps 5–8 skipped on
+  software-GL captures and nobody asked. After: 0 skips without `/goal skip` in the unit replay. Not measured live.
+
+### Fixed
+
+- **A skip stored as `done`, and skipped drawn in the running step's amber** (#296). A `done` step whose note starts
+  with "skipped" loads as `skipped`, which repairs the 2026-09-24 hand edit of step 4 (counted 5/9, now 4/9). The
+  model can no longer set a user-skipped step `done` or `running`; `/goal redo <n>` reopens it. In the goal bar
+  (window and phone), skipped has its own colour (`--skip`, violet), a dashed ring with a skip glyph and the word
+  "skipped". Running keeps amber with a dot. A paused step shows a red pause glyph, and the head reads
+  "Paused · step N".
+
 ## 2.6.0 — 2026-09-24
 
 **The phone becomes a second view of the session, and goal runs get a fresh-eyes judge.** A paired phone mirrors
