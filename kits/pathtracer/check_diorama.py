@@ -274,6 +274,20 @@ def reference_sheet(core, photo_path, ref_dir, height=512):
     return out, stats
 
 
+DEFAULT_SERVE = "http://127.0.0.1:8099/v1"
+
+
+def bind_lend_spot(core, serve):
+    """#304: give crow_core the endpoint a turn would have, so render_page can
+    lend from a local serve. 'none' (or empty) leaves it unbound."""
+    if not serve or str(serve).lower() == "none":
+        return False
+    if not hasattr(core, "_TURN_SPOT"):
+        return False
+    core._TURN_SPOT = {"base_url": serve, "remote": False}
+    return True
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("page", help="the BUILT page (build_bundle's out), e.g. index.html")
@@ -289,6 +303,9 @@ def main(argv=None):
     ap.add_argument("--reference", help="folder of reference PNGs for a side-by-side sheet")
     ap.add_argument("--crow-cli", help="the cli folder holding crow_core.py")
     ap.add_argument("--no-repeat", action="store_true", help="skip the second live capture")
+    ap.add_argument("--serve", default=os.environ.get("CROW_SERVE_URL", DEFAULT_SERVE),
+                    help="the local crow-nest serve render_page may borrow VRAM from "
+                         "(#117/#297); 'none' = never borrow")
     a = ap.parse_args(argv)
 
     page = os.path.abspath(a.page)
@@ -301,6 +318,11 @@ def main(argv=None):
         print("SETUP ERROR: %s" % exc)
         return 2
     core.set_root(os.path.dirname(page))
+    # #304: this checker runs in its own process, outside any Crow turn, so
+    # render_page had no endpoint to borrow VRAM from and refused every capture
+    # with ENVIRONMENT while serve held the card (live 2026-09-25 15:3x, 280 MiB
+    # free). Name the local serve the same way a turn does.
+    bind_lend_spot(core, a.serve)
     name = os.path.basename(page)
     opts = {"min_props": a.min_props, "min_voxels": a.min_voxels, "min_coverage": a.min_coverage,
             "min_kinds": a.min_kinds, "min_samples": a.min_samples}

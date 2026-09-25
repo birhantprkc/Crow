@@ -425,3 +425,25 @@ class CheckerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckerBorrowsVramTests(unittest.TestCase):
+    """#304: the checker runs outside a Crow turn and must name serve for lending."""
+
+    def test_the_checker_binds_the_local_serve(self):
+        class Core:
+            _TURN_SPOT = {}
+        core = Core()
+        self.assertTrue(diorama.bind_lend_spot(core, "http://127.0.0.1:8099/v1"))
+        self.assertEqual(core._TURN_SPOT, {"base_url": "http://127.0.0.1:8099/v1", "remote": False})
+
+    def test_none_leaves_it_unbound(self):
+        class Core:
+            _TURN_SPOT = {}
+        core = Core()
+        self.assertFalse(diorama.bind_lend_spot(core, "none"))
+        self.assertEqual(core._TURN_SPOT, {})
+
+    def test_main_binds_before_the_first_capture(self):
+        src = open(diorama.__file__, encoding="utf-8").read()
+        self.assertLess(src.index("bind_lend_spot(core, a.serve)"), src.index('live = capture(core'))
