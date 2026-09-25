@@ -10378,11 +10378,12 @@ class TheGoalPanelShowsTheGoalsOwnCostTests(ApiCase):
         self.assertEqual([m["goal"] for m in said], [None])
 
 
-class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
+class AFailedStepIsRetriedNotSkippedTests(ApiCase):
     """#289, the window's half. 2026-09-24: step 4 went `failed`, the nudge
     after it said only "step 4 still open" (session.json msg 327), and
     after robin's hand skip the goal bar kept the old step for the whole
-    next turn -- only goal_set/goal_step results repainted it."""
+    next turn -- only goal_set/goal_step results repainted it. #294: the
+    second failure no longer skips; it rolls into a fresh context."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -10413,9 +10414,16 @@ class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
         self.assertIn("different approach", nudge)
         self.assertNotIn("still open. Continue", nudge)
         self.turn(api, nudge)
-        # The second `failed` skips it: the engine hands out step 2.
+        # #294: the second `failed` (after the reflection) does NOT skip:
+        # attempt 3 goes out in a fresh context, still on step 1.
+        crow_core.tool_goal_step(1, "running", "reflection: rotate first")
         crow_core.tool_goal_step(1, "failed", "still rotated away")
-        self.assertIn("Next is step 2: write the fix", api._goal_nudge())
+        fresh = api._goal_nudge()
+        self.assertIn("Step 1, attempt 3, in a FRESH context", fresh)
+        self.assertIn("reflection: rotate first", fresh)
+        self.assertTrue(api._goal_roll_due, "no rollover for attempt 3")
+        self.assertNotIn("Next is step 2", fresh)
+        self.assertEqual(crow_core.goal_skipped(), [])
 
     def test_a_hand_edit_of_goal_json_repaints_the_bar_within_a_round(self):
         api = self.api()
@@ -10467,6 +10475,144 @@ class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
         self.assertTrue('if(state==="skipped")' in source)
         self.assertTrue('partial ? "Complete · "+skipText' in source)
         self.assertTrue("#goalpanel li.skipped" in source)
+
+
+class TheGoalEnginePausesAndAsksTests(ApiCase):
+    """#294 B/D, the window's half. 2026-09-24/25: steps 5-8 of the diorama
+    goal were skipped without a word to robin. Every stop of the engine is
+    now a PAUSE: one report turn (what, why, 2-3 proposals, the question),
+    then the engine waits for a typed line -- window and phone alike."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-pause-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.goal_write, None)
+        # getattr: the red run without #294 fails on behaviour, not setUp.
+        limits = getattr(crow_core, "goal_limits_set", None)
+        if limits is not None:
+            self.addCleanup(limits, None, None)
+        crow_core.goal_command("Neon voxel diorama | plan it | build the "
+                               "scene | animate the rain")
+        crow_core.goal_step_end(0, note="PLAN.md written")
+
+    def turn(self, api, text, answer="working on it") -> None:
+        api._conversation.append("user", text)
+        api._conversation.append(
+            "assistant", "", tool_calls=[{"id": "c0", "name": "read_file",
+                                          "arguments": "{}"}])
+        api._conversation.append("tool", "...", tool_call_id="c0")
+        api._conversation.append("assistant", answer)
+
+    def notes(self, api) -> list:
+        return [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+
+    def goals(self, api) -> list:
+        return [m["goal"] for m in self.drained(api) if m.get("k") == "goal"]
+
+    def test_a_pause_gets_one_report_turn_then_waits_for_a_line(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.goal_pause(1, "environment",
+                             "the environment failed 3 times: software GL")
+        report = api._goal_nudge()
+        self.assertIn("PAUSED at step 2 (environment)", report)
+        self.assertIn("Two or three concrete proposals", report)
+        self.assertIn("Ask robin whether he has further input", report)
+        self.turn(api, report, "1. software GL 2. no GPU 3. A) stop serve "
+                               "B) llama.cpp 4. Do you have more input?")
+        self.assertIsNone(api._goal_nudge())
+        self.assertIsNone(api._goal_nudge(), "the engine went on by itself")
+        pause = crow_core.goal_load()["pause"]
+        self.assertIn("Do you have more input?", pause["report"])
+        notes = self.notes(api)
+        self.assertTrue(any("waits for your line" in n for n in notes), notes)
+        # Only a typed line resumes -- through `send`, as window and phone.
+        api._pump = lambda *a, **k: None
+        self.assertTrue(api.send("free the GPU, then go on"))
+        goal = crow_core.goal_load()
+        self.assertEqual(goal["status"], "open")
+        self.assertEqual(goal["last_pause"]["class"], "environment")
+
+    def test_a_slash_command_does_not_resume(self):
+        api = self.api()
+        crow_core.goal_pause(1, "budget", "over")
+        api.send("/goal")
+        self.assertEqual(crow_core.goal_load()["status"], "paused")
+
+    def test_an_environment_retry_waits_and_stop_drops_it(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.goal_fail(1, crow_core.GOAL_ENV, "software GL",
+                            capture="/r/a.png")
+        nudge = api._goal_nudge()
+        self.assertIn("the ENVIRONMENT failed, not your work", nudge)
+        self.assertEqual(api._goal_delay, crow_core.GOAL_ENV_DELAY)
+        self.assertIsNone(crow_core.goal_pending(crow_core.goal_load(), 1))
+        api._goal_paused = True
+        self.assertFalse(api._goal_wait(5.0))
+        api._goal_paused = False
+        self.assertTrue(api._goal_wait(0.0))
+
+    def test_the_step_budget_pauses_with_a_report(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        goal = crow_core.goal_load()
+        goal["steps"][1]["started"] = time.time() - 61 * 60
+        crow_core.goal_write(goal)
+        report = api._goal_nudge()
+        self.assertIn("PAUSED at step 2 (budget)", report)
+        self.assertIn("over its budget of 60 min", report)
+
+    def test_no_newly_passed_item_pauses_after_n_turns(self):
+        crow_core.goal_limits_set(None, 3)
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.goal_checklist_write(1, ["neon signs glow"])
+        texts = []
+        for n in range(4):          # the first nudge starts the count
+            text = api._goal_nudge()
+            texts.append(text)
+            self.turn(api, text, "round %d" % n)
+        self.assertIn("PAUSED at step 2 (no progress)", texts[-1])
+        # GEGENPROBE: a newly passed item starts the count again.
+        crow_core.goal_resume()
+        api._goal_reset()
+        self.turn(api, api._goal_nudge())
+        crow_core.judge_store(1, {"checklist": {"neon signs glow": "yes"}})
+        self.assertNotIn("PAUSED", api._goal_nudge())
+
+    def test_the_bar_carries_the_pause_and_the_sub_steps(self):
+        api = self.api()
+        goal = crow_core.goal_load()
+        goal["steps"][1]["subs"] = [{"text": "emissive", "status": "done"},
+                                    {"text": "bloom", "status": "open"}]
+        crow_core.goal_write(goal)
+        crow_core.goal_pause(1, "capability", "sub-step 2.2 failed")
+        api.push_goal(force=True)
+        said = self.goals(api)[-1]
+        self.assertEqual(said["status"], "paused")
+        self.assertEqual(said["pause"]["step"], 2)
+        self.assertEqual([x["status"] for x in said["steps"][1]["subs"]],
+                         ["done", "open"])
+
+    def test_the_page_draws_skipped_apart_from_running_and_the_pause(self):
+        """#296: robin read a skipped step as running -- both were --warn.
+        NEGATIVPROBE AM QUELLTEXT: skipped has its own token in every theme,
+        the running rule keeps amber, and a pause has its own glyph."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count("--skip:#"), 3, "a theme lacks --skip")
+        self.assertIn("#goalpanel li.skipped .m,#goalpanel .gh .st.sk"
+                      "{color:var(--skip)}", source)
+        self.assertIn("#goalpanel li.running .m{color:var(--warn)}", source)
+        self.assertNotIn("li.skipped .m,#goalpanel .gh .st.sk{color:var(--warn)}",
+                         source)
+        self.assertIn('stroke-dasharray="3 2.6"', source)
+        self.assertIn('l.textContent="skipped"', source)
+        self.assertIn('if(state==="held")', source)
+        self.assertIn('"Paused · step "+pz.step', source)
 
 
 class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
@@ -10613,10 +10759,15 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
             nudge = api._goal_nudge()
             self.assertIsNotNone(nudge, "the step cap fired after %d turns" % n)
             self.turn(api, nudge, "round %d, still on it" % n)
+        # #294: the cap pauses WITH a report turn, then waits.
+        report = api._goal_nudge()
+        self.assertIn("PAUSED at step 1 (turn cap): step 1 has taken 25 "
+                      "turns", report)
+        self.turn(api, report, "1. stuck 2. why 3. A, B 4. any input?")
         self.assertIsNone(api._goal_nudge())
-        self.assertIn("goal mode paused: step 1 has taken 25 turns. `/goal` "
-                      "shows where it stands -- a typed line carries on.",
-                      self.notes(api))
+        notes = self.notes(api)
+        self.assertTrue(any(n.startswith("goal mode paused at step 1 (turn "
+                                         "cap)") for n in notes), notes)
 
     def test_the_step_counter_starts_over_on_the_next_step(self):
         """GEGENPROBE: der Zaehler gehoert dem Schritt, nicht dem Ziel. Ein Plan,

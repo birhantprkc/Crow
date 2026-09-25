@@ -171,9 +171,9 @@ Everything below is in the screenshot at the top of this page.
 | **Git** | `git_status` · `git_diff` · `git_log` · `git_commit` (stages exactly the paths given) · `git_push` · `github_connect` over the OAuth device flow |
 | **Web** | `web_search` — answer from what you read, a list of links is not an answer · `fetch_url` one page as readable text · a host nobody named in the chat is refused |
 | **Browser** | `render_page` opens a page in a browser Crow owns and brings back a screenshot plus the console |
-| **Vision** | `read_image` — check your own work when a step says it has to look right · `judge` — a separate model that never saw the conversation scores the capture against the rubric (#266) |
+| **Vision** | `read_image` — check your own work when a step says it has to look right · `judge` — a separate model that never saw the conversation checks the capture against the step's frozen checklist, yes/no/unknown (#266, #295) |
 | **Memory** | `memory` add, replace, remove · `skill` read, save, remove · `session_search` over every past chat, archives and rollover segments included |
-| **Goals** | `goal_set` writes the plan · `goal_step` moves one step, and costs no prefill. A `done` whose note says it is not done is refused, and a `check:` you set must pass before the goal closes. A step that fails twice is skipped; `/goal skip <n>` skips one by hand |
+| **Goals** | `goal_set` writes the plan · `goal_step` moves one step, and costs no prefill. A `done` whose note says it is not done is refused, and a `check:` you set must pass before the goal closes. A failing step is never skipped by the engine: it reflects, retries in a fresh context, splits, then pauses and asks you; only `/goal skip <n>` skips |
 | **Subagents** | `delegate` hands a task out · `subtasks` where they stand · `collect` waits and returns |
 
 Every MCP tool joins the same list as `mcp_<server>_<tool>`, with its own class.

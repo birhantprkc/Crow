@@ -17,12 +17,12 @@ while it keeps going.
 | | |
 |---|---|
 | Tools | `goal_set(title, steps)` writes the plan, `goal_step(step, status, note)` moves one step |
-| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). A line `accept: <criterion>, <criterion>` is the rubric the [judge](../reference/tools.md#judge-266) scores against, not a step (#266). `/goal` alone shows where it stands, `/goal skip <n> [reason]` skips step n (#289), `/goal off` clears it and its check |
+| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). A line `accept: <item>, <item>` is the judge's checklist for every visual step, and `accept: 5: <item>` binds it to step 5 (#266, #295). A line `reference: <image> -- <criterion>` gives the judge a reference image (#295). Neither is a step. `/goal` alone shows where it stands, `/goal skip <n> [reason]` skips step n (#289), `/goal redo <n>` takes that skip back (#296), `/goal off` clears it and its check |
 | Panel | the first of the pinned cards at the top right of the chat (goal, subtasks, git): title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
-| States | `open` · `running` · `done` · `failed` · `skipped` (#289). The goal ends `done`, or "complete with N skipped" when a step was skipped |
+| States | `open` · `running` · `done` · `failed` · `skipped` (#289, only by you). The goal can be `paused` (#294), and it ends `done`, or "complete with N skipped" when you skipped a step |
 | Talking to it | a line typed while a goal turn runs is queued and runs **before** the next nudge, resetting the turn caps (#264). **Stop pauses the goal**: the turn ends, no next turn starts, a note says so, and the next line you send resumes it (#282). Escape = Stop |
-| Limits | 60 turns for the whole goal, 25 for one step, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202) |
+| Limits | 60 turns for the whole goal, 25 turns and 60 min of active wall clock for one step, 10 nudges without a newly passed checklist item, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202, #294). Every cap pauses the goal with a report; none of them skips |
 | `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250); on a visual step, refused without a capture from this goal in the note or under the judge's bar (#267) |
 
 **Two tools and not one, because they cost different things.** The plan goes into the pinned head
@@ -41,18 +41,43 @@ they stood at the cut; they are not refreshed afterwards (#210).
 **One step runs at a time.** The local server has one slot (`-np 1`), so a store that allowed two
 `running` steps would describe a machine that does not exist.
 
-**A failed step is retried once, then skipped (#289).** Seen live on 2026-09-24: the model reported
-step 4 `failed` with an honest note (ray lighting cannot be checked on this machine's software GL).
-Crow still handed it back as the next step on every turn, for about 2 h 20 min.
+### A failure has a class and a ladder, and the end of every ladder is a pause (#294)
+
+Seen on 2026-09-24/25: the diorama goal ended "complete with 4 skipped". Steps 5–8 were skipped by
+the engine after two `failed` each (#289's rule), each judged on a software-GL capture, and nobody
+was asked. Since #294 the engine never skips a step. Only you do, with `/goal skip <n>`.
+
+| Class | What counts | What happens |
+|---|---|---|
+| **environment** | the render says `render_mode` `unavailable`, or `software` on a GPU step (WebGL, shaders, 3D, voxels, ray tracing, diorama, three.js); the judge's precheck finds the frame uniform, near-black or under 16 colours; the frames are identical on a step that needs motion; no judge answered | the next turn waits 15 s and asks for a new render; after **2** retries the goal **pauses**. The same capture, or a second failure before the retry went out, counts once |
+| **capability** | a valid capture the judge does not pass (a must-item "no"), or `failed` on valid evidence | attempt 2 after a written **reflection** on the judge's feedback (`goal_step(n, "running", note="reflection: …")`); attempt 3 in a **fresh context** (the #268 rollover, carrying the failures and the reflections); then the step is **split** into 2–3 sub-steps (`goal_step(n, "split", substeps=[…])`, ADaPT), reported with `goal_step(n, …, sub=k)`; a failed sub-step, or a miss after all of them are done, **pauses** |
+| **unknown** | the judge answers "unknown" on a must-item | once: make the capture show it; twice on the same step: **pause** |
+
+A rung is climbed once per attempt: three judge calls in one turn are one attempt, not three.
+
+**A pause asks you.** The goal's state becomes `paused` (`pause` in goal.json: step, class, why)
+and the step's clock stops. Crow gives the model **one** more turn with no tools, to write for you
+what it identified, why it cannot proceed, 2–3 concrete proposals, and whether you have further
+input. The report appears in the chat, in the window and on the phone. It is also kept as
+`pause.report`. The goal bar reads **Paused · step N**, and a line under the title gives the
+reason. After that the engine waits. **Only a typed line resumes**, from the window or the phone.
+It starts the step's counters and its budget over. `/goal` alone does not resume. The turn caps
+(25 per step, 60 per goal) pause the same way, and so do the two budgets:
+
+| Budget | Default | Setting / environment |
+|---|---|---|
+| active wall clock per step, since the last resume | 60 min | `goal_step_minutes` / `CROW_GOAL_STEP_MINUTES` |
+| nudges on a step with a checklist and no item newly passed | 10 | `goal_no_progress_turns` / `CROW_GOAL_NO_PROGRESS_TURNS` |
 
 | | |
 |---|---|
-| First `failed` | the step comes back **once**. The next nudge quotes its failure note and asks for a different approach. The `goal_step` answer says `retry` |
-| Second `failed` on the same step | the step becomes `skipped`, and the answer says so. `next_step` names the step after it |
 | `/goal skip <n> [reason]` | you skip step n: window, terminal and phone. The reason becomes the step's note (default: "skipped by the user"). A `done` step cannot be skipped. There is no `/goal done <n>`: acceptance stays with the evidence gates below |
-| `skipped` | counts as not done. The engine moves past it. The goal ends "complete with N skipped", never `done`, and an acceptance check does not run for it |
-| Panel | the step shows an amber arrow and its note as a tooltip. The head (and the thin phone bar) says `step 4 skipped`, or `Complete · step 4 skipped` at the end |
-| Back to work | `goal_step(n, "running")` reopens a skipped step, the same way it reopens a `done` one |
+| `/goal redo <n>` | takes your skip back: the step is `open` again (#296). The model cannot do this: its `done` or `running` on a step you skipped is refused |
+| `skipped` | counts as not done. The engine moves past it. The goal ends "complete with N skipped", never `done`, and an acceptance check does not run for it. A step stored `done` whose note starts with "skipped" (the 2026-09-24 hand edit) is read as skipped (#296) |
+| Panel | a skipped step has its own colour (violet `--skip`), a dashed ring with a skip glyph, and the word "skipped". The running step stays amber with a dot, and the paused step shows a red pause glyph. The head (and the thin phone bar) says `step 4 skipped`, `Complete · step 4 skipped` at the end, or `Paused · step N`. A split step lists its sub-steps under it |
+
+Not measured live: whether the pause reports read well, and how often a local model recovers on
+the reflection and split rungs.
 
 **The panel follows goal.json, not only the goal tools (#289).** Every round, before every turn and
 on `/goal`, Crow reads the file and redraws the panel when a step or the goal changed state. A hand
@@ -94,10 +119,22 @@ also needs:
   planning when it writes a document (`.md`, plan, notes, report), so "Think and plan: …, verify
   findings, write PLAN.md" is exempt and "Verify offline via file://, fix, report fps" is not.
   The refusal says so.
-- *The judge's bar, when a judge scored the step.* If [`judge`](../reference/tools.md#judge-266)
-  stored a verdict on the step, its lowest score must be at least the threshold: **8** by default,
-  `judge_threshold` in `settings.json` (window) or `--judge-threshold N` (terminal). The refusal
-  names the lowest criteria and the judge's three weakest points.
+- *The judge's checklist* (#295). Each visual step gets a checklist that is frozen when the step
+  starts. It comes from your `accept:` lines (`accept: 5: puddles reflect the neon` binds to step 5),
+  else from the model, which writes it once with `goal_step(n, "running", checklist=[…])`, else from
+  the first `judge` call. The [judge](../reference/tools.md#judge-266-295) answers each item yes/no/unknown
+  on the render's clock-stepped frames or contact sheet when there are any. `done` needs every
+  must-item "yes" (`optional:` items do not gate), and a step with a checklist needs a verdict at
+  all. A capture that is software-rendered on a GPU step, blank, black or frozen on a motion step
+  never reaches the judge model: it is an environment failure (above). A verdict stored before the
+  checklist existed is still held to `judge_threshold` (default 8, `settings.json` or
+  `--judge-threshold N`).
+- *Reference images* (#295). `reference: <image> -- <criterion>` in `/goal` (at most 2) sends your
+  image after the capture and adds the item "as good as the reference image on: <criterion>". The
+  path is yours, stored in the session directory. For the diorama, for example:
+  `reference: ~/Projects/localconf/testcases/diorama-check/reference/screenshot-2026-09-21_13-59-31.png -- voxel detail`.
+  These items are advisory (they never gate) until the judge is calibrated against your own
+  good/bad labels.
 
 The refusal says what is missing and how to get it: `render_page`, `read_image`, `judge`, and the
 path in the note, or `failed` with a reason when nothing can be rendered. The step nudge says the
