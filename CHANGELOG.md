@@ -77,6 +77,13 @@ The reasoning is in the commit and on the issue.
   so it says `unverified`, and `frames` > 1 is refused there.
 
 
+- **render_page lets path-traced kit pages wait up to 120 s** (#302, 2026-09-25). A local page that carries the
+  voxel kit's `[crow-pt]` marker gets a `wait_ms` ceiling of 120,000; every other page keeps 20,000 (#213). The
+  pathtracer skill asks for 60,000–90,000 on night or dark scenes and says never to shrink the scene to fit a short
+  capture. Before: the 2026-09-25 lighthouse goal run capped every photo at 20 s, which held ~295 samples (291.5,
+  295.5, 298), stayed grainy, and paused step 2 with an offer to shrink the scene. At the measured ~15 samples/s at
+  1024² (RTX 5090), 90 s holds ~1,350 samples. Not measured live.
+
 - **A failed goal step is never skipped by the engine; it climbs a ladder and then pauses and asks** (#294,
   2026-09-25, replaces #289's skip). Each failure has a class. *Environment* (render_mode unavailable, software on a
   GPU step, blank or identical frames, no judge answered): two retries 15 s apart, then pause. *Capability* (a valid
