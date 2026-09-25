@@ -5,6 +5,34 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Added
+
+- **render_page captures frames at controlled page time** (#293, 2026-09-25). `frames` (1–4) and `frame_ms`
+  (16–5000, default 500): with more than one frame the page's clock is frozen from its first script
+  (`Date`, `performance.now`, timers, `requestAnimationFrame`, a seeded `Math.random`), and each capture follows
+  exactly `frame_ms` of page time. Also written: a 2×2 contact sheet at half size, `render-<stamp>-sheet.png`.
+  No-GPU smoke on Chromium 152 (canvas 2D, `--disable-gpu`, 640×400, 4 frames × 250 ms): 1.6 s per call, 4
+  pairwise different frames, a second call byte-identical (sha256). Not measured on the GPU; that is robin's live
+  check.
+- **A structured render record** (#293). Every capture and every ENVIRONMENT error carries one line,
+  `render: {render_mode, renderer, frames, contact_sheet, precheck}`, and `crow_core.last_render()` returns the
+  same dict. `precheck` holds `uniform`, `distinct_colours`, `one_colour_pct`, `dark_pct` and `clipped_pct` (last
+  frame), plus `max_frame_diff` and `identical_frames` (all frame pairs; a pixel counts as changed when a channel
+  moves by more than 25, and the frames count as moving from 0.5 % changed).
+
+### Changed
+
+- **render_page renders on the GPU only** (#293, 2026-09-25). The SwiftShader fallback is gone. Below the VRAM
+  bound (512 MiB, or 1,536 MiB with the panel open), or when the browser's own `UNMASKED_RENDERER_WEBGL` is
+  software (SwiftShader, llvmpipe, lavapipe) or not the NVIDIA card, the result is `error: ENVIRONMENT -- ...`
+  naming the free VRAM or the renderer string, and no image comes back. The renderer is read before the page
+  loads and again after the last capture. Before: in the 2026-09-24/25 diorama run, 35 of the 42 surviving
+  results were `software (swiftshader)` captures taken at 51–317 MiB free. ANGLE runs on Vulkan first, with one
+  retry on `--use-gl=angle` (`CROW_RENDER_ANGLE` pins one). `CROW_RENDER_GL=swiftshader` is now a refusal. Chromium
+  152 still hands WebGL to SwiftShader under `--disable-gpu`, even without `--enable-unsafe-swiftshader` (measured,
+  the smoke above); the renderer check is what caught it. On Windows the renderer cannot be read (no DevTools pipe),
+  so it says `unverified`, and `frames` > 1 is refused there.
+
 ## 2.6.0 — 2026-09-24
 
 **The phone becomes a second view of the session, and goal runs get a fresh-eyes judge.** A paired phone mirrors

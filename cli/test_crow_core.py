@@ -14510,7 +14510,7 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
         self.assertIn("render_scope_prefix", self.src)
         self.assertIn("render_gl_mode", self.src)
         self.assertIn("render_memory_bounds", self.src)
-        self.assertIn("--use-gl=angle", self.src)
+        self.assertIn("render_gpu_flags", self.src)
         # Der Deckel-Tot ist kein "done": der Grund steht in der Antwort.
         self.assertIn("memory ceiling", self.src)
         self.assertIn("would not die", self.src)
@@ -14598,7 +14598,7 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
                 mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
                 mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
                 mock.patch.object(crow_platform, "render_gl_mode",
-                                  getattr(self, "gl", lambda *a, **k: "swiftshader")), \
+                                  getattr(self, "gl", lambda *a, **k: "angle")), \
                 mock.patch.object(crow_platform, "gpu_free_mib", lambda: 73), \
                 mock.patch.object(crow_core.subprocess, "Popen", Browser):
             return crow_core.tool_render_page(path)
@@ -14610,7 +14610,7 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
 
         def gl(free_mib=None, panel=False):
             seen.append((free_mib, panel))
-            return "swiftshader"
+            return "unavailable"
         self.gl = gl
         self.addCleanup(crow_core.render_panel_set, False)
         crow_core.render_panel_set(True)
@@ -14703,17 +14703,20 @@ class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
 
     # -- die Schalter ------------------------------------------------------
 
-    def test_the_swiftshader_pair_travels_with_disable_gpu(self):
-        """Chromium 144+ hat den automatischen SwiftShader-Fallback fuer
-        WebGL gestrichen (chromestatus "Remove SwiftShader fallback") --
-        ohne --enable-unsafe-swiftshader scheitert headless die
-        Kontexterzeugung, ohne --use-angle=swiftshader blieb rAF hier im
-        Versuchsstau (3 Frames je Budget, byte-gleiche Fangs).
-        --disable-gpu bleibt: SwiftShader ist Software, die Karte wird
-        nicht angefasst."""
-        self.assertIn("--enable-unsafe-swiftshader", self.src)
-        self.assertIn("--use-angle=swiftshader", self.src)
-        self.assertIn("--disable-gpu", self.src)
+    def test_no_backend_carries_the_swiftshader_pair(self):
+        """#293 (was #175-Nachtrag's "the SwiftShader pair travels"): Chrome
+        >= 137 deprecated the automatic WebGL-to-SwiftShader fallback, and
+        --enable-unsafe-swiftshader is its opt-in. render_page renders on
+        the GPU only now, so no backend may carry it. (Measured 2026-09-25:
+        Chromium 152 with --disable-gpu still fell back without the flag --
+        the renderer probe, TheRenderIsGpuOnlyTests, is the guard.)"""
+        for backend in ("vulkan", "default"):
+            flags = crow_platform.render_gpu_flags(backend)
+            self.assertIn("--use-gl=angle", flags)
+            for bad in ("--enable-unsafe-swiftshader", "--use-angle=swiftshader",
+                        "--disable-gpu"):
+                self.assertNotIn(bad, flags, backend)
+        self.assertIn("--use-angle=vulkan", crow_platform.render_gpu_flags("vulkan"))
 
     def test_console_logging_went_to_the_canonical_flag(self):
         """--v=0, nicht --log-level=0: die Verbositaet des Chromium-Loggers
@@ -20296,17 +20299,19 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         nicht auf eine Karte raten, die er nicht lesen konnte."""
         self._env("CROW_RENDER_GL", "angle")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=0), "angle")
+        # #293: a software pin is a refusal now, never software pixels.
         self._env("CROW_RENDER_GL", "swiftshader")
-        self.assertEqual(crow_platform.render_gl_mode(free_mib=99999), "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=99999), "unavailable")
+        self.assertIn("renders on the GPU only", crow_platform.render_gl_reason(99999))
         self._env("CROW_RENDER_GL", "")
-        self.assertEqual(crow_platform.render_gl_mode(free_mib=511), "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=511), "unavailable")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=512), "angle")
         # free_mib=None heisst FRAGEN -- und eine Frage ohne Antwort (die
         # Karte nicht lesbar) ist Software, nie ein Raten.
         real = crow_platform.gpu_free_mib
         crow_platform.gpu_free_mib = lambda: None
         self.addCleanup(setattr, crow_platform, "gpu_free_mib", real)
-        self.assertEqual(crow_platform.render_gl_mode(), "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(), "unavailable")
         crow_platform.gpu_free_mib = lambda: 4096
         self.assertEqual(crow_platform.render_gl_mode(), "angle")
 
@@ -20317,11 +20322,11 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         the panel open the bound is 1,536; without it #213's 512 stands."""
         self._env("CROW_RENDER_GL", "")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=True),
-                         "swiftshader")
+                         "unavailable")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=False),
                          "angle")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=1535, panel=True),
-                         "swiftshader")
+                         "unavailable")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=1536, panel=True),
                          "angle")
         why = crow_platform.render_gl_reason(free_mib=560, panel=True)
@@ -22305,6 +22310,414 @@ class ConversationFreshTests(unittest.TestCase):
         talk.restore([{"role": "system", "content": "SYS"},
                       {"role": "user", "content": "saved"}])   # a saved payload
         self.assertFalse(talk.fresh)
+
+
+class TheRenderIsGpuOnlyTests(unittest.TestCase):
+    """#293. The 2026-09-24/25 diorama run (16 hours): 35 of 42 surviving
+    render_page results were `software (swiftshader)` at 51-317 MiB free, a
+    1-spp path tracer captured as one still of CPU noise, and nothing in the
+    result was an error. robin's rule of 2026-09-25: the card or no image,
+    the renderer read from the browser, frames at controlled page time,
+    and cheap pixel checks as fields. The CDP peer is
+    TheRenderBudgetCanBeMetTests' stand-in; no browser starts here."""
+
+    # TheRenderBudgetCanBeMetTests' peer, borrowed (not inherited: its own
+    # cases would run twice).
+    PNG = TheRenderBudgetCanBeMetTests.PNG
+    setUp = TheRenderBudgetCanBeMetTests.setUp
+    tearDown = TheRenderBudgetCanBeMetTests.tearDown
+    _peer = TheRenderBudgetCanBeMetTests._peer
+    _browser = TheRenderBudgetCanBeMetTests._browser
+    methods = TheRenderBudgetCanBeMetTests.methods
+
+    CARD = ("NVIDIA GeForce RTX 5090", 32607)
+    NVIDIA = "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 5090/PCIe/SSE2, Vulkan 1.4.312)"
+    SWIFT = ("ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) "
+             "(0x0000C0DE)), SwiftShader driver)")
+
+    def _gpu_browser(self, renderer, after=None, clock=True):
+        """The peer, plus answers for the renderer probe (`renderer`, then
+        `after` once a capture was taken) and for __crowClock.runFor."""
+        import base64 as _b64
+        base = self._browser()
+        shots = []
+
+        def answer(msg):
+            method, mid = msg.get("method"), msg.get("id")
+            if method == "Runtime.evaluate":
+                expr = msg["params"]["expression"]
+                if "UNMASKED_RENDERER_WEBGL" in expr:
+                    r = after if (shots and after is not None) else renderer
+                    return [{"id": mid, "sessionId": "S1", "result": {"result": {
+                        "type": "object", "value": {"renderer": r, "why": "" if r else
+                                                    "getContext returned null"}}}}]
+                if "__crowClock" in expr:
+                    val = ({"type": "number", "value": 250 * (len(shots) + 1)}
+                           if clock else {"type": "object", "subtype": "null",
+                                          "value": None})
+                    return [{"id": mid, "sessionId": "S1", "result": {"result": val}}]
+            if method == "Page.captureScreenshot":
+                shots.append(mid)
+                return [{"id": mid, "sessionId": "S1", "result": {
+                    "data": _b64.b64encode(self.PNG + bytes([len(shots)])).decode()}}]
+            return base(msg)
+        return answer
+
+    def _check(self, renderer, why):
+        return crow_platform.render_renderer_verdict(renderer, why, card=self.CARD)
+
+    def _gpu_run(self, renderer, frames=1, **kw):
+        dt, _ = self._peer(self._gpu_browser(renderer, **kw))
+        seen: dict = {}
+        got = crow_core._render_over_devtools(
+            dt, "file:///x/index.html", 640, 360, 200, self.shot,
+            load_s=0.6, capture_s=0.6, check_gpu=self._check, seen=seen,
+            frames=frames, frame_ms=250)
+        return got, seen
+
+    # -- the renderer, read from the browser --------------------------------
+
+    def test_a_software_renderer_is_refused_before_the_page_loads(self):
+        (captured, reason), seen = self._gpu_run(self.SWIFT)
+        self.assertFalse(captured)
+        self.assertIn("software rasterer", reason)
+        self.assertIn("SwiftShader", reason)
+        self.assertEqual(seen["renderer"], self.SWIFT)
+        self.assertEqual(seen["rejected"], reason)
+        m = self.methods()
+        self.assertNotIn("Page.navigate", m)
+        self.assertNotIn("Page.captureScreenshot", m)
+        self.assertFalse(os.path.exists(self.shot))
+
+    def test_no_webgl_context_is_refused_with_its_reason(self):
+        (captured, reason), seen = self._gpu_run(None)
+        self.assertFalse(captured)
+        self.assertIn("no WebGL context", reason)
+        self.assertIn("getContext returned null", reason)
+        self.assertIsNone(seen["renderer"])
+
+    def test_the_card_captures_and_is_asked_before_and_after(self):
+        (captured, reason), seen = self._gpu_run(self.NVIDIA)
+        self.assertTrue(captured, reason)
+        self.assertEqual(seen["renderer"], self.NVIDIA)
+        self.assertNotIn("rejected", seen)
+        m = self.methods()
+        probes = [i for i, x in enumerate(self.seen)
+                  if x.get("method") == "Runtime.evaluate"
+                  and "UNMASKED_RENDERER_WEBGL" in x["params"]["expression"]]
+        self.assertEqual(len(probes), 2)
+        self.assertLess(probes[0], m.index("Page.navigate"))
+        self.assertGreater(probes[1], m.index("Page.captureScreenshot"))
+
+    def test_a_context_lost_during_the_capture_is_refused(self):
+        (captured, reason), seen = self._gpu_run(self.NVIDIA, after=None)
+        self.assertTrue(captured, reason)          # after=None: same renderer
+        self.seen.clear()
+        (captured, reason), seen = self._gpu_run(self.NVIDIA, after="")
+        self.assertFalse(captured)
+        self.assertTrue(reason.startswith("after the capture:"), reason)
+
+    def test_the_verdict_on_renderer_strings(self):
+        v = crow_platform.render_renderer_verdict
+        self.assertIsNone(v(self.NVIDIA, card=self.CARD))
+        for soft in (self.SWIFT, "llvmpipe (LLVM 19.1.7, 256 bits)",
+                     "ANGLE (Mesa, lavapipe, Vulkan 1.4)",
+                     "ANGLE (Microsoft, Microsoft Basic Render Driver, D3D11)"):
+            self.assertIn("software rasterer", v(soft, card=self.CARD), soft)
+            self.assertIn("software rasterer", v(soft, card=False), soft)
+        self.assertIn("not on the NVIDIA GeForce RTX 5090",
+                      v("ANGLE (Intel, Mesa Intel(R) Graphics, OpenGL 4.6)",
+                        card=self.CARD))
+        self.assertIsNone(v("ANGLE (AMD, Radeon RX 7900, Vulkan)", card=False))
+        self.assertIn("no WebGL context", v(None, "boom", card=self.CARD))
+
+    # -- frames at controlled page time ---------------------------------------
+
+    def test_frames_step_page_time_then_capture_each(self):
+        (captured, reason), _ = self._gpu_run(self.NVIDIA, frames=4)
+        self.assertTrue(captured, reason)
+        self.assertIn("4 frames 250 ms of page time apart", reason)
+        m = self.methods()
+        self.assertLess(m.index("Page.addScriptToEvaluateOnNewDocument"),
+                        m.index("Page.navigate"))
+        installed = [x for x in self.seen if x.get("method")
+                     == "Page.addScriptToEvaluateOnNewDocument"][0]
+        self.assertIn("__crowClock", installed["params"]["source"])
+        steps = [x.get("method") if x.get("method") != "Runtime.evaluate" else
+                 ("runFor" if "runFor(250)" in x["params"]["expression"] else "probe")
+                 for x in self.seen[m.index("Page.navigate"):]]
+        steps = [x for x in steps if x in ("runFor", "Page.captureScreenshot")]
+        self.assertEqual(steps, ["runFor", "Page.captureScreenshot"] * 4)
+        run = [x for x in self.seen if x.get("method") == "Runtime.evaluate"
+               and "runFor" in x["params"]["expression"]][0]
+        self.assertTrue(run["params"]["awaitPromise"])
+        paths = [crow_core._frame_path(self.shot, i) for i in range(4)]
+        self.assertEqual(paths[0], self.shot)
+        self.assertTrue(paths[3].endswith("shot-f4.png"), paths[3])
+        blobs = []
+        for p in paths:
+            with open(p, "rb") as fh:
+                blobs.append(fh.read())
+        self.assertEqual(len(set(blobs)), 4)
+
+    def test_one_frame_installs_no_clock(self):
+        (captured, reason), _ = self._gpu_run(self.NVIDIA, frames=1)
+        self.assertTrue(captured, reason)
+        m = self.methods()
+        self.assertNotIn("Page.addScriptToEvaluateOnNewDocument", m)
+        self.assertFalse(any("runFor" in x["params"].get("expression", "")
+                             for x in self.seen if x.get("method") == "Runtime.evaluate"))
+
+    def test_a_page_without_the_clock_is_a_reason(self):
+        (captured, reason), _ = self._gpu_run(self.NVIDIA, frames=2, clock=False)
+        self.assertFalse(captured)
+        self.assertIn("frame 1 of 2", reason)
+        self.assertIn("no Crow clock", reason)
+
+
+class TheRenderPrecheckTests(unittest.TestCase):
+    """#293. The pixel checks and the contact sheet, on synthetic PNGs
+    decoded by the same _png_pixels the tool uses."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-pre-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    @staticmethod
+    def _img(w, h, pixel):
+        rows = [b"".join(bytes(pixel(x, y)) for x in range(w)) for y in range(h)]
+        return crow_core._png_pixels(crow_core._png_encode(w, h, 2, rows))
+
+    def _scene(self, dx=0):
+        """A lit gradient with a white square at x 10+dx."""
+        return self._img(80, 60, lambda x, y: (
+            (255, 255, 255) if 10 + dx <= x < 30 + dx and 20 <= y < 40
+            else ((x * 3) % 256, (y * 4) % 256, (x + y) % 256)))
+
+    def test_identical_frames_say_no_motion(self):
+        a = self._scene()
+        pre = crow_core.render_precheck([a, a, a, a])
+        self.assertEqual(pre["max_frame_diff"], 0.0)
+        self.assertIs(pre["identical_frames"], True)
+        self.assertFalse(pre["uniform"])
+        self.assertTrue(any("no motion" in w for w in crow_core._precheck_warnings(pre)))
+
+    def test_a_moving_square_is_motion(self):
+        pre = crow_core.render_precheck([self._scene(0), self._scene(10),
+                                         self._scene(20), self._scene(30)])
+        self.assertGreater(pre["max_frame_diff"], 0.5)
+        self.assertIs(pre["identical_frames"], False)
+        self.assertFalse(any("no motion" in w for w in crow_core._precheck_warnings(pre)))
+
+    def test_one_frame_has_no_frame_verdict(self):
+        pre = crow_core.render_precheck([self._scene()])
+        self.assertIsNone(pre["max_frame_diff"])
+        self.assertIsNone(pre["identical_frames"])
+        self.assertEqual(set(pre), {"uniform", "distinct_colours", "one_colour_pct",
+                                    "dark_pct", "clipped_pct", "max_frame_diff",
+                                    "identical_frames"})
+
+    def test_black_is_uniform_and_dark_white_is_clipped(self):
+        black = crow_core.render_precheck([self._img(40, 30, lambda x, y: (0, 0, 0))])
+        self.assertTrue(black["uniform"])
+        self.assertEqual(black["dark_pct"], 100.0)
+        self.assertEqual(black["one_colour_pct"], 100.0)
+        self.assertEqual(black["distinct_colours"], 1)
+        warns = crow_core._precheck_warnings(black)
+        self.assertTrue(any("near-uniform" in w for w in warns), warns)
+        self.assertTrue(any("near-black" in w for w in warns), warns)
+        # #268's stuck counter must not read a precheck line as its own.
+        for w in warns:
+            for mark in crow_core._RENDER_STUCK_WARNS:
+                self.assertNotIn(mark, w)
+        white = crow_core.render_precheck([self._img(40, 30, lambda x, y: (255, 252, 250))])
+        self.assertEqual(white["clipped_pct"], 100.0)
+        self.assertEqual(white["dark_pct"], 0.0)
+        self.assertIsNone(crow_core.render_precheck([None]))
+
+    def test_the_contact_sheet_is_2x2_at_half_size(self):
+        colours = [(200, 0, 0), (0, 200, 0), (0, 0, 200), (200, 200, 0)]
+        frames = [self._img(64, 48, lambda x, y, c=c: c) for c in colours]
+        sheet = os.path.join(self.dir, "s.png")
+        self.assertTrue(crow_core._contact_sheet(frames, sheet))
+        with open(sheet, "rb") as fh:
+            img = crow_core._png_pixels(fh.read())
+        w, h, _c, ch, rows = img
+        self.assertEqual((w, h), (64, 48))
+        for (x, y), c in zip(((16, 12), (48, 12), (16, 36), (48, 36)), colours):
+            self.assertEqual(tuple(rows[y][x * ch:x * ch + 3]), c, (x, y))
+        # Two frames: the lower row stays black.
+        self.assertTrue(crow_core._contact_sheet(frames[:2], sheet))
+        with open(sheet, "rb") as fh:
+            rows = crow_core._png_pixels(fh.read())[4]
+        self.assertEqual(tuple(rows[36][16 * 3:16 * 3 + 3]), (0, 0, 0))
+        self.assertFalse(crow_core._contact_sheet([frames[0], None], sheet))
+
+
+class TheRenderToolIsGpuOnlyTests(unittest.TestCase):
+    """#293 at the tool: below the VRAM bound no browser starts and the
+    result is an ENVIRONMENT error with a `render:` record; a capture
+    carries the record too, and last_render() returns it."""
+
+    def setUp(self) -> None:
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-t293-"))
+        self.page = os.path.join(self.dir, "index.html")
+        with open(self.page, "w", encoding="utf-8") as fh:
+            fh.write("<p>hi")
+        self.root = crow_core.get_root()
+        crow_core.set_root(self.dir)
+        self.argv: "list[list[str]]" = []
+        crow_core._LAST_CAPTURES.clear()
+        self.addCleanup(crow_core._RENDER_RIDE.clear)
+        self.addCleanup(crow_core._LAST_CAPTURES.clear)
+        self.addCleanup(crow_core.set_root, self.root)
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(os.environ.pop, "CROW_RENDER_GL", None)
+        os.environ.pop("CROW_RENDER_GL", None)
+
+    def _render(self, free_mib, **kw):
+        test = self
+        png = crow_core._png_encode(
+            40, 30, 2, [bytes((x * 5 % 256, y * 7 % 256, 90)) * 1
+                        for y in range(30) for x in [0]][:0] or
+            [b"".join(bytes(((x * 5) % 256, (y * 7) % 256, 90)) for x in range(40))
+             for y in range(30)])
+
+        class Browser:
+            pid, returncode = 4242, 0
+
+            def __init__(self, argv, **_):
+                test.argv.append(list(argv))
+                shot = [a for a in argv if a.startswith("--screenshot=")]
+                if shot:
+                    with open(shot[0].split("=", 1)[1], "wb") as fh:
+                        fh.write(png)
+
+            def wait(self, timeout=None):
+                return 0
+
+        with mock.patch.object(crow_core, "find_browser", lambda: "/bin/chromium"), \
+                mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
+                mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
+                mock.patch.object(crow_platform, "gpu_free_mib", lambda: free_mib), \
+                mock.patch.object(crow_platform, "gpu_card", lambda: TheRenderIsGpuOnlyTests.CARD), \
+                mock.patch.object(crow_core.subprocess, "Popen", Browser):
+            return crow_core.tool_render_page("index.html", **kw)
+
+    @staticmethod
+    def _record(said):
+        line = [x for x in said.splitlines() if x.startswith("render: ")]
+        return json.loads(line[0][len("render: "):]) if line else None
+
+    def test_below_the_bound_no_browser_and_an_environment_error(self):
+        said = self._render(104)
+        self.assertEqual(self.argv, [], "no browser below the bound")
+        self.assertTrue(said.startswith("error: ENVIRONMENT -- "), said)
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertIn("No image was taken", said)
+        rec = self._record(said)
+        self.assertEqual(rec["render_mode"], "unavailable")
+        self.assertEqual((rec["frames"], rec["contact_sheet"], rec["precheck"]),
+                         ([], None, None))
+        self.assertEqual(rec["free_mib"], 104)
+        self.assertEqual(crow_core.last_render(), rec)
+        self.assertIsNone(crow_core.take_render_ride())
+        # Not a render_page "timeout" for #202's classes: a refusal that
+        # names what it is.
+        self.assertNotIn("timed out", said)
+        self.assertNotIn("wrote no screenshot", said)
+
+    def test_a_software_pin_is_refused_too(self):
+        os.environ["CROW_RENDER_GL"] = "swiftshader"
+        said = self._render(30000)
+        self.assertEqual(self.argv, [])
+        self.assertTrue(said.startswith("error: ENVIRONMENT"), said)
+        self.assertIn("CROW_RENDER_GL=swiftshader", said)
+
+    def test_no_argv_carries_a_software_flag(self):
+        self._render(30000)
+        self.assertEqual(len(self.argv), 1)
+        for bad in ("--enable-unsafe-swiftshader", "--use-angle=swiftshader",
+                    "--disable-gpu"):
+            self.assertNotIn(bad, self.argv[0])
+        self.assertIn("--use-gl=angle", self.argv[0])
+
+    def test_a_capture_carries_the_record(self):
+        said = self._render(30000)
+        self.assertFalse(said.startswith("error"), said)
+        self.assertTrue(said.startswith("render: "), said)
+        rec = self._record(said)
+        self.assertEqual(rec["render_mode"], "gpu")
+        self.assertTrue(rec["renderer"].startswith("unverified"), rec)
+        self.assertEqual(len(rec["frames"]), 1)
+        self.assertTrue(os.path.isfile(rec["frames"][0]))
+        self.assertIsNone(rec["contact_sheet"])
+        self.assertEqual(rec["precheck"]["identical_frames"], None)
+        self.assertGreater(rec["precheck"]["distinct_colours"], 16)
+        self.assertEqual(crow_core.last_render(), rec)
+        # #268's scan still finds the file line.
+        sig = crow_core.render_signature(said, "index.html")
+        self.assertEqual(sig["path"], rec["frames"][0])
+
+    def test_frames_without_the_pipe_is_an_environment_error(self):
+        said = self._render(30000, frames=4)
+        self.assertEqual(self.argv, [])
+        self.assertTrue(said.startswith("error: ENVIRONMENT"), said)
+        self.assertIn("frames > 1 needs the DevTools pipe", said)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+class ThePageClockTests(unittest.TestCase):
+    """#293. _CLOCK_JS itself, run in node with `window` = globalThis:
+    page time stands still until runFor, rAF fires at 60 Hz of page time,
+    timers fire in order, Math.random is seeded -- the same numbers twice."""
+
+    SCRIPT = r"""
+globalThis.window = globalThis;
+%s;
+const log = [];
+let frames = 0, lastTs = -1;
+function loop(ts) { frames++; lastTs = ts; requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+setTimeout(() => log.push('t100@' + performance.now()), 100);
+const iv = setInterval(() => log.push('i200@' + performance.now()), 200);
+const d0 = Date.now(), p0 = performance.now(), r = [Math.random(), Math.random()];
+(async () => {
+  const still = performance.now();
+  await window.__crowClock.runFor(500);
+  const f1 = frames;
+  await window.__crowClock.runFor(500);
+  clearInterval(iv);
+  console.log(JSON.stringify({d0, p0, still, f1, f2: frames, lastTs,
+    now: performance.now(), date: Date.now(), newDate: new Date().getTime(),
+    log, r}));
+  process.exit(0);   // the clock's MessageChannel keeps node's loop alive
+})();
+"""
+
+    def _run(self):
+        done = subprocess.run(["node", "-e", self.SCRIPT % crow_core._CLOCK_JS],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_page_time_moves_only_by_run_for(self):
+        got = self._run()
+        self.assertEqual((got["p0"], got["still"]), (0, 0))
+        self.assertEqual(got["d0"], 1767225600000)
+        self.assertEqual(got["f1"], 30)            # 500 ms / (1000/60)
+        self.assertEqual(got["f2"], 60)
+        self.assertAlmostEqual(got["lastTs"], 1000, places=6)
+        self.assertEqual(got["now"], 1000)
+        self.assertEqual(got["date"], 1767225600000 + 1000)
+        self.assertEqual(got["newDate"], got["date"])
+        self.assertEqual(got["log"], ["t100@100", "i200@200", "i200@400",
+                                      "i200@600", "i200@800", "i200@1000"])
+
+    def test_the_same_script_gives_the_same_numbers(self):
+        a, b = self._run(), self._run()
+        self.assertEqual(a, b)
+        self.assertNotEqual(a["r"][0], a["r"][1])
 
 
 if __name__ == "__main__":

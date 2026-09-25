@@ -15,7 +15,7 @@ own class.
 
 ### `render_page` (#175)
 
-`render_page(path, wait_ms=4000, width=1280, height=800)` — a page in a browser Crow owns.
+`render_page(path, wait_ms=4000, width=1280, height=800, frames=1, frame_ms=500)` — a page in a browser Crow owns, rendered on the GPU only (#293).
 
 | | |
 |---|---|
@@ -23,25 +23,37 @@ own class.
 | browser | Chrome, then Edge; every candidate resolved through environment variables |
 | target | a file in the working area, or an `http(s)` URL. A local page keeps a `?query` / `#fragment` (`index.html?shot=default&w=960`, #272): the file is checked without it, then the percent-encoded `file://` URL (drive letter / UNC per RFC 8089) gets it back. A file really named with `?` or `#` wins. A missing file is `no such page: <file>` |
 | remote host (#288) | an `http(s)` target's host must already appear in the conversation: the user's words (URL or bare name), a tool result (URL), the goal's title/steps or `PLAN.md` (read at the miss). A subdomain of a named host counts; loopback always passes. Otherwise `error: refused: <host> appears nowhere in this conversation -- a URL you made up?` and no browser starts. Always on, yolo included. `fetch_url` keeps the same guard. Across a rollover the note carries the hosts in one line (newest 60) and the next turn rebuilds the set from it |
-| dedupe | the byte-identical warning (#175) keys on the full URL, so `?shot=default` and `?shot=stall` are two pages |
+| dedupe | the byte-identical warning (#175) keys on the full URL, so `?shot=default` and `?shot=stall` are two pages. With `frames` > 1 it is skipped: page time is Crow's there, so two calls are meant to match, and `precheck.max_frame_diff` is the motion test (#293) |
 | output | `<root>/.crow/renders/render-<stamp>.png`, plus the console lines from stderr |
 | isolation | its own `--user-data-dir` per run. Without it Chrome hands the job to a running instance and returns exit 0 with no screenshot |
 | driving (Linux) | `--remote-debugging-pipe` (fd 3/4, NUL-separated CDP JSON, no library): load, run `wait_ms` **real** milliseconds, `Page.captureScreenshot`. A page with no load event after 15 s is captured anyway |
 | driving (Windows) | the command-line `--screenshot` with `--virtual-time-budget=wait_ms`; the pipe there needs handle inheritance nobody has measured yet |
 | `wait_ms` | real time after load, 200–20,000. A larger value never rescues a page too heavy to draw |
 | caps | one ceiling for the whole call: 15 s load + `wait_ms` + 10 s for the frame. It does not grow with anything the page does |
-| rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, or ≥ 1,536 MiB while the window's browser panel is open or holds a page (it is a second GPU client on the same card, #279), else `software (swiftshader)`; named in every result. A software result says why (#271): the card's free VRAM against that bound (and the panel, when it counted), that the model server holds it, and that the machine has the GPU and the user's browser renders on it; or `CROW_RENDER_GL` forcing it, or no nvidia-smi reading |
+| GPU only (#293) | the VRAM gate first: ≥ 512 MiB free, or ≥ 1,536 MiB while the window's browser panel is open or holds a page (a second GPU client on the same card, #279). Then, over the pipe, `WEBGL_debug_renderer_info` / `UNMASKED_RENDERER_WEBGL` on `about:blank` before the page loads and in the page after the last capture: a software string (SwiftShader, llvmpipe, lavapipe, softpipe, Microsoft Basic Render) or, with an NVIDIA card in nvidia-smi, a string without "NVIDIA" ends the call. Either failure is `error: ENVIRONMENT -- render_page renders on the GPU only, and the GPU is unavailable: <reason>` with the free VRAM against the bound (#271's wording) or the renderer string, and **no image**. There is no software fallback |
+| flags | ANGLE backends in order: `vulkan` (`--enable-gpu --use-gl=angle --use-angle=vulkan --enable-features=Vulkan --disable-vulkan-surface --ignore-gpu-blocklist`), then one retry on `default` (`--use-gl=angle`, measured 2026-09-22: "ANGLE (NVIDIA …, OpenGL ES 3.2)"), each with a fresh profile. `CROW_RENDER_ANGLE=vulkan\|default` pins one. Never `--enable-unsafe-swiftshader`. Its absence is not the guard: measured 2026-09-25, Chromium 152 with `--disable-gpu` still gave WebGL a SwiftShader context. `CROW_RENDER_GL=angle` skips the VRAM gate, and `swiftshader` is a refusal |
+| `frames` (#293) | 1–4, default 1 (one capture after `wait_ms` of real time). With more frames, a page clock is installed before the page's first script (`Page.addScriptToEvaluateOnNewDocument`): `Date`, `performance.now`, `setTimeout`/`setInterval` and `requestAnimationFrame` stand at page time 0, and `Math.random` is seeded. After load + `wait_ms` (real async work such as fetch or shader compiles still finishes), each capture follows one `runFor(frame_ms)`, which fires timers and 60 Hz frames in time order with a real macrotask between them. Frame *i* shows page time (*i*+1)·`frame_ms`. Files: `render-<stamp>.png`, `-f2` … `-f4`, and `-sheet.png` (2×2, each frame at half size, the sheet as large as one frame; the newest `render-*.png`, so the judge's default). CSS animations, `<video>` and workers keep their own clocks. Linux only (it needs the pipe) |
+| record (#293) | the first line of every capture and of every ENVIRONMENT error: `render: {"render_mode": "gpu"\|"unavailable", "renderer", "frames": [paths], "contact_sheet", "precheck", "backend", "free_mib"}` (+ `reason` when unavailable). `crow_core.last_render()` returns the same dict |
+| precheck (#293) | the same ≤ 100,000-px sample as the metrics. On the last frame: `uniform` (≥ 98 % one colour or < 16 colours), `distinct_colours`, `one_colour_pct`, `dark_pct` (luma < 16), `clipped_pct` (R, G, B ≥ 250). Over all frame pairs: `max_frame_diff` (% of pixels whose largest channel delta is > 25, three.js' pixelThreshold 0.1) and `identical_frames` (`max_frame_diff` < 0.5 %). Both are `null` for one frame. `warn: precheck -- …` for uniform, ≥ 90 % dark and no motion; these lines never feed #268's stuck count |
 | memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213). A browser started through `run_command` instead runs under that tool's 8G scope (#218) |
 | kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
 | pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |
 | metrics (#265) | after the file line, `metrics:` lines from the capture's own pixels (the #213 decoder, PNG only): the content box on a near-uniform background, its coverage of the frame and ~visual tokens (~1,030 px per token, measured), distinct colours in a ≤100,000-px sample, mean luma and an 8-bin luma histogram. `warn:` when coverage is under 25 % or under 16 colours. Under 50 % coverage the box plus a margin is saved enlarged as `render-<stamp>-crop.png` and named — `read_image` it for detail |
 | API hints (#253) | after the capture, one `Runtime.evaluate` (3 s, `RENDER_PROBE_S`) lists the page's own interface prototypes with each member's `length` (WebIDL: the required argument count). Every console line is then read against it: `X.name is not a function` gets a `hint:` line naming the nearest real member within 1-2 edits and the interface that has it (or says the name is real on another object, or exists nowhere), plus the page's own `name=function` probe line when there is one; `WebGL: INVALID_*: fn: …` gets the call's top-level argument count from the source line the console names (the page or its own folder only) against the live `fn.length`, and a sibling with that arity. Linux only: without the pipe (Windows) or without an answer, only the page's own probe lines and the argument count are claimed |
 
-A failed capture says which rasterer ran and that a larger `wait_ms` will not help —
+A failed capture (the GPU was there but no frame came) says that a larger `wait_ms` will not help —
 the old `timed out after 20000 ms` read as "give it more", and a model escalated
 6000 → 12000 → 20000 on a page whose cost did not depend on it.
 
-Measured 2026-09-22, Chromium 152.0.7977.82, RTX 5090 free:
+Smoke, 2026-09-25, Chromium 152.0.7977.82, no GPU (`--disable-gpu`, the check bypassed for the second part), a
+canvas-2D page with a rotating square and 200 `Math.random` dots, 640×400, `wait_ms` 500:
+
+| case | wall clock | result |
+|---|---|---|
+| the renderer probe on a GPU-less browser | 0.5 s | `error: ENVIRONMENT … software rasterer: ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) …` (both backends tried), no image |
+| `frames=4, frame_ms=250`, twice | 1.6 s each | page time 250/500/750/1000 ms in the frames, 4 pairwise different frames, the second call byte-identical to the first (sha256); `max_frame_diff` 5.549, `identical_frames` false |
+
+Measured 2026-09-22, Chromium 152.0.7977.82, RTX 5090 free, before #293 (software was still an arm then):
 
 | case | wall clock | result |
 |---|---|---|

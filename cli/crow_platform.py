@@ -55,6 +55,7 @@ would be a second core.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -974,6 +975,11 @@ def find_browser_path() -> "str | None":
     return None
 
 
+# #293. GPU ONLY. Until 2026-09-25 this gate chose SwiftShader below the
+# bound, and a 16-hour diorama run (2026-09-24/25, 35 of 42 surviving results
+# `software (swiftshader)` at 51-317 MiB free) was judged on 1-spp CPU noise.
+# Below the bound render_page now returns an ENVIRONMENT error, never pixels.
+#
 # #213. GPU WHEN THE CARD IS FREE, SWIFTSHADER OTHERWISE. Measured here
 # 2026-09-22, headless, one animated WebGL page, budgets 2000 vs 8000:
 #
@@ -1163,10 +1169,11 @@ def machine_facts(card=None) -> str:
 
 
 def render_gl_reason(free_mib: "int | None" = None, panel: bool = False) -> str:
-    """#271: why render_gl_mode chose software, in one clause."""
+    """#271/#293: why render_gl_mode said "unavailable", in one clause."""
     forced = (os.environ.get("CROW_RENDER_GL") or "").strip().lower()
-    if forced in ("swiftshader", "software", "cpu"):
-        return "CROW_RENDER_GL=%s forces software" % forced
+    if forced in _RENDER_GL_SOFTWARE:
+        return ("CROW_RENDER_GL=%s asks for software rendering, which render_page "
+                "no longer does -- it renders on the GPU only (#293)" % forced)
     if free_mib is None:
         free_mib = gpu_free_mib()
     if free_mib is None:
@@ -1174,35 +1181,110 @@ def render_gl_reason(free_mib: "int | None" = None, panel: bool = False) -> str:
     card = gpu_card()
     name = card[0] if card else "the GPU"
     need = gpu_headroom_mib(panel)
-    # #279: the bound is named with its reason, so a capture that went to
-    # software with 900 MiB free does not read as a miscount.
+    # #279: the bound is named with its reason, so a refusal with 900 MiB
+    # free does not read as a miscount.
     beside = (" next to Crow's own browser panel on the same card" if panel
               else "")
     return ("%s has %s MiB VRAM free, below the %s MiB a GPU render needs%s -- the "
             "model server holds it; the machine HAS this GPU and the user's browser "
-            "renders on it, so this capture says nothing about GPU speed"
+            "renders on it, so this says nothing about the page or about GPU speed"
             % (name, "{:,}".format(free_mib), "{:,}".format(need), beside))
 
 
+# The values of $CROW_RENDER_GL that used to pin the software arm (#213).
+_RENDER_GL_SOFTWARE = ("swiftshader", "software", "cpu")
+
+
 def render_gl_mode(free_mib: "int | None" = None, panel: bool = False) -> str:
-    """"angle" when the card has headroom, else "swiftshader" (#213).
+    """"angle" when the card has headroom, else "unavailable" (#213, #293).
 
     `panel`: the window's browser panel is open or holds a page, so the render
     would be the card's second client next to it (#279).
 
-    $CROW_RENDER_GL forces the answer (`angle`/`gpu` or `swiftshader`/
-    `software`/`cpu`) -- the honest way to pin an arm for a measurement;
-    default `auto` asks the card and falls back to software on every doubt.
+    $CROW_RENDER_GL=angle|gpu skips the VRAM gate (the renderer check in
+    render_page still applies). The old software values are "unavailable":
+    render_page renders on the GPU only since #293, and a pin that asks for
+    software gets the refusal that names it, never software pixels. An
+    unreadable card is "unavailable" too -- the render may not guess itself
+    onto a card whose state it could not read.
     """
     forced = (os.environ.get("CROW_RENDER_GL") or "").strip().lower()
     if forced in ("angle", "gpu"):
         return "angle"
-    if forced in ("swiftshader", "software", "cpu"):
-        return "swiftshader"
+    if forced in _RENDER_GL_SOFTWARE:
+        return "unavailable"
     if free_mib is None:
         free_mib = gpu_free_mib()
     return "angle" if (free_mib is not None
-                       and free_mib >= gpu_headroom_mib(panel)) else "swiftshader"
+                       and free_mib >= gpu_headroom_mib(panel)) else "unavailable"
+
+
+# #293. THE ANGLE BACKENDS, IN ORDER. `vulkan` is robin's decision of
+# 2026-09-25 and the launcher line of the research brief (Chromium's
+# "Using GPU hardware in headless Chrome",
+# https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/gpu/using-gpu-hardware-in-headless-chrome.md;
+# https://developer.chrome.com/blog/supercharge-web-ai-testing; three.js e2e,
+# https://github.com/mrdoob/three.js/blob/dev/test/e2e/puppeteer.js L209-218).
+# NOT MEASURED on this machine. `default` is the line measured here on
+# 2026-09-22 (#213): `--use-gl=angle` alone, renderer "ANGLE (NVIDIA
+# Corporation, NVIDIA GeForce RTX 5090/PCIe/SSE2, OpenGL ES 3.2)". When the
+# renderer check rejects the first, render_page tries the next once.
+#
+# NEVER `--enable-unsafe-swiftshader` (the opt-in of the blink-dev intent,
+# https://groups.google.com/a/chromium.org/g/blink-dev/c/yhFguWS_3pM). But
+# its absence is NOT the guard: measured 2026-09-25, Chromium 152.0.7977.82
+# with --disable-gpu and without the flag still handed WebGL a SwiftShader
+# context ("Automatic fallback to software WebGL has been deprecated" in the
+# console). The guard is the renderer string (render_renderer_verdict).
+_RENDER_GPU_FLAGS = {
+    "vulkan": ["--enable-gpu", "--use-gl=angle", "--use-angle=vulkan",
+               "--enable-features=Vulkan", "--disable-vulkan-surface",
+               "--ignore-gpu-blocklist"],
+    "default": ["--use-gl=angle"],
+}
+
+
+def render_angle_backends() -> "list[str]":
+    """The ANGLE backends render_page tries, in order (#293).
+
+    $CROW_RENDER_ANGLE=vulkan|default pins one; anything else is both.
+    """
+    pinned = (os.environ.get("CROW_RENDER_ANGLE") or "").strip().lower()
+    if pinned in _RENDER_GPU_FLAGS:
+        return [pinned]
+    return list(_RENDER_GPU_FLAGS)
+
+
+def render_gpu_flags(backend: str) -> "list[str]":
+    """Chromium's flags for one ANGLE backend (#293), a fresh list."""
+    return list(_RENDER_GPU_FLAGS.get(backend, _RENDER_GPU_FLAGS["default"]))
+
+
+# Renderer strings that are software, whatever the launch line asked for:
+# SwiftShader (Chrome's own), Mesa's llvmpipe/lavapipe/softpipe, Windows'
+# WARP ("Microsoft Basic Render Driver").
+_SOFTWARE_RENDERER = re.compile(
+    r"swiftshader|llvmpipe|lavapipe|softpipe|software|basic render", re.I)
+
+
+def render_renderer_verdict(renderer: "str | None", why: str = "",
+                            card: "tuple | None | bool" = None) -> "str | None":
+    """#293. None when `renderer` (WEBGL_debug_renderer_info's
+    UNMASKED_RENDERER_WEBGL) is the real GPU, else the reason it is not.
+
+    A software string is refused by name. When nvidia-smi names an NVIDIA
+    card, the string must say NVIDIA -- robin's rule of 2026-09-25: the
+    capture is taken on the card or not at all. `card` is the suite's seam
+    (a (name, MiB) tuple, or False for none)."""
+    if not renderer:
+        return ("the browser created no WebGL context%s" % (" (%s)" % why if why else ""))
+    if _SOFTWARE_RENDERER.search(renderer):
+        return "WebGL runs on a software rasterer: %s" % renderer
+    if card is None:
+        card = gpu_card()
+    if card and "nvidia" in str(card[0]).lower() and "nvidia" not in renderer.lower():
+        return ("WebGL runs on %s, not on the %s" % (renderer, card[0]))
+    return None
 
 
 # --------------------------------------------------------------- the fonts ---

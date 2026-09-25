@@ -951,6 +951,8 @@ TOOLS = [
     _fn("render_page",
         "Open a local page or a URL in a real browser and get back a screenshot plus the "
         "console output. Use it to SEE what you built -- then read_image the screenshot. "
+        "It renders on the GPU only: when the card has no room it returns an "
+        "ENVIRONMENT error and no image, which says nothing about the page. "
         "Do not drive a browser through run_command; this one is supervised and always "
         "comes back. A local file opens as file://, where module imports are blocked "
         "-- render the build_bundle output, not the module source page. A local page "
@@ -964,7 +966,15 @@ TOOLS = [
                                     "max 20000. A larger value never rescues a page "
                                     "too heavy to draw -- make the scene cheaper."},
          "width": {"type": "integer", "description": "Viewport width, default 1280."},
-         "height": {"type": "integer", "description": "Viewport height, default 800."}},
+         "height": {"type": "integer", "description": "Viewport height, default 800."},
+         "frames": {"type": "integer",
+                    "description": "1-4, default 1. More freezes the page's clock and "
+                                   "captures each frame after exactly frame_ms of page "
+                                   "time (deterministic), plus a 2x2 contact sheet -- "
+                                   "use it to show motion or accumulation."},
+         "frame_ms": {"type": "integer",
+                      "description": "Page time between frames, default 500, "
+                                     "16-5000."}},
         ["path"]),
     _fn("write_file",
         "Write a file whole, creating directories as needed. An existing file must "
@@ -8605,9 +8615,9 @@ def memory_contradiction(text: str, card=None) -> "str | None":
         card = crow_platform.gpu_card() if card is None else card
         if card and card[0] and card[0].split()[-1].lower() not in text.lower():
             return ("it says there is no GPU, but this machine has %s (%s MiB, "
-                    "nvidia-smi). If it is about a tool -- render_page rasterises "
-                    "in software while the model server holds the card -- say that, "
-                    "and name the card" % (card[0], "{:,}".format(card[1])))
+                    "nvidia-smi). If it is about a tool -- render_page refuses with an "
+                    "ENVIRONMENT error while the model server holds the card -- say "
+                    "that, and name the card" % (card[0], "{:,}".format(card[1])))
     if _TOOL_CORRUPT.search(text):
         return ("it says a tool changes bytes, but every write result names the "
                 "file's sha256 and is byte-exact (#252): a wrong byte is in the "
@@ -8750,8 +8760,9 @@ WORKING_AREA_LINE = ("Working area: {root}\n"
 # while the model server held the card, and the model wrote "Machine has NO
 # GPU" into its memory. A tool's limit is the tool's.
 MACHINE_LINE = ("Machine: {facts}\n"
-                "A tool's own limits are not the machine's: render_page may rasterise "
-                "in software while the model server holds the GPU. Check a claim about "
+                "A tool's own limits are not the machine's: render_page may refuse "
+                "with an ENVIRONMENT error while the model server holds the GPU. Check "
+                "a claim about "
                 "the hardware or a tool against this line or a command before you save "
                 "it to memory.")
 
@@ -10668,10 +10679,160 @@ class _Devtools:
         return self.wait_for(lambda m: m.get("id") == wanted, until)
 
 
+# #293. WHICH RASTERER WEBGL REALLY GOT, asked of the browser and not of the
+# gate. Until 2026-09-25 the label came from the VRAM gate's decision alone
+# (`grep UNMASKED` found nothing), so ANGLE serving a GPU launch from
+# software would have said "gpu (angle)". The probe runs on about:blank
+# BEFORE the page loads (no image is taken on a software context) and once
+# more after the last capture (a GPU process that lost its context mid-run).
+# WEBGL_debug_renderer_info / UNMASKED_RENDERER_WEBGL, the check of the
+# research brief (https://dev.to/orca_forge/why-chromium-was-ignoring-my-gpu-
+# and-how-i-boosted-performance-from-4fps-to-58fps-4dnc). The probe's own
+# context is released with WEBGL_lose_context, so it holds no VRAM.
+_RENDERER_PROBE_JS = r"""(() => {
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    if (!gl) return {renderer: null, why: 'getContext returned null'};
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const r = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    const v = ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+    const lose = gl.getExtension('WEBGL_lose_context');
+    if (lose) lose.loseContext();
+    return {renderer: String(r), vendor: String(v), why: ''};
+  } catch (e) {
+    return {renderer: null, why: String(e)};
+  }
+})()"""
+
+# #293. PAGE TIME THAT CROW MOVES, for `frames` > 1. The model of Playwright's
+# page.clock (install -> pauseAt -> runFor: "Install fake implementations for
+# time-related functions such as Date, setTimeout, and requestAnimationFrame",
+# https://github.com/microsoft/playwright/blob/main/docs/src/api/class-clock.md,
+# docs/src/clock.md) and of three.js' e2e injection (frozen Date.now /
+# performance.now, seeded Math.random, a replaced rAF,
+# https://github.com/mrdoob/three.js/blob/dev/test/e2e/deterministic-injection.js)
+# -- written out here because Crow drives CDP over its own pipe and has no
+# Playwright. NOT CDP's virtual time: under it the GPU arm drew no rAF frame
+# at all (measured 2026-09-22, docs/reference/tools.md), and
+# HeadlessExperimental.beginFrame needs chrome-headless-shell.
+#
+# Page time stands at 0 from the first script of the document through load
+# and wait_ms (real async work -- fetch, image decode, shader compile -- still
+# completes). `runFor(ms)` then fires timers and 60 Hz animation frames in
+# time order up to now + ms, and yields one REAL macrotask (MessageChannel)
+# after each, so promise jobs and the GPU's queue run between frames the way
+# they do between real frames. Not covered: CSS animations and
+# document.timeline, <video>, workers (their own clocks).
+_CLOCK_JS = r"""(() => {
+  if (window.__crowClock) return;
+  const RealDate = Date, epoch = 1767225600000;  // 2026-01-01T00:00:00Z
+  // Frame k is at k*1000/60 ms, computed and not summed: 30 additions of
+  // 1000/60 overshoot 500 and lose the 30th frame.
+  let now = 0, seq = 0, frameNo = 1, nextFrame = 1000 / 60;
+  const timers = new Map(), rafs = new Map();
+  let seed = 0x2F6B3A1D;
+  Math.random = function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  class FakeDate extends RealDate {
+    constructor(...a) { if (a.length === 0) super(epoch + now); else super(...a); }
+    static now() { return epoch + now; }
+  }
+  window.Date = FakeDate;
+  performance.now = () => now;
+  const add = (fn, ms, args, every) => {
+    const id = ++seq;
+    timers.set(id, {at: now + Math.max(0, Number(ms) || 0), fn, args, every, id});
+    return id;
+  };
+  window.setTimeout = (fn, ms, ...args) => add(fn, ms, args, 0);
+  window.setInterval = (fn, ms, ...args) => add(fn, ms, args, Math.max(1, Number(ms) || 0));
+  window.clearTimeout = window.clearInterval = (id) => { timers.delete(id); };
+  window.requestAnimationFrame = (cb) => { const id = ++seq; rafs.set(id, cb); return id; };
+  window.cancelAnimationFrame = (id) => { rafs.delete(id); };
+  const chan = new MessageChannel();
+  const waiting = [];
+  chan.port1.onmessage = () => { const r = waiting.shift(); if (r) r(); };
+  const yieldReal = () => new Promise((r) => { waiting.push(r); chan.port2.postMessage(0); });
+  const call = (fn, args) => {
+    try { if (typeof fn === 'function') fn(...args); else (0, eval)(String(fn)); }
+    catch (e) { console.error(e); }
+  };
+  const nextTimer = () => {
+    let best = null;
+    for (const t of timers.values())
+      if (!best || t.at < best.at || (t.at === best.at && t.id < best.id)) best = t;
+    return best;
+  };
+  window.__crowClock = {
+    now: () => now,
+    async runFor(ms) {
+      const until = now + Math.max(0, Number(ms) || 0);
+      for (;;) {
+        const t = nextTimer();
+        const tAt = t ? t.at : Infinity;
+        if (Math.min(tAt, nextFrame) > until) break;
+        if (tAt <= nextFrame) {
+          now = Math.max(now, tAt);
+          if (t.every) t.at += t.every; else timers.delete(t.id);
+          call(t.fn, t.args || []);
+        } else {
+          now = nextFrame;
+          nextFrame = (++frameNo * 1000) / 60;
+          const due = Array.from(rafs.entries());
+          rafs.clear();
+          for (const [, cb] of due) call(cb, [now]);
+        }
+        await yieldReal();
+      }
+      now = until;
+      return now;
+    },
+  };
+})()"""
+
+# #293. HOW MANY FRAMES AND HOW FAR APART. Four fill the 2x2 sheet;
+# 500 ms of page time is 30 animation frames between two captures.
+RENDER_FRAMES_MAX = 4
+RENDER_FRAME_MS = 500
+RENDER_FRAME_MS_MAX = 5000
+
+
+def _frame_path(shot: str, i: int) -> str:
+    """#293. Frame i (0-based) of a capture: frame 0 is `shot` itself, so the
+    single-frame result, #268's scan and the ride keep their one path."""
+    if i == 0:
+        return shot
+    stem, ext = os.path.splitext(shot)
+    return "%s-f%d%s" % (stem, i + 1, ext)
+
+
+def _probe_renderer(dt: _Devtools, sid: str, until: float) -> "tuple[str | None, str]":
+    """#293. (renderer string or None, why) from _RENDERER_PROBE_JS."""
+    got = dt.call("Runtime.evaluate",
+                  {"expression": _RENDERER_PROBE_JS, "returnByValue": True,
+                   "silent": True}, sid, until=until)
+    value = ((((got or {}).get("result") or {}).get("result") or {})
+             .get("value"))
+    if not isinstance(value, dict):
+        return None, ("the browser closed its devtools pipe" if dt.closed
+                      else "the renderer probe got no answer")
+    renderer = value.get("renderer")
+    return (str(renderer) if renderer else None), str(value.get("why") or "")
+
+
 def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
                           shot: str, load_s: float = RENDER_LOAD_S,
                           capture_s: float = RENDER_CAPTURE_S,
-                          api: "dict | None" = None) -> "tuple[bool, str]":
+                          api: "dict | None" = None,
+                          check_gpu: "Callable[[str | None, str], str | None] | None" = None,
+                          seen: "dict | None" = None,
+                          frames: int = 1,
+                          frame_ms: int = RENDER_FRAME_MS) -> "tuple[bool, str]":
     """Laden, wait ECHTE Millisekunden laufen lassen, fangen (#213-Nachtrag).
 
     (gefangen, Grund). Der Fang kommt auch dann, wenn die Seite nie fertig
@@ -10682,8 +10843,19 @@ def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
 
     #253: after a capture, `api` (when given) is filled with the
     page's own interface names and their `length`s (_API_DUMP_JS), for the
-    console hints. No answer within RENDER_PROBE_S leaves it empty."""
+    console hints. No answer within RENDER_PROBE_S leaves it empty.
+
+    #293: with `check_gpu`, the renderer WebGL gets is read on about:blank
+    before the page loads and again after the last capture; `check_gpu`
+    (renderer, why) returns None for the real GPU or the reason it is not,
+    and a reason ends the render with no image (`seen["rejected"]`).
+    `seen["renderer"]` holds the string. With `frames` > 1, _CLOCK_JS is
+    installed before the page's first script, and each capture follows one
+    `__crowClock.runFor(frame_ms)`: frame i shows page time (i+1)*frame_ms,
+    at `_frame_path(shot, i)`."""
     t0 = time.monotonic()
+    seen = seen if seen is not None else {}
+    frames = max(1, int(frames or 1))
     gone = "the browser closed its devtools pipe before the capture"
     made = dt.call("Target.createTarget", {"url": "about:blank"},
                    until=t0 + load_s)
@@ -10702,6 +10874,17 @@ def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
             {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False},
             sid, until=t0 + load_s)
     dt.call("Page.enable", session=sid, until=t0 + load_s)
+    if check_gpu is not None:
+        # #293: the card or no image -- asked before the page costs anything.
+        renderer, why = _probe_renderer(dt, sid, time.monotonic() + RENDER_PROBE_S)
+        seen["renderer"] = renderer
+        bad = check_gpu(renderer, why)
+        if bad:
+            seen["rejected"] = bad
+            return False, bad
+    if frames > 1:
+        dt.call("Page.addScriptToEvaluateOnNewDocument", {"source": _CLOCK_JS},
+                sid, until=t0 + load_s)
     went = dt.call("Page.navigate", {"url": url}, sid, until=t0 + load_s)
     failed = ((went or {}).get("result") or {}).get("errorText")
     if failed:
@@ -10722,20 +10905,52 @@ def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
         reason = ("captured while still loading -- no load event within "
                   "%d s" % load_s)
         dt.call("Page.stopLoading", session=sid, until=time.monotonic() + 2)
-    asked = time.monotonic()
-    got = dt.call("Page.captureScreenshot", {"format": "png"}, sid,
-                  until=asked + capture_s)
-    data = ((got or {}).get("result") or {}).get("data")
-    if not data:
-        if dt.closed:
-            return False, gone
-        return False, ("no frame within %d s of the capture request%s"
-                       % (capture_s, "" if loaded else
-                          ", and no load event within %d s before it"
-                          % load_s))
     import base64 as _b64
-    with open(shot, "wb") as fh:
-        fh.write(_b64.b64decode(data))
+    for i in range(frames):
+        if frames > 1:
+            # #293: page time moves by exactly frame_ms, then the capture.
+            asked = time.monotonic()
+            ran = dt.call("Runtime.evaluate",
+                          {"expression": "window.__crowClock ? "
+                                         "window.__crowClock.runFor(%d) : null"
+                                         % frame_ms,
+                           "awaitPromise": True, "returnByValue": True,
+                           "silent": True}, sid, until=asked + capture_s)
+            value = ((((ran or {}).get("result") or {}).get("result") or {})
+                     .get("value"))
+            if dt.closed:
+                return False, gone
+            if not isinstance(value, (int, float)):
+                return False, ("frame %d of %d: the page clock did not advance "
+                               "%d ms within %d s -- %s"
+                               % (i + 1, frames, frame_ms, capture_s,
+                                  "no answer (the page's frames are too heavy "
+                                  "or its main thread is blocked)" if ran is None
+                                  else "the page has no Crow clock"))
+        asked = time.monotonic()
+        got = dt.call("Page.captureScreenshot", {"format": "png"}, sid,
+                      until=asked + capture_s)
+        data = ((got or {}).get("result") or {}).get("data")
+        if not data:
+            if dt.closed:
+                return False, gone
+            return False, ("no frame within %d s of the capture request%s%s"
+                           % (capture_s,
+                              "" if frames == 1 else
+                              " (frame %d of %d)" % (i + 1, frames),
+                              "" if loaded else
+                              ", and no load event within %d s before it"
+                              % load_s))
+        with open(_frame_path(shot, i), "wb") as fh:
+            fh.write(_b64.b64decode(data))
+    if check_gpu is not None:
+        # #293: a GPU process that crashed or lost its context mid-run
+        # leaves no GPU context behind; the frames above are then suspect.
+        renderer, why = _probe_renderer(dt, sid, time.monotonic() + RENDER_PROBE_S)
+        bad = check_gpu(renderer, why)
+        if bad:
+            seen["rejected"] = "after the capture: " + bad
+            return False, seen["rejected"]
     if api is not None:
         got = dt.call("Runtime.evaluate",
                       {"expression": _API_DUMP_JS, "returnByValue": True,
@@ -10745,6 +10960,8 @@ def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
                  .get("value"))
         if isinstance(value, dict):
             api.update(value)
+    if frames > 1:
+        reason += ", %d frames %d ms of page time apart" % (frames, frame_ms)
     return True, "%s, captured %.1f s after start" % (reason,
                                                      time.monotonic() - t0)
 
@@ -10811,10 +11028,220 @@ def _page_target(path: str) -> "tuple[str | None, str]":
                                                       safe=_PAGE_SUFFIX_SAFE)
 
 
+# #293. THE STRUCTURED SIDE OF A RENDER. The last render's record (the
+# contract in tool_render_page's docstring), for code that must not parse
+# the text. Replaced by every call that gets past its argument checks.
+_RENDER_LAST: dict = {}
+
+
+def last_render() -> dict:
+    """#293: a copy of the last render_page record, {} before the first."""
+    return json.loads(json.dumps(_RENDER_LAST)) if _RENDER_LAST else {}
+
+
+def _render_record(mode: str, renderer: "str | None", frames: "list[str]",
+                   sheet: "str | None", precheck: "dict | None",
+                   **extra) -> dict:
+    """#293: one record, kept as last_render() and returned."""
+    record = {"render_mode": mode, "renderer": renderer,
+              "frames": list(frames), "contact_sheet": sheet,
+              "precheck": precheck}
+    record.update(extra)
+    _RENDER_LAST.clear()
+    _RENDER_LAST.update(record)
+    return record
+
+
+def _render_unavailable(reason: str, free_mib: "int | None" = None,
+                        renderer: "str | None" = None) -> str:
+    """#293: the ENVIRONMENT error, with its `render:` line. No image, and
+    no ride: a result without a capture must not carry an older one."""
+    record = _render_record("unavailable", renderer, [], None, None,
+                            reason=reason, free_mib=free_mib)
+    _RENDER_RIDE.clear()
+    return ("error: ENVIRONMENT -- render_page renders on the GPU only, and the "
+            "GPU is unavailable: %s. No image was taken. This is the machine's "
+            "state, not the page's: do not change the page for it and do not "
+            "judge it from an older capture; tell the user if it persists.\n"
+            "render: %s" % (reason, json.dumps(record, ensure_ascii=False)))
+
+
+# #293. THE PRECHECK LINES, fixed in the ticket before any result existed.
+# Dark: Rec. 709 luma under 16 of 255. Clipped: R, G and B all at 250 or
+# more. A pixel "changed" between two frames when its largest channel delta
+# is over 25 (0.1 x 255, three.js' e2e pixelThreshold 0.1,
+# https://github.com/mrdoob/three.js/blob/dev/test/e2e/puppeteer.js L84-99),
+# and frames "move" when more than 0.5 % of the sample changed (the research
+# brief's motion line). Uniform reuses #268's near-blank share (98 %) and
+# #265's colour floor (16).
+_PRECHECK_DARK_LUMA = 16
+_PRECHECK_CLIPPED = 250
+_PRECHECK_DELTA = 25
+_PRECHECK_MOTION_PCT = 0.5
+_PRECHECK_DARK_WARN_PCT = 90.0
+
+
+def _frame_sample(img: tuple) -> "list[tuple]":
+    """#293: (r, g, b) on _pixel_stats' grid (every row, every step-th
+    column; <= ~100,000 px), so two frames of one size compare pixel for
+    pixel. Channel slicing runs in C."""
+    width, height, _colour, channels, rows = img
+    step = max(1, (width * height) // 100_000)
+    stride = step * channels
+    out: "list[tuple]" = []
+    for cur in rows:
+        if channels >= 3:
+            out.extend(zip(cur[0::stride], cur[1::stride], cur[2::stride]))
+        else:
+            grey = cur[0::stride]
+            out.extend(zip(grey, grey, grey))
+    return out
+
+
+def render_precheck(images: "list") -> "dict | None":
+    """#293. The cheap pixel checks of one capture's frames (decoded by
+    _png_pixels; None for a frame it could not read). None when no frame
+    could be read. Keys: see tool_render_page's contract."""
+    readable = [img for img in images if img is not None]
+    if not readable:
+        return None
+    last = readable[-1]
+    stats = _pixel_stats(last)
+    sample = _frame_sample(last)
+    n = len(sample) or 1
+    dark = sum(1 for r, g, b in sample
+               if 0.2126 * r + 0.7152 * g + 0.0722 * b < _PRECHECK_DARK_LUMA)
+    clipped = sum(1 for r, g, b in sample
+                  if r >= _PRECHECK_CLIPPED and g >= _PRECHECK_CLIPPED
+                  and b >= _PRECHECK_CLIPPED)
+    share = stats["share"] or 0.0
+    out = {"uniform": bool(share >= _RENDER_NEAR_BLANK
+                           or stats["colours"] < _WARN_COLOURS),
+           "distinct_colours": stats["colours"],
+           "one_colour_pct": round(100.0 * share, 2),
+           "dark_pct": round(100.0 * dark / n, 2),
+           "clipped_pct": round(100.0 * clipped / n, 2),
+           "max_frame_diff": None, "identical_frames": None}
+    if len(images) > 1:
+        if len(readable) != len(images) or len({(i[0], i[1]) for i in readable}) != 1:
+            return out            # a frame unreadable or of another size: no verdict
+        samples = [sample if img is last else _frame_sample(img)
+                   for img in readable]
+        worst = 0.0
+        for i in range(len(samples)):
+            for j in range(i + 1, len(samples)):
+                changed = 0
+                for a, b in zip(samples[i], samples[j]):
+                    if a != b and max(abs(a[0] - b[0]), abs(a[1] - b[1]),
+                                      abs(a[2] - b[2])) > _PRECHECK_DELTA:
+                        changed += 1
+                worst = max(worst, 100.0 * changed / (len(samples[i]) or 1))
+        out["max_frame_diff"] = round(worst, 3)
+        out["identical_frames"] = worst < _PRECHECK_MOTION_PCT
+    return out
+
+
+def _precheck_warnings(pre: "dict | None") -> "list[str]":
+    """#293: the precheck's verdicts as warn lines. None of them uses the
+    words #268's stuck counter reads (_RENDER_STUCK_WARNS): a still page
+    legitimately has identical frames, and a dark scene may be meant."""
+    if not pre:
+        return []
+    out = []
+    if pre.get("uniform"):
+        out.append("warn: precheck -- the last frame is near-uniform (%.1f %% "
+                   "one colour, %d colours): no scene reached it"
+                   % (pre["one_colour_pct"], pre["distinct_colours"]))
+    if pre.get("dark_pct", 0) >= _PRECHECK_DARK_WARN_PCT:
+        out.append("warn: precheck -- %.0f %% of the last frame is near-black "
+                   "(luma < %d)" % (pre["dark_pct"], _PRECHECK_DARK_LUMA))
+    if pre.get("identical_frames"):
+        out.append("warn: precheck -- no motion: no pair of frames differs in "
+                   "%.1f %% of its pixels or more (largest %.3f %%)"
+                   % (_PRECHECK_MOTION_PCT, pre["max_frame_diff"]))
+    return out
+
+
+def _contact_sheet(images: "list", path: str) -> bool:
+    """#293. Up to four decoded frames in a 2x2 grid, each at half size
+    (every second pixel of every second row), so the sheet is as large as one
+    frame and costs the judge about one frame's visual tokens. An empty cell
+    is black. False when a frame is missing or of another size."""
+    if not images or any(img is None for img in images):
+        return False
+    width, height = images[0][0], images[0][1]
+    if any((img[0], img[1]) != (width, height) for img in images):
+        return False
+    cw, ch = width // 2, height // 2
+    black = bytes(3 * cw)
+
+    def cell_row(img, y: int) -> bytes:
+        _w, _h, _c, channels, rows = img
+        src = rows[2 * y]
+        step = 2 * channels
+        out = bytearray(3 * cw)
+        if channels >= 3:
+            out[0::3] = src[0::step][:cw]
+            out[1::3] = src[1::step][:cw]
+            out[2::3] = src[2::step][:cw]
+        else:
+            grey = src[0::step][:cw]
+            out[0::3] = out[1::3] = out[2::3] = grey
+        return bytes(out)
+
+    cells = list(images[:4]) + [None] * (4 - min(4, len(images)))
+    rows: "list[bytes]" = []
+    for top in (0, 2):
+        for y in range(ch):
+            left = cell_row(cells[top], y) if cells[top] is not None else black
+            right = (cell_row(cells[top + 1], y) if cells[top + 1] is not None
+                     else black)
+            rows.append(left + right)
+    try:
+        with open(path, "wb") as fh:
+            fh.write(_png_encode(2 * cw, 2 * ch, 2, rows))
+    except OSError:
+        return False
+    return True
+
+
 def tool_render_page(path: str, wait_ms: int | None = None,
                      width: int | None = None, height: int | None = None,
+                     frames: int | None = None, frame_ms: int | None = None,
                      **_) -> str:
     """Render one page in a browser Crow owns, and hand back what it saw.
+
+    THE CONTRACT (#293). Every capture result and every ENVIRONMENT error
+    carries one line `render: <json>`, and `last_render()` returns the same
+    dict for code (goal mode, the judge):
+
+      render_mode    "gpu" | "unavailable". "unavailable" comes with an
+                     `error: ENVIRONMENT -- ...` result and NO image: the VRAM
+                     gate is below its bound, the renderer is software or
+                     missing, the context was lost after the capture, or
+                     frames > 1 without the DevTools pipe. There is no
+                     software fallback.
+      renderer       UNMASKED_RENDERER_WEBGL as the browser named it (e.g.
+                     "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 5090 ...)"),
+                     None when no context came up or the gate stopped the
+                     call first; "unverified (...)" on Windows (no pipe).
+      frames         [paths], frame 0 = render-<stamp>.png, then
+                     render-<stamp>-f2..f4.png; [] when unavailable.
+      contact_sheet  render-<stamp>-sheet.png (2x2, each frame at half size,
+                     the sheet as large as one frame) when frames > 1, else
+                     None.
+      precheck       None when unavailable, else a dict over a <=100,000-px
+                     sample (render_precheck): uniform, distinct_colours,
+                     one_colour_pct, dark_pct, clipped_pct (last frame),
+                     max_frame_diff, identical_frames (all frame pairs; None
+                     for one frame).
+      also: backend ("vulkan" | "default"), free_mib, and on "unavailable"
+                     reason.
+
+    `frames` (1-4, default 1): 1 is one capture after `wait_ms` of real time.
+    More install _CLOCK_JS: page time stands at 0 through load and wait_ms,
+    then each capture follows exactly `frame_ms` (16-5000, default 500) of
+    page time -- deterministic, so the same page gives the same frames.
 
     WARUM UEBERHAUPT (#175): ohne dieses Werkzeug baut sich das Modell aus
     Shell-Befehlen einen Browser -- und genau das ist das, was Crow nicht
@@ -10919,6 +11346,9 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     wait = max(200, min(int(wait_ms or 4000), RENDER_WAIT_MAX_MS))
     w = max(200, min(int(width or 1280), 4096))
     h = max(200, min(int(height or 800), 4096))
+    # #293: frames and their page-time step.
+    n_frames = max(1, min(int(frames or 1), RENDER_FRAMES_MAX))
+    step_ms = max(16, min(int(frame_ms or RENDER_FRAME_MS), RENDER_FRAME_MS_MAX))
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     shot = os.path.join(_render_dir(), "render-%s.png" % stamp)
@@ -10926,90 +11356,42 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     log = os.path.join(profile, "browser.log")
 
     # #213. WELCHER RASTERER, UND DIE KARTE ENTSCHEIDET MIT. Gemessen hier
-    # 2026-09-22 am selben Kriterien wie #175-Nachtrag (zwei Budgets, zwei
-    # verschiedene Bilder): die swiftshader-Paarung unten rendert weiter
-    # softwareseitig ("ANGLE (Google, Vulkan ... SwiftShader driver)"),
-    # --use-gl=angle nimmt die Karte ("ANGLE (NVIDIA ... RTX 5090, OpenGL ES
-    # 3.2)") -- aber nur, wenn freie VRAM da ist, denn der Server zuerst ist
-    # die Regel, nicht die Ausnahme. Die Antwort steht im Ergebnis mit dabei,
-    # weil ein Modell, das seinen Spiegel kennt, ihn auch nicht
-    # bezweifeln kann.
+    # 2026-09-22: --use-gl=angle nimmt die Karte ("ANGLE (NVIDIA ... RTX 5090,
+    # OpenGL ES 3.2)") -- aber nur, wenn freie VRAM da ist, denn der Server
+    # zuerst ist die Regel, nicht die Ausnahme.
     #
-    # #213-NACHTRAG: DAS ETIKETT STIMMT, AUCH WENN DIE KONSOLE ANDERS KLINGT.
-    # "GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU
-    # stall due to ReadPixels" sieht nach NVIDIA aus und ist es nicht:
-    # gemessen auf einer Probeseite kommt die Zeile NUR im swiftshader-Arm
-    # (Renderer "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...))"),
-    # der angle-Arm auf der RTX 5090 schreibt sie nicht; der Text steht im
-    # chromium-Binary (ANGLEs eigene Performance-Warnung) und in keiner
-    # libnvidia-*. GL_CLOSE_PATH_NV ist nur der Name, den Chromiums
-    # Enum-Tabelle fuer die Meldungs-ID 0 findet. Der GPU-Prozess des
-    # Software-Arms haelt /dev/nvidiactl offen, aber keinen VRAM (nicht in
-    # nvidia-smi) -- gerastert wird in SwiftShader.
-    # #279: ONE READING for the choice and for the reason below, and the
-    # panel counted as the card's second client when the window has one open.
+    # #293. AND ONLY THE CARD. Below the bound the render used to go to
+    # SwiftShader (--disable-gpu --enable-unsafe-swiftshader
+    # --use-angle=swiftshader) and hand back software pixels labelled as such;
+    # the 2026-09-24/25 diorama run (35 of 42 surviving results software, 51-317
+    # MiB free) was judged on 1-spp CPU noise for 16 hours. Now the gate says
+    # "unavailable" and the call ends here with an ENVIRONMENT error that names
+    # the free VRAM -- no browser, no image. The flags come from
+    # crow_platform.render_gpu_flags and never include the SwiftShader pair.
+    # #279: ONE READING for the choice and for the reason, and the panel
+    # counted as the card's second client when the window has one open.
     free_mib = crow_platform.gpu_free_mib()
     gl = crow_platform.render_gl_mode(free_mib, panel=RENDER_PANEL_OPEN)
-    gl_flags = (["--use-gl=angle"] if gl == "angle" else
-                # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
-                # heute stand hier nur --disable-gpu, und die Folge war messbar:
-                # unter der virtuellen Uhr lief requestAnimationFrame NIE an, drei
-                # Varianten einer animierten WebGL-Seite ergaben byte-identische
-                # 92.027-Byte-Fangs nach 8 echten Sekunden Wartezeit, und das
-                # Modell auditierte diese Leinwaende als "environment-blocked,
-                # page correct" -- das MESSGERAET war kaputt, nicht die Seite.
-                # Dazu kam Chromium 144: der automatische SwiftShader-Fallback
-                # fuer WebGL wurde gestrichen (chromestatus "Remove SwiftShader
-                # fallback"), ohne --enable-unsafe-swiftshader scheitert in
-                # Headless die WebGL-Kontexterzeugung. GEMESSEN hier (Chromium
-                # 152, dieselbe Testseite mit fahrendem Balken und fps-Zaehler,
-                # Budget 2000 gegen 8000):
-                #   alt  (--disable-gpu):        5.138 B @ rAF 3 == 5.138 B @ rAF 3
-                #   neu  (+ --use-angle=swiftshader
-                #         + --enable-unsafe-swiftshader):
-                #                                5.138 B @ rAF 3 != 5.117 B @ rAF 5
-                # Die Animation ZIEHT unter der virtuellen Uhr, und zwei Budgets
-                # liefern verschiedene Bilder. SwiftShader bleibt Software: die
-                # Karte wird nicht angefasst, solange sie nicht frei ist.
-                ["--disable-gpu",
-                 "--enable-unsafe-swiftshader", "--use-angle=swiftshader"])
+    if gl != "angle":
+        return _render_unavailable(
+            crow_platform.render_gl_reason(free_mib, panel=RENDER_PANEL_OPEN),
+            free_mib=free_mib)
 
     # #213-NACHTRAG: DIE LEITUNG, WO ES SIE GIBT. Mit ihr faehrt Crow die
     # Seite selbst (_render_over_devtools); ohne sie (Windows) bleibt der
-    # Kommandozeilen-Screenshot mit der virtuellen Uhr.
+    # Kommandozeilen-Screenshot mit der virtuellen Uhr -- and #293's renderer
+    # probe and page clock, which need the pipe, do not exist there.
     pipe = crow_platform.devtools_pipe()
-    argv = [exe, "--headless=new"] + gl_flags + [
-            "--hide-scrollbars",
-            "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", "--mute-audio",
-            "--user-data-dir=" + profile,
-            "--window-size=%d,%d" % (w, h),
-            # --v UND NICHT DER ALTE SCHALTER: die Verbositaet des
-            # Chromium-Loggers regelt --v, und nur mit ihr landen die
-            # CONSOLE-Zeilen der Seite im browser.log -- der TEXT-Beweis
-            # dafuer, dass ihr Skript lief (#175-Nachtrag, siehe oben).
-            "--enable-logging=stderr", "--v=0"]
-    if pipe:
-        argv += ["--remote-debugging-pipe", "about:blank"]
-    else:
-        argv += [
-            # DER DECKEL IST IM BROWSER UND NICHT NUR DRAUSSEN. Eine Seite, die
-            # nie fertig laedt, wuerde sonst nur vom Timeout getroffen -- und
-            # das liefert KEIN Bild. Die virtuelle Uhr laesst ihn nach dieser
-            # Zeit trotzdem zeichnen, also kommt auch von einer haengenden Seite
-            # etwas zurueck, das man ansehen kann.
-            "--virtual-time-budget=%d" % wait,
-            # Die dokumentierte Ergaenzung zur virtuellen Uhr: alle Stufen des
-            # Kompositors vor dem Zeichnen zu Ende fahren, damit ein Bild den
-            # Zustand zeigt und nicht eine halbe Ebene davon.
-            # WAS ES NICHT TUT, gemessen 2026-08-31: eine Seite mit endlosem
-            # `fetch` rettet es NICHT. Dort laeuft die virtuelle Uhr ab,
-            # gezeichnet wird nie, und was zurueckkommt, ist das Timeout mit
-            # seinem Grund -- kein Bild. Das ist der Fall, den #175 verlangt
-            # ("ends the call by itself, with a reason"), und nicht der, den es
-            # bebildert.
-            "--run-all-compositor-stages-before-draw",
-            "--screenshot=" + shot, url]
+    if not pipe and n_frames > 1:
+        return _render_unavailable(
+            "frames > 1 needs the DevTools pipe to move the page's clock, and "
+            "this platform (Windows) has none yet -- call with frames=1",
+            free_mib=free_mib)
+    card = crow_platform.gpu_card() if pipe else None
+
+    def check_gpu(renderer: "str | None", why: str) -> "str | None":
+        return crow_platform.render_renderer_verdict(renderer, why,
+                                                     card=card or False)
 
     # #213. DER BROWSER IN EINEM EIGENEN DECKEL. Der Lauf vom 2026-09-21 wuchs
     # auf 54 GiB und fror die Maschine ein, weil der Renderprozess in keiner
@@ -11021,10 +11403,6 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     # Das Trampolin der Leitung steht HINTER dem Scope: es ersetzt sich durch
     # den Browser, die pid im Scope ist seine.
     scope = crow_platform.render_scope_prefix()
-    if pipe:
-        argv = pipe[0] + argv
-    if scope:
-        argv = scope + argv
 
     # #213-NACHTRAG: EIN DECKEL FUER DEN GANZEN AUFRUF, UND ER HAENGT NICHT
     # AN DER SEITE. Laden + wait_ms + ein Frame, auf beiden Pfaden dieselbe
@@ -11032,13 +11410,45 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     # wait 4000 ergab, gegen 32,7 s echten Bedarf.
     ceiling = RENDER_LOAD_S + wait / 1000.0 + RENDER_CAPTURE_S
 
-    detach = crow_platform.spawn_kwargs(detached=True)
-    if pipe:
-        detach["pass_fds"] = pipe[1]
-    reason = "done"
-    captured = False
-    api: dict = {}              # #253: the page's own names
-    try:
+    def launch(backend: str, pipe, seen: dict, api: dict) -> "tuple[bool, str]":
+        """One browser on one ANGLE backend: (captured, reason)."""
+        argv = [exe, "--headless=new"] + crow_platform.render_gpu_flags(backend) + [
+                "--hide-scrollbars",
+                "--no-first-run", "--no-default-browser-check",
+                "--disable-extensions", "--mute-audio",
+                # A profile per attempt: a GPU process that failed on one
+                # backend may leave state the next launch should not read.
+                "--user-data-dir=" + os.path.join(profile, backend),
+                "--window-size=%d,%d" % (w, h),
+                # --v UND NICHT DER ALTE SCHALTER: die Verbositaet des
+                # Chromium-Loggers regelt --v, und nur mit ihr landen die
+                # CONSOLE-Zeilen der Seite im browser.log -- der TEXT-Beweis
+                # dafuer, dass ihr Skript lief (#175-Nachtrag, siehe oben).
+                "--enable-logging=stderr", "--v=0"]
+        if pipe:
+            argv += ["--remote-debugging-pipe", "about:blank"]
+        else:
+            argv += [
+                # DER DECKEL IST IM BROWSER UND NICHT NUR DRAUSSEN. Eine Seite,
+                # die nie fertig laedt, wuerde sonst nur vom Timeout getroffen
+                # -- und das liefert KEIN Bild. Die virtuelle Uhr laesst ihn
+                # nach dieser Zeit trotzdem zeichnen.
+                "--virtual-time-budget=%d" % wait,
+                # Die dokumentierte Ergaenzung zur virtuellen Uhr: alle Stufen
+                # des Kompositors vor dem Zeichnen zu Ende fahren. WAS ES NICHT
+                # TUT, gemessen 2026-08-31: eine Seite mit endlosem `fetch`
+                # rettet es NICHT -- dann kommt das Timeout mit seinem Grund.
+                "--run-all-compositor-stages-before-draw",
+                "--screenshot=" + shot, url]
+        if pipe:
+            argv = pipe[0] + argv
+        if scope:
+            argv = scope + argv
+        detach = crow_platform.spawn_kwargs(detached=True)
+        if pipe:
+            detach["pass_fds"] = pipe[1]
+        reason = "done"
+        captured = False
         with open(log, "w", encoding="utf-8", errors="replace") as sink:
             try:
                 proc = subprocess.Popen(argv, stdout=sink,
@@ -11056,7 +11466,9 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 dt = _Devtools(pipe[2], pipe[3])
                 try:
                     captured, reason = _render_over_devtools(
-                        dt, url, w, h, wait, shot, api=api)
+                        dt, url, w, h, wait, shot, api=api,
+                        check_gpu=check_gpu, seen=seen,
+                        frames=n_frames, frame_ms=step_ms)
                     # Der hoefliche Weg zuerst, und das Rohr bleibt offen, bis
                     # er gegangen ist -- sonst schreibt der Browser "Connection
                     # terminated while reading from pipe" in den Konsolen-
@@ -11086,10 +11498,8 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 # aufgemacht hat, nie eine Prozessliste und nie ein Name.
                 crow_platform.terminate_tree(proc)
                 # #213. UND DAS WARTEN AUF DIE LEICHE DARF KEINEN FEHLER
-                # WERFEN. Der Lauf vom 2026-09-21 ueberlebte den Werkzeugruf
-                # um 20 Minuten; ab hier heisst "was stopped" auch, dass der
-                # Tod GEMESSEN wurde -- und wenn er nicht eintritt, STEHT ER
-                # DA, als Grund, den das Modell lesen kann.
+                # WERFEN: ab hier heisst "was stopped" auch, dass der Tod
+                # GEMESSEN wurde -- und wenn er nicht eintritt, STEHT ER DA.
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
@@ -11102,18 +11512,52 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                         reason = ("timed out after %d s and was stopped"
                                   % ceiling)
             else:
-                # #213. EIN DECKEL-TOT SIEHT WIE ERFOLG AUS. Der Kernel
-                # ueberhoeht den Browser innerhalb seiner Scope-Cgroup, der
-                # Rueckgabewert ist nur ein Signal -- aber "done" waere die
-                # Luege, mit der das Modell einen halben Frame liest.
-                # -9 ist das Signal des Popen-Handles, 137 (128+9) die Zahl,
-                # mit der systemd-run ihn weiterreicht.
+                # #213. EIN DECKEL-TOT SIEHT WIE ERFOLG AUS. -9 ist das Signal
+                # des Popen-Handles, 137 (128+9) die Zahl, mit der systemd-run
+                # ihn weiterreicht.
                 code = proc.returncode
                 if scope and code is not None and code in (-9, 137) and not captured:
                     cap = crow_platform.render_memory_bounds().get("MemoryMax")
                     reason = ("stopped by the render's memory ceiling%s -- "
                               "the scene outgrew the browser"
                               % (" (%s)" % cap if cap else ""))
+        return captured, reason
+
+    # #293. THE BACKENDS IN ORDER, a fresh pipe and profile each: Vulkan
+    # first (robin's decision), the measured `--use-gl=angle` line once more
+    # when the renderer check rejects it. Without the pipe (Windows) one
+    # attempt, and its renderer is unverified.
+    backends = crow_platform.render_angle_backends()
+    if not pipe:
+        backends = backends[-1:]
+    seen: dict = {}
+    api: dict = {}              # #253: the page's own names
+    backend = backends[0]
+    try:
+        for n, backend in enumerate(backends):
+            if n:
+                pipe = crow_platform.devtools_pipe()
+                if not pipe:        # no pipe, no renderer check: no retry
+                    break
+            seen = {}
+            api = {}
+            captured, reason = launch(backend, pipe, seen, api)
+            if not seen.get("rejected") or n == len(backends) - 1:
+                break
+        frame_paths = [_frame_path(shot, i) for i in range(n_frames)]
+        if seen.get("rejected"):
+            # #293: no image on a software or lost context -- and none left
+            # on disk for judge_images' "newest capture" to pick up.
+            for f in frame_paths:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            return _render_unavailable(
+                "%s (ANGLE backend%s tried: %s)"
+                % (seen["rejected"], "s" if len(backends) > 1 else "",
+                   ", ".join(backends[:n + 1])),
+                free_mib=free_mib, renderer=seen.get("renderer"))
         log_text = ""
         try:
             with open(log, encoding="utf-8", errors="replace") as fh:
@@ -11125,7 +11569,12 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         # own probe line that contradicts the error may be further up.
         hints = _console_hints(_console_lines(log_text, 0), api,
                                page_file)
-        if not os.path.isfile(shot):
+        if not all(os.path.isfile(f) for f in frame_paths):
+            for f in frame_paths:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
             # #213-NACHTRAG: DER GRUND UND DANN DER RAT, DER DEN ARM NENNT --
             # nie "timed out after 20000 ms" allein, das las sich als "gib
             # mehr". Ein Speicherdeckel-Tod und eine falsche Adresse haben ihre
@@ -11144,36 +11593,60 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         # Verdachtsmoment gegen die eigenen Pixel, kein Erfolg. Die Warnung
         # steht im Ergebnis VOR der Groesse, damit sie zuerst gelesen wird;
         # der Fang selbst haengt am Ride wie immer.
-        try:
-            with open(shot, "rb") as fh:
-                pixels = fh.read()
-        except OSError:
-            pixels = b""
-        previous = _LAST_CAPTURES.get(url)
+        blobs: "list[bytes]" = []
+        for f in frame_paths:
+            try:
+                with open(f, "rb") as fh:
+                    blobs.append(fh.read())
+            except OSError:
+                blobs.append(b"")
+        pixels = blobs[0]
+        # #293: with frames, page time is Crow's, so two calls of the same
+        # page are MEANT to be byte-identical -- there the frames' own
+        # pairwise difference (precheck) is the motion test, not this one.
+        previous = _LAST_CAPTURES.get(url) if n_frames == 1 else None
         _LAST_CAPTURES[url] = pixels
-        # DER RIDE, UNVERAENDERT (#175): das Paar (Adresse, Fang) fuer die
-        # Schleife, genau einmal.
+        # #293: the frames' own pixels, decoded once for the prechecks and
+        # the sheet.
+        images = [_png_pixels(b) for b in blobs]
+        precheck = render_precheck(images)
+        sheet = None
+        if n_frames > 1:
+            sheet = os.path.splitext(shot)[0] + "-sheet.png"
+            if not _contact_sheet(images, sheet):
+                sheet = None
+        renderer = (seen.get("renderer") if pipe else
+                    "unverified (no DevTools pipe on this platform)")
+        record = _render_record("gpu", renderer, frame_paths, sheet, precheck,
+                                backend=backend, free_mib=free_mib)
+        # DER RIDE (#175): das Paar (Adresse, Fang) fuer die Schleife, genau
+        # einmal -- the sheet when there is one (#293).
         _RENDER_RIDE.clear()
-        _RENDER_RIDE.append((url, shot))
+        _RENDER_RIDE.append((url, sheet or frame_paths[-1]))
         said = _capture_warnings(previous, pixels, console)
+        # #293: the record first, one line of JSON.
+        said.insert(0, "render: " + json.dumps(record, ensure_ascii=False))
         # #253: right under the error warnings they answer.
         said.extend(hints)
+        said.extend(_precheck_warnings(precheck))
         # #265: what the frame holds, measured, and the crop of
         # it saved beside the capture -- the warnings with the others, the
         # numbers under the file line.
         metric_warns, metrics = _capture_metrics(shot, pixels)
         said.extend(metric_warns)
-        # #213. DER RASTERER IM ERGEBNIS: software-gerasterte Fangs einer
-        # WebGL-Seite sehen anders aus als GPU-gerasterte, und ein Modell, das
-        # seinen Spiegel kennt, bezweifelt ihn auch.
-        gl_said = ("gpu (angle)" if gl == "angle" else "software (swiftshader)")
-        if gl != "angle":
-            # #271: WHY software, so the tool's limit is not read as
-            # the machine's (49 of 49 captures on 2026-09-23 were software).
-            gl_said += ": " + crow_platform.render_gl_reason(
-                free_mib, panel=RENDER_PANEL_OPEN)
-        said.append("%s -- %d bytes, %dx%d, %s, %s"
-                    % (shot, os.path.getsize(shot), w, h, reason, gl_said))
+        # #213/#293. DER RASTERER IM ERGEBNIS, as the browser named it.
+        gl_said = "gpu (angle %s): %s" % (backend, renderer)
+        for i, f in enumerate(frame_paths):
+            said.append("%s -- %d bytes, %dx%d, %s%s, %s"
+                        % (f, len(blobs[i]), w, h, reason,
+                           "" if n_frames == 1 else
+                           ", frame %d of %d at page time %d ms"
+                           % (i + 1, n_frames, (i + 1) * step_ms),
+                           gl_said))
+        if sheet:
+            said.append("%s -- contact sheet, the %d frames in a 2x2 grid at "
+                        "half size, left to right, top to bottom"
+                        % (sheet, n_frames))
         said.extend(metrics)
         said.append("read_image it to look at the page.")
         if console:
