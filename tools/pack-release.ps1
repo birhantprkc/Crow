@@ -495,8 +495,15 @@ if (-not (Test-Path (Join-Path $stage 'cli\fonts\OFL.txt'))) {
 # because crow_core resolves it as <install>\kits\pathtracer -- the same step as
 # the manifests above. install.ps1 -PathTracer only switches its skill on. The
 # three MIT notices travel with the bundle or the bundle does not travel.
+# check_diorama.py (#299) runs from the kit folder, so -Recurse can bring its
+# __pycache__ along exactly as cli\ did; install.sh's payload drops it too.
 Copy-Item -LiteralPath (Join-Path $repo 'kits') -Destination (Join-Path $stage 'kits') -Recurse
-foreach ($f in @('crow-pathtracer.js', 'kit.json', 'voxel-kit.js', 'SKILL.md',
+Get-ChildItem (Join-Path $stage 'kits') -Recurse -Directory -Filter '__pycache__' |
+    ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
+$stray = Get-ChildItem (Join-Path $stage 'kits') -Recurse -File -Include '*.pyc', '*.pyo'
+if ($stray) { throw ("compiled Python left in the kits: " + ($stray.Name -join ', ')) }
+foreach ($f in @('crow-pathtracer.js', 'kit.json', 'voxel-kit.js', 'SKILL.md', 'check_diorama.py',
+                 'scaffold\index.html', 'scaffold\scene.js',
                  'LICENSE.three', 'LICENSE.three-mesh-bvh', 'LICENSE.three-gpu-pathtracer')) {
     if (-not (Test-Path -LiteralPath (Join-Path $stage "kits\pathtracer\$f"))) {
         throw "kits/pathtracer/$f missing from the package -- the kit or its licence notice would ship incomplete"
