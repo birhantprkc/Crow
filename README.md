@@ -1,4 +1,6 @@
 <picture>
+  <source media="(max-width: 700px) and (prefers-color-scheme: dark)" srcset="docs/images/readme/crow-mobile-dark.svg">
+  <source media="(max-width: 700px)" srcset="docs/images/readme/crow-mobile-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/crow-dark.svg">
   <img src="docs/images/readme/crow-light.svg" width="100%" alt="Crow: an agent, not a chat box. A local model at 200k context with 28 tools and MCP, memory, skills, goals, subagents, a browser panel and vision. Default engine crow-nest (Rust), 45.1 tok/s.">
 </picture>
