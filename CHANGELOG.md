@@ -17,7 +17,7 @@ registry and a diorama checker, opt-in with `install.sh --pathtracer` / `install
 #304). Also: `read_file` refuses binary files and names `read_image` (#301), `--root` survives the restored chat
 (#303), and scrollbars show only while used (#305).
 
-Everything on local `main` since 2.6.0 (21d7505): 23 commits, 12 tickets (#293–#299, #301–#305), 2026-09-25.
+Everything on local `main` since 2.6.0 (21d7505): 24 commits, 12 tickets (#293–#299, #301–#305), 2026-09-25.
 Most numbers come from the 2026-09-24/25 diorama and lighthouse goal runs. #300 (image generation beside a live
 session) is not in this release. Tickets are released pending robin's live check.
 
@@ -33,7 +33,7 @@ session) is not in this release. Tickets are released pending robin's live check
   - The model's use of the kit in a live goal run is not measured.
 
 - **Voxel kit v2: animated live preview, photo mode, orbit, props registry, diorama checker** (#299, 2026-09-25).
-  - The page opens in LIVE mode: a rasterised three.js preview of the same scene and materials, with real lights, soft shadow maps (`PCFShadowMap` + `shadow.radius`; `PCFSoftShadowMap` is gone in three r182+) and the scene's `d.animate((t, dt, scene) => …)` every frame. PHOTO mode pauses at t and path-traces as before (despeckle, context-loss restore). Switch with key P or a small Foto/Live button that shows only under the pointer. `?mode=photo&t=<s>` opens the photo directly, `?mode=live` the preview, `&ui=0` hides the button. Drag orbits, wheel or pinch zooms; in photo mode a camera change restarts the accumulation.
+  - The page opens in LIVE mode (since 9e4daa4 this flat preview is `?mode=raster`; see Changed): a rasterised three.js preview of the same scene and materials, with real lights, soft shadow maps (`PCFShadowMap` + `shadow.radius`; `PCFSoftShadowMap` is gone in three r182+) and the scene's `d.animate((t, dt, scene) => …)` every frame. PHOTO mode pauses at t and path-traces as before (despeckle, context-loss restore). Switch with key P or a small Foto/Live button that shows only under the pointer. `?mode=photo&t=<s>` opens the photo directly, `?mode=live` the preview, `&ui=0` hides the button. Drag orbits, wheel or pinch zooms; in photo mode a camera change restarts the accumulation.
   - New API: `d.part(name, grid, {pivot})` returns a movable `THREE.Group` built from its own grid; `d.addSpot({...})`; `addLamp` / `addAreaLight` / `addSpot` return a light rig the callback can rotate (a lighthouse beam). Time comes only from the page clock, so render_page's 4 frames (#293) differ and repeat byte-identically.
   - Against empty scenes: `g.prop(name, build)` records the name, voxels and bbox of each prop. `window.__SCENE__` and the console line `[crow-scene] {json}` report `props`, `propKinds`, `coverage` (terrain columns with a prop above their top cell, divided by all terrain columns), `parts`, `animated`, `mode` and `errors`. The skill sets the targets: ≥ 40 props of ≥ 12 kinds, ≥ 60,000 voxels, coverage ≥ 0.5.
   - `kits/pathtracer/check_diorama.py <index.html>` is a goal `check:` command. It renders through Crow's own `render_page` and prints PASS/FAIL for gpu, probe, samples, props, kinds, voxels, coverage, motion (all 6 frame pairs > 0.5 % changed), repeat, photo precheck and errors; it exits 0 only when all pass.
@@ -110,7 +110,7 @@ session) is not in this release. Tickets are released pending robin's live check
 
 - **render_page lets path-traced kit pages wait up to 120 s** (#302, 2026-09-25). A local page that carries the
   voxel kit's `[crow-pt]` marker gets a `wait_ms` ceiling of 120,000; every other page keeps 20,000 (#213). The
-  pathtracer skill asks for 60,000–90,000 on night or dark scenes and says never to shrink the scene to fit a short
+  pathtracer skill asks for 60,000–120,000 on night or dark scenes and says never to shrink the scene to fit a short
   capture. Before: the 2026-09-25 lighthouse goal run capped every photo at 20 s, which held ~295 samples (291.5,
   295.5, 298), stayed grainy, and paused step 2 with an offer to shrink the scene. At the measured ~15 samples/s at
   1024² (RTX 5090), 90 s holds ~1,350 samples. Not measured live.
