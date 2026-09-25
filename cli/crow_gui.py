@@ -717,6 +717,9 @@ PAGE = r"""<!doctype html>
   --line:#2e2e30; --line-soft:#242426;
   --dim:#a3a3a6; --dimmer:#6f6f73;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
+  /* #296: SKIPPED IS NOT RUNNING. Both were --warn and robin read one as the
+     other (2026-09-25); skipped gets its own hue, plus shape and a label. */
+  --skip:#b392f0;
   --gold:#e5c04b; --bad-text:#ffd9d4;
   /* #143. Delegation is its own channel and wears the logo cyan -- cards, rail
      children and the chip all draw from this ONE name. Written once, in the
@@ -785,6 +788,7 @@ PAGE = r"""<!doctype html>
   --line:#e4e4e7; --line-soft:#ededf0;
   --dim:#5b6472; --dimmer:#8b93a1;
   --ok:#12855a; --warn:#8a6400; --bad:#c0362b;
+  --skip:#6f42c1;
   --gold:#8a6400; --bad-text:#8c241b;
   /* #143. The delegation channel, darkened the way every accent is here:
      the logo cyan reads as haze on white. */
@@ -810,6 +814,9 @@ PAGE = r"""<!doctype html>
   --line:#1c2438; --line-soft:#161d2e;
   --dim:#6d7b95; --dimmer:#4a566d;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
+  /* #296: SKIPPED IS NOT RUNNING. Both were --warn and robin read one as the
+     other (2026-09-25); skipped gets its own hue, plus shape and a label. */
+  --skip:#b392f0;
   --gold:#e5c04b; --bad-text:#ffd9d4;
   /* #143. The logo cyan at home: this theme is the wordmark's own ground. */
   --sub:#39c6d8;
@@ -828,8 +835,31 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
   user-select:none}
 ::-webkit-scrollbar{width:var(--sbw)}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
-::-webkit-scrollbar-thumb:hover{background:var(--bevel)}
+::-webkit-scrollbar-corner{background:transparent}
+/* #305. THE THUMB SHOWS ONLY WHILE ITS STRIP IS SCROLLED OR POINTED AT
+   (robin, 2026-09-25: the stats line, the Code panel and the chat carried a
+   bar at rest). Transparent by default; `is-scrolling` is set by the one
+   capture listener in the script (`scrollbarsAutoHide`) and cleared
+   SB_LINGER_MS after the last scroll event; a hovering pointer shows it too,
+   but only where the input CAN hover -- a phone keeps `:hover` after a tap,
+   and a bar stuck there is what this removes.
+   ONLY THE COLOUR CHANGES. Width, `--sbw`, #flow's gutter and the #235 track
+   margins stay as they were, so nothing moves when a bar appears. No fade:
+   scrollbar parts cannot transition in WebKit/Blink, so a reader who asked
+   the system for less motion gets exactly what everyone gets. */
+::-webkit-scrollbar-thumb{background:transparent;border-radius:99px}
+.is-scrolling::-webkit-scrollbar-thumb{background:var(--line)}
+@media (hover:hover){:hover::-webkit-scrollbar-thumb{background:var(--line)}}
+::-webkit-scrollbar-thumb:hover,::-webkit-scrollbar-thumb:active{background:var(--bevel)}
+/* GECKO ONLY. A non-auto `scrollbar-color` switches `::-webkit-scrollbar`
+   off for the element AND, inherited, for everything inside it -- in
+   Chromium since 121 (WebView2) and in WebKitGTK since 2.52.3. Ungated it
+   would throw away the 10 px bars above. `*` rather than inheritance so a
+   scrolling #flow does not light the bars of the blocks inside it. */
+@supports not selector(::-webkit-scrollbar){
+  *{scrollbar-color:transparent transparent}
+  .is-scrolling{scrollbar-color:var(--line) transparent}
+  @media (hover:hover){:hover{scrollbar-color:var(--line) transparent}}}
 /* #235. DIE LEISTE BLEIBT AUS DEN RUNDEN ECKEN. Ein Scrollcontainer,
    der selbst (oder dessen Rahmen) gerundet ist, legt seine Leiste bis in die
    Ecke; gerendert in WebKitGTK 2.52 lief der Daumen der Zielkarte in deren
@@ -1384,7 +1414,18 @@ body[data-git="shut"] #git{display:none}
 /* #289: UEBERSPRUNGEN IST NICHT ERLEDIGT -- kein Strich, kein Gruen, sondern
    gedimmt mit dem Pfeil in Amber, derselben Farbe wie der Hinweis im Kopf. */
 #goalpanel li.skipped{color:var(--dimmer)}
-#goalpanel li.skipped .m,#goalpanel .gh .st.sk{color:var(--warn)}
+/* #296: its own hue (--skip), a dashed ring with a skip glyph, and the word
+   "skipped" -- never the amber of the running step. */
+#goalpanel li.skipped .m,#goalpanel .gh .st.sk{color:var(--skip)}
+#goalpanel li.skipped .t{color:var(--dim)}
+#goalpanel li .lbl{margin-left:6px;font-size:10.5px;letter-spacing:.3px;
+  text-transform:uppercase;color:var(--skip)}
+/* #294: the goal waits for robin -- the paused step and the head in --bad,
+   with a pause glyph, and one line under the title saying why. */
+#goalpanel li.held .m,#goalpanel .gh .st.pz,#goalpanel .gz{color:var(--bad)}
+#goalpanel .gz{padding:0 15px 11px;font-size:12px;overflow-wrap:anywhere}
+#goalpanel ol.subs{padding:6px 0 0 0}
+#goalpanel ol.subs li{padding:3px 0 4px}
 #goalpanel li.open .t{color:var(--text-faint)}
 #goalpanel li.done,#goalpanel li.failed,#goalpanel li.skipped{cursor:pointer}
 /* #174: DIE KOSTENZEILE HAENGT AN IHREM SCHRITT. Sie sass mit 3px so dicht
@@ -1396,7 +1437,7 @@ body[data-git="shut"] #git{display:none}
 /* ZUGEKLAPPT BLEIBT, WORUM ES GEHT: Titel, Zaehler, Uhr, Token. Weg ist nur die
    Liste. Ein Kasten, der zugeklappt nur noch das Wort "Goal" zeigt, ist kein
    eingeklapptes Ziel -- er ist gar keine Anzeige mehr. */
-#goalpanel.shut .gp,#goalpanel.shut ol{display:none}
+#goalpanel.shut .gp,#goalpanel.shut ol,#goalpanel.shut .gz{display:none}
 #goalpanel.shut .gm{padding-bottom:13px}
 
 /* -- #162: ein Zug, der laeuft, waehrend man woanders steht ---------------- */
@@ -3576,6 +3617,36 @@ if (window.CROW_REMOTE) (function(){
 const $ = s => document.querySelector(s);
 const flow = $("#flow"), input = $("#in"), go = $("#go"), box = $("#box");
 
+// #305. A SCROLLBAR SHOWS WHILE ITS STRIP SCROLLS, like an overlay bar on
+// macOS/iOS (robin, 2026-09-25). The stylesheet keeps every thumb transparent
+// unless its element carries `is-scrolling`; this sets it on each scroll event
+// and takes it off SB_LINGER_MS after the last one.
+// ONE LISTENER, ON THE DOCUMENT, IN THE CAPTURE PHASE. `scroll` does not
+// bubble, but capture sees it on its way to every element -- the chat, the
+// Code panel, and the stats lines, code blocks and tables that are created per
+// message and would each need their own listener. Passive: it never cancels.
+// A POINTER HELD DOWN (dragging the thumb, a selection that drags the view)
+// keeps the bar until it is released, then the linger starts.
+const SB_LINGER_MS = 800;
+function scrollbarsAutoHide(doc){
+  const lit = new Map();                     // element -> its hide timer
+  let held = false;
+  const arm = el => { clearTimeout(lit.get(el));
+    lit.set(el, setTimeout(() => {
+      if(held) return;                       // the release re-arms it
+      lit.delete(el); el.classList.remove("is-scrolling"); }, SB_LINGER_MS)); };
+  const opt = {capture:true, passive:true};
+  doc.addEventListener("scroll", e => {
+    const el = e.target && e.target.nodeType === 9 ? e.target.scrollingElement : e.target;
+    if(!el || !el.classList) return;
+    el.classList.add("is-scrolling"); arm(el); }, opt);
+  doc.addEventListener("pointerdown", () => { held = true; }, opt);
+  const release = () => { held = false; lit.forEach((t, el) => arm(el)); };
+  doc.addEventListener("pointerup", release, opt);
+  doc.addEventListener("pointercancel", release, opt);
+}
+scrollbarsAutoHide(document);
+
 // DOES THE COMPOSITOR OWN THIS WINDOW'S FRAME? Stamped in by Python before the
 // page is handed over, the same way the theme and the rail state are, and for
 // the same reason: a question answered by a script after load is answered one
@@ -5721,6 +5792,8 @@ const crow = {
     const partial=g.status==="partial", skipped=g.skipped||[];
     const skipText=!skipped.length ? ""
       : (skipped.length===1 ? "step " : "steps ")+skipped.join(", ")+" skipped";
+    // #294: A PAUSED GOAL SAYS SO IN THE HEAD -- the thin phone bar too.
+    const pz=g.pause||null;
 
     // ZONE 1: die Kopfzeile. Nur das Wort und der Zustand -- alles Weitere hat
     // seinen eigenen Platz darunter.
@@ -5728,9 +5801,11 @@ const crow = {
     head.onclick=()=>{ p.classList.toggle("shut"); };
     const label=document.createElement("b"); label.textContent="Goal";
     const st=document.createElement("span");
-    st.className="st"+(done ? " ok" : skipped.length ? " sk" : "");
+    st.className="st"+(done ? " ok" : pz ? " pz" : skipped.length ? " sk" : "");
     st.textContent=done ? "Complete"
-      : partial ? "Complete · "+skipText : skipText;
+      : partial ? "Complete · "+skipText
+      : pz ? "Paused · step "+pz.step : skipText;
+    if(pz) st.title=pz.why||"";
     const shutBtn=document.createElement("button"); shutBtn.className="gx";
     shutBtn.textContent="×"; shutBtn.title="close this goal";
     shutBtn.onclick=ev=>{ ev.stopPropagation(); pywebview.api.close_goal(); };
@@ -5768,19 +5843,44 @@ const crow = {
       if(!document.body.contains(meta)){ clearInterval(this.goalTick); return; }
       meta.textContent=drawMeta(base+(Date.now()-at)/1000); }, 1000);
 
+    // #294: WHY IT WAITS, under the title -- the report itself is in the chat.
+    const gz=document.createElement("div"); gz.className="gz";
+    if(pz) gz.textContent="Paused at step "+pz.step+" ("+(pz["class"]||"?")+"): "
+      +(pz.why||"")+" -- waiting for your line.";
+    else gz.hidden=true;
+
     const prog=document.createElement("div"); prog.className="gp";
     prog.textContent="Progress";
 
     const list=document.createElement("ol");
     (g.steps||[]).forEach((s,i)=>{
       const li=document.createElement("li"); li.className=s.status;
+      // #294: the step the pause stands on.
+      const held=!!(pz && pz.step===i+1);
+      if(held) li.classList.add("held");
       // #289: why it was skipped -- the note robin or the model gave.
       if(s.status==="skipped" && s.note) li.title=s.note;
       const mark=document.createElement("span"); mark.className="m";
-      mark.innerHTML=this.svgStep(s.status);
+      mark.innerHTML=this.svgStep(held ? "held" : s.status);
       const body=document.createElement("span");
       const t=document.createElement("span"); t.className="t";
       t.textContent=s.text; body.append(t);
+      // #296: THE WORD, NOT ONLY THE COLOUR (WCAG 1.4.1).
+      if(s.status==="skipped"){ const l=document.createElement("span");
+        l.className="lbl"; l.textContent="skipped"; body.append(l); }
+      if(held){ const l=document.createElement("span");
+        l.className="lbl"; l.textContent="paused"; body.append(l); }
+      // #294: THE SUB-STEPS OF A SPLIT STEP, under it.
+      if((s.subs||[]).length){ const ol=document.createElement("ol");
+        ol.className="subs";
+        s.subs.forEach((x,k)=>{ const sl=document.createElement("li");
+          sl.className=x.status;
+          const sm=document.createElement("span"); sm.className="m";
+          sm.innerHTML=this.svgStep(x.status);
+          const st2=document.createElement("span"); st2.className="t";
+          st2.textContent=(i+1)+"."+(k+1)+" "+x.text;
+          sl.append(sm, st2); ol.append(sl); });
+        body.append(ol); }
       // #164: KLICK AUF EINEN SCHRITT ZEIGT, WAS ER GEKOSTET HAT. Ein fertiger
       // nennt seine Wanduhr und seine Token, ein laufender dasselbe bis jetzt.
       if(s.status!=="open"){
@@ -5805,8 +5905,9 @@ const crow = {
         // seine erste Strecke ist bereits gebucht und gehoert ihm weiter.
         const stok = (s.status==="running" && s.at!=null)
           ? (s.tokens||0) + Math.max(0, (g.tokens||0) - s.at) : (s.tokens||0);
+        const chk=s.checks ? " · checks "+s.checks[0]+"/"+s.checks[1] : "";
         const draw=x=>this.clock(x)+" · "+stok+" tok"
-                      +(sdel ? " · "+this.tokShort(sdel)+" delegated" : "");
+                      +(sdel ? " · "+this.tokShort(sdel)+" delegated" : "")+chk;
         c.textContent=draw(sbase);
         if(run){ this.stepTicks.push(setInterval(()=>{
           if(!document.body.contains(c)) return;
@@ -5815,7 +5916,7 @@ const crow = {
         li.onclick=()=>{ if(!run) c.hidden=!c.hidden; }; }
       li.append(mark, body); list.append(li); });
 
-    p.append(head, title, meta, prog, list);
+    p.append(head, title, gz, meta, prog, list);
     p.hidden=false; },
 
   // #164. DIE ZEICHEN, inline statt als Datei: die Seite ist eine einzige
@@ -5836,8 +5937,13 @@ const crow = {
       +'<circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none"/></svg>';
     if(state==="failed") return o+'<circle cx="12" cy="12" r="9"/>'
       +'<path d="M9 9l6 6M15 9l-6 6"/></svg>';
-    if(state==="skipped") return o+'<circle cx="12" cy="12" r="9"/>'
-      +'<path d="M8 12h8M13 9l3 3-3 3"/></svg>';
+    // #296: dashed ring and a skip-forward glyph -- not the running dot.
+    if(state==="skipped") return o+'<circle cx="12" cy="12" r="9"'
+      +' stroke-dasharray="3 2.6"/><path d="M8 8.6l3.6 3.4L8 15.4M12.6 8.6'
+      +'l3.6 3.4-3.6 3.4"/></svg>';
+    // #294: the paused step -- two bars.
+    if(state==="held") return o+'<circle cx="12" cy="12" r="9"/>'
+      +'<path d="M10 8.6v6.8M14 8.6v6.8"/></svg>';
     return o+'<circle cx="12" cy="12" r="9"/></svg>'; },
 
   // 89K statt 89234: im Kopf einer Anzeige zaehlt die Groessenordnung.
@@ -10826,6 +10932,10 @@ class Api:
         # been chosen, because from then on it would outrank the real opening
         # line forever". A borrowed root is that same guess.
         self._root_chosen: bool = False
+        # #303. THE ROOT TYPED FOR THIS WINDOW (`--root`), once `ready()` has
+        # bound it; None when nothing was stated. `_probe` hands it to the
+        # restore, where it outranks the template AND the chat's own record.
+        self._root_stated: "str | None" = None
         # #249. DER TELEFON-SPIEGEL. `_remote` ist der laufende
         # `crow_remote.Remote` oder None; alles andere hier ist, was ein
         # zweiter Bildschirm braucht, um denselben Stand zu sehen.
@@ -11232,17 +11342,26 @@ class Api:
         # for the same reason the level is -- a boundary nobody can see is one
         # nobody can trust, and its ABSENCE is the state that has to be visible.
         #
-        # BOUND HERE, NOT ONLY DRAWN. The window has no `--root` and its cwd is
-        # whatever the shortcut handed it, so without this call it started
-        # unbounded every single time and the folder picked yesterday was gone.
-        # `adopt_root` is the same rule the terminal uses; the window simply has
-        # nothing to state, so it takes the remembered one.
+        # BOUND HERE, NOT ONLY DRAWN. A window's cwd is whatever the shortcut
+        # handed it, so without this call it started unbounded every single
+        # time and the folder picked yesterday was gone. `adopt_root` is the
+        # same rule the terminal uses: a stated `--root` is bound, and a window
+        # with nothing stated takes the remembered one.
         _, mode, problem = crow_core.adopt_root(
             getattr(self._args, "root", None),
             self._args.mode if self._mode_stated else None,
             walk_up=False)
         if problem:
             self.push({"k": "fail", "t": problem})
+        # #303: A ROOT TYPED FOR THIS WINDOW IS A PICK, made at this start --
+        # the flag's help has always said "the same as picking a folder in the
+        # window", and a pick writes `active`. Live 2026-09-25 15:19 it did
+        # not: `active` still named a 09:45 pick, and the restore below bound
+        # that over the typed folder. Written HERE, not in `adopt_root`: a
+        # terminal `--root` must not move where the window opens (#92).
+        elif getattr(self._args, "root", None):
+            self._root_stated = crow_core.get_root()
+            crow_core.set_active_root(self._root_stated)
         self._args.mode = mode
         self.push({"k": "mode", "name": mode, "modes": self.mode_menu()})
         self.push_root()
@@ -11468,7 +11587,8 @@ class Api:
         if chat:
             self._conversation.mark_reviewed(crow_core.session_reviewed(chat))
 
-    def _adopt_chat_root(self, chat: str | None, fresh: bool = False) -> None:
+    def _adopt_chat_root(self, chat: str | None, fresh: bool = False,
+                         stated: "str | None" = None) -> None:
         """Bind the boundary THIS chat chose, and take the level that goes with it.
 
         #101. One place, because three events needed the same answer: opening
@@ -11491,13 +11611,24 @@ class Api:
         statement about the project, so two chats in one folder share it. Put it
         in the chat and the same directory has different rights depending on
         which conversation is open.
+
+        #303: `stated` IS THE ROOT TYPED FOR THIS WINDOW, and only the restore
+        at launch passes it. It outranks both sources above: the template is a
+        fallback, and the chat's own record is an older choice than the one
+        typed for this start. It becomes the chat's own (`chosen`), as a pick
+        does; a different own root is announced to the model (#224).
         """
         root, chosen = self._stored_root(chat) if chat else (None, False)
+        if stated:
+            if chosen and not (root and os.path.normcase(root)
+                               == os.path.normcase(stated)):
+                self._conversation.note_root_change(root, stated)
+            root, chosen = stated, True
         # UNBOUND, AND NOT CHOSEN TO BE. `chosen` stays False so `_stamp` writes
         # no `crow_root` at all: absent means nobody ever picked for this chat,
         # which is what a chat one second old is. An explicit null would be the
         # user's "no folder" and would survive being opened again.
-        if not chosen and not fresh:
+        elif not chosen and not fresh:
             root, _ = crow_core.restore_root()
         # BORROWED, AND IT STAYS BORROWED. The template may be shown and worked
         # in; it is not written into the chat until a person picks for this chat.
@@ -12122,13 +12253,36 @@ class Api:
         # The line this replaces claimed `load_session` "may have bound the root
         # the restored chat was working in". It never did -- nothing outside
         # `adopt_root` and the picker has ever called `set_root`.
-        self._adopt_chat_root(SESSION_FILE)
+        #
+        # #303: A ROOT TYPED FOR THIS WINDOW WINS HERE, over the template and
+        # over the chat's own record -- see `_adopt_chat_root`.
+        self._adopt_chat_root(SESSION_FILE, stated=self._root_stated)
         # #121. AFTER THE BOUNDARY, NEVER BEFORE IT. A chat with no pin yet is
         # pinned from the folder it stands in, and the line above is where that
         # folder stops being the template and becomes the chat's own.
         self._pin_memory(SESSION_FILE)
+        if self._root_stated:
+            self._head_follows_stated_root()
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
+
+    def _head_follows_stated_root(self) -> None:
+        """#303: the restored head must name the root typed for this window.
+
+        A file's pin wins over the folder (#121) so its cache still fits --
+        but a pin that names ANOTHER working area tells the model "use this
+        exact path" for a folder the tools no longer write to. Only then is
+        the head re-pinned, with `_bind_root`'s cost line before it; a pin
+        that already names the stated root (robin's live case) stays, cache
+        and all. The chat's own file is stamped now, as `_bind_root` does,
+        so the rail reads the same boundary the window holds (#119).
+        """
+        line = crow_core.working_area_line(self._root_stated)
+        if line not in (self._conversation.memory or ""):
+            self.push({"k": "note", "t": crow_core.MEMORY_COST_NOTE})
+            self._conversation.repin_memory(crow_core.prompt_head())
+        if self._current_path:
+            self._stamp(self._current_path)
 
     def _late_session(self) -> None:
         """#209: session.json met a conversation that is no longer fresh.
@@ -12607,6 +12761,75 @@ class Api:
         # #282: Stop pauses the engine until a typed line -- every
         # caller of this method is one, or is the goal going away.
         self._goal_paused = False
+        # #294: the no-progress timer -- which step, how many checklist
+        # items had passed at its last nudge, and nudges since one newly
+        # passed. And whether the turn that just ran was the pause report,
+        # and the wait an environment retry asks for before its turn.
+        self._goal_progress: "tuple[int | None, int]" = (None, 0)
+        self._goal_idle = 0
+        self._goal_reporting = False
+        self._goal_delay = 0.0
+        self._goal_rung_said = None
+
+    def _goal_typed(self) -> None:
+        """#294: a line robin typed -- the engine starts over, and a paused
+        goal resumes. Only the typed-line paths call this: a window that
+        opens, a `/goal` that shows, a goal that closes resume nothing."""
+        self._goal_reset()
+        if crow_core.goal_resume() is not None:
+            crow_core.log_note("goal mode: resumed by a typed line", "goal")
+            self.push_goal(force=True)
+
+    def _goal_hold(self, goal: dict, index: int, cls: str,
+                   why: str) -> "str | None":
+        """#294: pause the goal at step `index` and hand out the report
+        turn -- every stop of the engine that is not robin's own Stop."""
+        crow_core.goal_pause(index, cls, why)
+        return self._goal_pause_turn(crow_core.goal_load() or goal)
+
+    def _goal_pause_turn(self, goal: dict) -> "str | None":
+        """#294 B. A paused goal gets ONE more turn: the model prepares the
+        pause for robin -- what it found, why it cannot go on, 2-3 proposals,
+        and the question. Then the engine waits for a typed line; the next
+        call keeps the report on the pause record and says so."""
+        pause = crow_core.goal_paused(goal) or {}
+        n = pause.get("step")
+        if not pause.get("asked"):
+            crow_core.goal_pause_asked()
+            self._goal_reporting = True
+            crow_core.log_note("goal mode paused at step %s (%s): %s"
+                               % (n, pause.get("class"), pause.get("why")),
+                               "goal")
+            self.push({"k": "note",
+                       "t": "goal mode paused at step %s (%s): %s -- Crow "
+                            "asks the model for a report; your next line "
+                            "resumes the goal."
+                            % (n, pause.get("class") or "?",
+                               pause.get("why") or "?")})
+            self.push_goal(force=True)
+            return crow_core.goal_pause_nudge(crow_core.goal_load() or goal)
+        if self._goal_reporting:
+            self._goal_reporting = False
+            answer = crow_core.goal_last_answer(self._conversation.payload())
+            crow_core.goal_pause_report(crow_core.goal_message_text(answer))
+            self.push_goal(force=True)
+            self.push({"k": "note",
+                       "t": "goal mode is paused at step %s and waits for "
+                            "your line." % n})
+        return None
+
+    def _goal_wait(self, seconds: float) -> bool:
+        """#294: the short wait before an environment retry. False when Stop
+        came in during it; a queued line ends it early (it runs first)."""
+        end = time.monotonic() + max(0.0, float(seconds or 0))
+        while time.monotonic() < end:
+            if getattr(self, "_goal_paused", False) or \
+                    crow_core.INTERRUPT.is_set():
+                return False
+            if self._queued is not None:
+                return True
+            time.sleep(0.2)
+        return True
 
     def _goal_cut(self, turns: int) -> int:
         """Die letzten `turns` Motorzuege aus der Geschichte nehmen. #202.
@@ -12739,6 +12962,10 @@ class Api:
         nxt = crow_core.goal_next_open(goal)
         if nxt is None:
             return None
+        # #294. A PAUSED GOAL GETS ITS REPORT TURN, THEN WAITS -- before the
+        # Stop check, because a pause is not lifted by anything but a line.
+        if crow_core.goal_paused(goal) is not None:
+            return self._goal_pause_turn(goal)
         # #282. STOP IS A PAUSE, and the flag above could not carry
         # it: `run_turn` consumes INTERRUPT when it ends the stopped turn
         # (crow_core.run_turn, `if owns_turn_state: INTERRUPT.clear()`), so by
@@ -12763,12 +12990,13 @@ class Api:
             return instead
         self._goal_turns += 1
         if self._goal_turns > self.GOAL_TURN_CAP:
-            self.push({"k": "note",
-                       "t": "goal mode stopped after %d turns -- %d of %d steps "
-                            "done. `/goal` shows where it stands."
-                            % (self.GOAL_TURN_CAP,
-                               crow_core.goal_counts(goal)[0], len(goal["steps"]))})
-            return None
+            # #294: a cap is a pause with a report, not a silent end.
+            return self._goal_hold(
+                goal, nxt, "turn cap",
+                "the goal ran %d turns without a line from you -- %d of %d "
+                "steps done" % (self.GOAL_TURN_CAP,
+                                crow_core.goal_counts(goal)[0],
+                                len(goal["steps"])))
         # #202. DER ZWEITE DECKEL, auf EINEN Schritt. Der Zaehler gehoert dem
         # Schritt und nicht dem Ziel, also faengt er bei jedem Wechsel neu an --
         # ein Plan, der voranschreitet, sieht ihn nie.
@@ -12780,11 +13008,30 @@ class Api:
             self._goal_renders = {}                            # #268
         self._goal_step_turns += 1
         if self._goal_step_turns > self.GOAL_STEP_TURN_CAP:
-            self.push({"k": "note",
-                       "t": "goal mode paused: step %d has taken %d turns. "
-                            "`/goal` shows where it stands -- a typed line "
-                            "carries on." % (nxt + 1, self.GOAL_STEP_TURN_CAP)})
-            return None
+            # #294: the step cap pauses WITH the report.
+            return self._goal_hold(
+                goal, nxt, "turn cap", "step %d has taken %d turns"
+                % (nxt + 1, self.GOAL_STEP_TURN_CAP))
+        # #294 D. THE STEP'S BUDGET: active wall clock since the last resume.
+        over = crow_core.goal_budget_due(goal, nxt)
+        if over:
+            return self._goal_hold(goal, nxt, "budget", over)
+        # #294 D. THE NO-PROGRESS TIMER: no checklist item newly passed in
+        # N nudges on this step. Only a step with a checklist has one; the
+        # budget above watches the rest.
+        passed = crow_core.goal_progress(goal, nxt)
+        seen_step, seen = self._goal_progress
+        if passed is not None:
+            if seen_step != nxt or passed > seen:
+                self._goal_progress, self._goal_idle = (nxt, passed), 0
+            else:
+                self._goal_idle += 1
+            limit = crow_core.goal_no_progress_turns()
+            if limit and self._goal_idle >= limit:
+                return self._goal_hold(
+                    goal, nxt, "no progress",
+                    "no checklist item of step %d newly passed in %d turns "
+                    "(%d passed so far)" % (nxt + 1, self._goal_idle, passed))
         # #165. DER ANGESTOSSENE SCHRITT LAEUFT AB JETZT, und das setzt Crow,
         # nicht das Modell. Gemessen am 2026-08-30: `goal_step` wird praktisch
         # nur mit `done` gerufen -- ein Schritt, der gerade bearbeitet wird und
@@ -12820,10 +13067,40 @@ class Api:
         # Anstoss von #202 hat weiter den Vortritt.
         crow_core.goal_render_scan(payload, 0 if start is None else start,
                                    self._goal_renders, new_step=new_step)
-        # #289. THE RETRY QUOTES THE FAILURE, and it comes first: it is said
-        # once, the turn after the `failed`, and the short "still open" line
-        # below would otherwise swallow it (same step, the model worked).
-        # Counted is already, above -- #202 and #268 speak on the next turn.
+        # #294. THE LADDER SPEAKS FIRST: a rung owed after a failure
+        # (retry after a wait, reflect, fresh context, split, sub-steps). It
+        # replaces #289's retry line, which ended in a skip.
+        rung = crow_core.goal_pending(crow_core.goal_load() or goal, nxt)
+        if rung is not None:
+            fresh = crow_core.goal_load() or goal
+            text = crow_core.goal_ladder_nudge(fresh, nxt, rung)
+            if rung == crow_core.GOAL_LADDER_RETRY:
+                self._goal_delay = crow_core.GOAL_ENV_DELAY
+                crow_core.goal_pending_clear(nxt, rung)
+            elif rung == crow_core.GOAL_LADDER_FRESH:
+                # Attempt 3 in a fresh context: the #268 cut, carrying the
+                # failures and the reflections as its first line.
+                self._goal_roll_due = True
+                crow_core.goal_pending_clear(nxt, rung)
+            said = (nxt, rung, crow_core.goal_sub_next(fresh["steps"][nxt]))
+            if said != getattr(self, "_goal_rung_said", None):
+                # One note per rung (and per sub-step), not one per turn.
+                self._goal_rung_said = said
+                what = {crow_core.GOAL_LADDER_RETRY:
+                        "environment failure -- retry after %d s"
+                        % crow_core.GOAL_ENV_DELAY,
+                        crow_core.GOAL_LADDER_REFLECT:
+                        "attempt 1 failed -- the model reflects first",
+                        crow_core.GOAL_LADDER_FRESH:
+                        "attempt 2 failed -- attempt 3 in a fresh context",
+                        crow_core.GOAL_LADDER_SPLIT:
+                        "attempt 3 failed -- the step is split",
+                        crow_core.GOAL_LADDER_SUBS: "working its sub-steps"}
+                self.push({"k": "note", "t": "goal mode, step %d: %s"
+                           % (nxt + 1, what.get(rung, rung))})
+            return text
+        # #289. THE RETRY QUOTES THE FAILURE -- kept for a step whose
+        # `failed` predates the ladder (no rung owed, status failed).
         if retry is not None:
             return crow_core.goal_retry_nudge(goal, nxt, retry)
         due = crow_core.goal_trouble_due(self._goal_trouble)
@@ -12873,12 +13150,14 @@ class Api:
                 and crow_core.goal_worked_on_nudge(self._conversation.payload())):
             return "[Goal mode, step %d still open. Continue.]" % (nxt + 1)
         done, total = crow_core.goal_counts(goal)
+        fresh = crow_core.goal_load() or goal
         return ("[Goal mode. %d of %d steps done. Next is step %d: %s\n"
                 "Do it now. Call goal_step with 'done' only once you have "
                 "verified it, then continue with the step after that. If it "
-                "cannot be done, call goal_step with 'failed' and say why.%s]"
+                "cannot be done, call goal_step with 'failed' and say why.%s%s]"
                 % (done, total, nxt + 1, goal["steps"][nxt]["text"],
-                   crow_core.goal_nudge_evidence(goal, nxt)))  # #267
+                   crow_core.goal_nudge_evidence(goal, nxt),   # #267
+                   crow_core.goal_checklist_ask(fresh, nxt)))  # #295
 
     def close_goal(self) -> None:
         """Das Ziel wegraeumen. Das Gegenstueck zum Setzen, im Panel selbst.
@@ -12978,6 +13257,11 @@ class Api:
             "done": done, "total": total,
             # #289: the numbers of the skipped steps, for the head of the bar.
             "skipped": crow_core.goal_skipped(goal),
+            # #294: the pause robin has to answer -- step, class, why, and
+            # the model's report once it is written.
+            "pause": ({k: (crow_core.goal_paused(goal) or {}).get(k)
+                       for k in ("step", "class", "why", "report")}
+                      if crow_core.goal_paused(goal) is not None else None),
             "seconds": round(crow_core.goal_seconds(goal), 1),
             # OB DIE UHR UEBERHAUPT LAEUFT. Die Seite tickt selbst weiter (#164),
             # sonst stuende sie zwischen zwei Schritten still -- aber sie tat es
@@ -13005,7 +13289,17 @@ class Api:
                        # dieses Ticket abschafft.
                        "at": s.get("started_tokens"),
                        "delegated": s.get("delegated") or 0,
-                       "note": s.get("note") or ""}
+                       "note": s.get("note") or "",
+                       # #296: whose skip it was.
+                       "skipped_by": s.get("skipped_by") or "",
+                       # #294: the sub-steps of a split step.
+                       "subs": [{"text": x.get("text") or "",
+                                 "status": x.get("status") or "open"}
+                                for x in s.get("subs") or []],
+                       # #295: checklist items passed / frozen.
+                       "checks": ([len(s.get("passed") or []),
+                                   len(s.get("checklist") or [])]
+                                  if s.get("checklist") else None)}
                       for s in goal["steps"]]}})
 
     def _fold_thoughts(self) -> str:
@@ -13108,7 +13402,9 @@ class Api:
             # Ein pausierter Schritt muss weiterlaufen koennen, sonst waere die
             # Pause ein Ende -- und wer gerade selbst etwas gesagt hat, hat die
             # Kette leerer Antworten unterbrochen.
-            self._goal_reset()
+            # #294: und ein pausiertes Ziel laeuft weiter -- die Zeile ist die
+            # Antwort, auf die es gewartet hat.
+            self._goal_typed()
             self._busy = True
             INTERRUPT.clear()
             # #249: WER WOANDERS HINSIEHT, MEINT DIESEN CHAT. Die Zeile laeuft
@@ -16416,6 +16712,10 @@ class Api:
         crow_core.bundler_set(doc.get("bundler"))
         # #267: the judge's bar, same door; nonsense is the default.
         crow_core.judge_threshold_set(doc.get("judge_threshold"))
+        # #294: the step budget and the no-progress timer, same door; the
+        # CROW_GOAL_* variables win over both.
+        crow_core.goal_limits_set(doc.get("goal_step_minutes"),
+                                  doc.get("goal_no_progress_turns"))
         # #263: tool-result clearing, same door. Missing key: the endpoint
         # default (on at home, off remote); 0 switches it off.
         crow_core.context_clear_set(doc.get("context_clear_at"))
@@ -16487,7 +16787,8 @@ class Api:
                         # #264 / #165: a queued line is a typed line, and a
                         # typed line resets the engine's caps and counters --
                         # until now only the idle `send` path did.
-                        self._goal_reset()
+                        # #294: it also resumes a paused goal.
+                        self._goal_typed()
                     if text is None:
                         # #165. DER MOTOR. Eine getippte Zeile hat immer Vorrang
                         # -- sie steht oben --, aber wenn keine wartet und der
@@ -16517,6 +16818,29 @@ class Api:
                     self._reload_rail()
                     self._pane_throttle(False)
                     return
+                # #294: THE WAIT BEFORE AN ENVIRONMENT RETRY, outside the
+                # lock -- `send` must be able to queue a line meanwhile, and
+                # a queued line ends the wait (it runs first anyway). Stop
+                # during the wait drops the retry.
+                delay, self._goal_delay = getattr(self, "_goal_delay", 0.0), 0.0
+                if delay and not self._goal_wait(delay):
+                    with self._queue_lock:
+                        queued, self._queued = self._queued, None
+                        if queued is not None:
+                            target, self._queued_to = self._queued_to, None
+                            by, self._queued_by = set(self._queued_by), set()
+                        else:
+                            self._busy = False
+                    if queued is None:
+                        self.push({"k": "note",
+                                   "t": "goal mode paused: you pressed Stop "
+                                        "during the wait before a retry -- "
+                                        "the next line you send resumes it."})
+                        self._reload_rail()
+                        self._pane_throttle(False)
+                        return
+                    text = queued
+                    self._goal_typed()
                 # #162. DER WECHSEL LIEGT ZWISCHEN DEN ZUEGEN, nie in einem.
                 # Hier ist der vorige fertig und der naechste noch nicht
                 # gestartet -- der einzige Punkt, an dem der Chat gewechselt

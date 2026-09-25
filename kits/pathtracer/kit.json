@@ -1,0 +1,38 @@
+{
+  "bundle": {
+    "file": "crow-pathtracer.js",
+    "bytes": 958266,
+    "sha256": "1202afb93bf105647b03e9dad961d58447524b1d5d41dfcdeb5d5f2119d128fd",
+    "format": "esm",
+    "minified": true,
+    "built_by": "tools/build-pathtracer-kit.sh"
+  },
+  "esbuild": "0.28.2",
+  "packages": {
+    "three": {
+      "version": "0.186.1",
+      "integrity": "sha512-blFeqb49wRCSGUGj7gtpfnSGHy2lwDk94RhUmS1c/hTby70kvChbWpkJ4Pm1390LqzzvTmzgXKHPEafJwCb8jA==",
+      "license": "MIT"
+    },
+    "three-mesh-bvh": {
+      "version": "0.9.15",
+      "integrity": "sha512-9xdEDkCzFoT8VPFH9DznwFSdbaIEjMvM106Iqq7TJurrIheUKDcdW4prfJTCxryih4XS/UxWs0H3K4MLMRFyOQ==",
+      "license": "MIT"
+    },
+    "three-gpu-pathtracer": {
+      "version": "0.0.24",
+      "integrity": "sha512-fHQ7g7ywvSwRAQywhsfech2/kspQKinfFNOcNDTJS2Q34CzcF1kpESlOVvJH8kX/bGlCnxMI+Qo16kWGAy7zCA==",
+      "license": "MIT"
+    }
+  },
+  "licenses": {
+    "three": "LICENSE.three",
+    "three-mesh-bvh": "LICENSE.three-mesh-bvh",
+    "three-gpu-pathtracer": "LICENSE.three-gpu-pathtracer"
+  },
+  "license_sha256": {
+    "LICENSE.three": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+    "LICENSE.three-mesh-bvh": "b106ef6198a9862ed2b5b873e944ecf3583c631a84a7462d400ecc1910ce7fee",
+    "LICENSE.three-gpu-pathtracer": "2df239f3787d174fbd6ead7bc4c748bee526564aa2e67315afcae47e15552e00"
+  }
+}

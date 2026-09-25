@@ -12,11 +12,13 @@ py        := crow_home + "/venv/bin/python"
 default:
     @just --list
 
-# Everything a change has to survive: lint, the four suites, the three checkers and the install selftest.
+# Everything a change has to survive: lint, the four suites, the four checkers, the kit's suite and the install selftest.
 check: lint test
     {{py}} tools/check_shared_core.py
     {{py}} tools/check_operating_point.py
     {{py}} tools/check_gui_prereqs.py
+    {{py}} tools/check_pathtracer_kit.py
+    {{py}} tools/test_pathtracer_kit.py
     bash install.sh --selftest
 
 # 2,880 cases (2026-09-24: 1,455 core, 476 terminal, 896 window, 53 phone mirror) over the core, the terminal client, the window and the phone mirror.
@@ -49,3 +51,7 @@ engine:
 # Into $CROW_HOME, with the .desktop entry, the icons and the Hyprland rule.
 install *ARGS:
     bash install.sh {{ARGS}}
+
+# Rebuild kits/pathtracer/crow-pathtracer.js, kit.json and the licence copies from the exact npm pins (needs npm and the registry).
+pathtracer-kit:
+    bash tools/build-pathtracer-kit.sh

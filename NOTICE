@@ -88,3 +88,24 @@ Two `.ttf` files ship in `cli/fonts/`. The full licence text sits beside them in
 redistributed ONLY with that notice. `cli/test_crow.py` asserts the file is
 present, because without it redistribution is a licence violation that nothing
 else in the build would catch.
+
+
+--------------------------------------------------------------------------------
+three.js, three-mesh-bvh, three-gpu-pathtracer -- kits/pathtracer/
+--------------------------------------------------------------------------------
+
+MIT License, each held by its own copyright holders:
+
+    three 0.186.1                 Copyright (c) 2010-2026 three.js authors
+    three-mesh-bvh 0.9.15         Copyright (c) 2018 Garrett Johnson
+    three-gpu-pathtracer 0.0.24   Copyright (c) 2021 Garrett Johnson
+
+`kits/pathtracer/crow-pathtracer.js` is the three packages bundled and minified
+by esbuild 0.28.2 (`tools/build-pathtracer-kit.sh`, exact npm pins). It is
+vendored, not modified. Its licence texts sit beside it byte-identical, copied
+out of the npm tarballs: `LICENSE.three`, `LICENSE.three-mesh-bvh`,
+`LICENSE.three-gpu-pathtracer`. `kits/pathtracer/kit.json` records the bundle's
+sha256, each package's npm integrity string and each licence file's sha256;
+`tools/check_pathtracer_kit.py` holds the bundle, the licence files and this
+entry against it. A page the model builds with the kit inlines the bundle, and
+the bundle keeps three.js's `@license` comment at its end.

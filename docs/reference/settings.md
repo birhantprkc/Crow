@@ -37,6 +37,15 @@ when its `crow_root` points there, and nothing else records it.
 | `remote_host` | unset (= the first LAN address `crow_platform` ranks) | the LAN address picked in the QR dialog; never `0.0.0.0` (#249) |
 | `remote_https` | `false` | the QR dialog shows the Tailscale HTTPS address (`https://<pc>.<tailnet>.ts.net/`) instead of the LAN one; the LAN address listens either way. Set by the dialog's network switch. See [Phone over Tailscale](../user-guide/remote-tailscale.md) (#249 stage 5) |
 
+## #294 — goal step budget
+
+| key | default | what |
+|---|---|---|
+| `goal_step_minutes` | `60` | active wall clock one goal step may run before the goal pauses and asks (the clock stops while paused; a typed line gives the step a new budget). `CROW_GOAL_STEP_MINUTES` overrides it; `0` switches it off |
+| `goal_no_progress_turns` | `10` | nudges on a step with a frozen checklist and no item newly passed before the goal pauses and asks. `CROW_GOAL_NO_PROGRESS_TURNS` overrides it; `0` switches it off |
+
+Both are read every turn, like the budgets above. See [goals](../user-guide/goals-and-subagents.md#a-failure-has-a-class-and-a-ladder-and-the-end-of-every-ladder-is-a-pause-294).
+
 The delegate favourites live in `providers.json` (`delegate_favorites`), not here — set them
 from the OpenRouter page of the settings sheet. So does the judge's pin (#266):
 `"judge": {"provider": "openrouter", "model": "<a vision model>"}`, or `{"provider": "local"}`.

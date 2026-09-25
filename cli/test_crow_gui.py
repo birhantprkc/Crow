@@ -131,6 +131,8 @@ crow_core.SECRETS_FILE = os.path.join(_NOWHERE, "secrets.json")
 crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
+# #298: no kit skill seeded from this checkout into the cases.
+crow_core.PATHTRACER_KIT = os.path.join(_NOWHERE, "kits", "pathtracer")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
 # #262: Crow's own log file, never the real one under the state dir.
 crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
@@ -5443,7 +5445,10 @@ class TheSkillSheetTests(unittest.TestCase):
         terminal whose prompt silently carried no skills while the window's did.
         A surface-by-surface check is the only kind that sees it.
         """
-        self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
+        # 4 since #303: `_head_follows_stated_root` re-pins a restored head
+        # that names another working area than the typed `--root` -- the same
+        # event `_bind_root` re-pins for, reached from the launch.
+        self.assertEqual(self.source.count("crow_core.prompt_head()"), 4)
         terminal = (HERE / "crow.py").read_text(encoding="utf-8")
         self.assertEqual(terminal.count("crow_core.prompt_head()"), 2)
         for name, text in (("crow_gui.py", self.source), ("crow.py", terminal)):
@@ -5476,7 +5481,8 @@ class TheMemoryPinWiringTests(unittest.TestCase):
         already put the template up and there is no chat to correct it with.
         """
         self.assertGreater(self.source.rindex("self._pin_memory(SESSION_FILE)"),
-                           self.source.index("self._adopt_chat_root(SESSION_FILE)"))
+                           self.source.index(
+                               "self._adopt_chat_root(SESSION_FILE, stated="))
         self.assertTrue(self._after("self._adopt_chat_root(path)",
                                     "self._pin_memory(path)"))
         self.assertEqual(self.source.count("self._pin_memory("), 5,
@@ -8443,7 +8449,7 @@ class TheServerSwitchAndKeyFieldTests(unittest.TestCase):
         body = body[:body.index(chr(10) + "    def ", 10)]
         self.assertNotIn("prompt_head", body)
         self.assertNotIn("repin_memory", body)
-        self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
+        self.assertEqual(self.source.count("crow_core.prompt_head()"), 4)  # #303
 
 
 class TheMemoryNoteLookTests(unittest.TestCase):
@@ -8789,6 +8795,148 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
         goal = self._px(self._rule("#goalpanel{"), "border-radius")
         self.assertIn("margin:%dpx 0" % goal,
                       self._rule("#goalpanel::-webkit-scrollbar-track{"))
+
+
+class ScrollbarsShowOnlyWhileScrolledTests(unittest.TestCase):
+    """#305. robin, 2026-09-25: the stats line under an answer, the Code panel
+    and the chat carried a scrollbar at rest. A thumb shows only while its
+    strip scrolls, or while a mouse pointer is over it -- never at rest, and
+    never stuck on a phone after a tap. Only the colour changes; the widths
+    the column arithmetic rests on (#256/#280) stay."""
+
+    GECKO = "@supports not selector(::-webkit-scrollbar){"
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):
+                               self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def _gecko_block(self, css: str) -> tuple[int, int]:
+        start = css.index(self.GECKO)
+        depth, i = 0, start
+        while True:
+            ch = css[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return start, i + 1
+            i += 1
+
+    def test_the_thumb_is_transparent_at_rest(self):
+        self.assertIn("background:transparent",
+                      self._rule("\n::-webkit-scrollbar-thumb{"))
+        self.assertIn("background:transparent",
+                      self._rule("\n::-webkit-scrollbar-corner{"))
+        # the width is untouched: only the colour comes and goes
+        self.assertIn("\n::-webkit-scrollbar{width:var(--sbw)}", self.css)
+        self.assertIn("--sbw:10px;", self.css)
+        self.assertIn("scrollbar-gutter:stable", self._rule("#flow{overflow-y"))
+
+    def test_scrolling_or_a_hovering_pointer_shows_it(self):
+        self.assertIn(".is-scrolling::-webkit-scrollbar-thumb{background:var(--line)}",
+                      self.css)
+        self.assertIn("@media (hover:hover){:hover::-webkit-scrollbar-thumb"
+                      "{background:var(--line)}}", self.css)
+        self.assertIn("::-webkit-scrollbar-thumb:hover,::-webkit-scrollbar-thumb:active"
+                      "{background:var(--bevel)}", self.css)
+
+    def test_hover_shows_it_only_where_the_input_can_hover(self):
+        """A phone keeps `:hover` after a tap; ungated, the bar would stick."""
+        page = crow_gui.stamped_page(remote=True)
+        hovers = [m.start() for m in re.finditer(r":hover::-webkit-scrollbar-thumb", page)]
+        self.assertTrue(hovers)
+        for at in hovers:
+            self.assertEqual(page[at - len("@media (hover:hover){"):at],
+                             "@media (hover:hover){")
+        # and the phone layer paints no thumb of its own
+        self.assertNotIn("scrollbar-thumb", crow_gui.REMOTE_CSS)
+
+    def test_no_standard_property_switches_the_webkit_path_off(self):
+        """A non-auto scrollbar-color/-width disables ::-webkit-scrollbar in
+        Chromium 121+ and WebKitGTK 2.52.3+ (and scrollbar-color inherits).
+        The Gecko fallback therefore lives behind @supports; outside it only
+        the three strips hidden on purpose say `scrollbar-width:none`."""
+        for css in (self.css, crow_gui.REMOTE_CSS):
+            lo, hi = self._gecko_block(css) if self.GECKO in css else (0, 0)
+            for m in re.finditer(r"scrollbar-(color|width):([^;}]*)", css):
+                if lo <= m.start() < hi:
+                    continue
+                self.assertEqual((m.group(1), m.group(2)), ("width", "none"),
+                                 css[max(0, m.start() - 60):m.end()])
+        lo, hi = self._gecko_block(self.css)
+        block = self.css[lo:hi]
+        self.assertIn("*{scrollbar-color:transparent transparent}", block)
+        self.assertIn(".is-scrolling{scrollbar-color:var(--line) transparent}", block)
+        self.assertIn("@media (hover:hover){:hover{scrollbar-color:", block)
+
+    def test_the_script_is_on_the_window_and_the_phone(self):
+        for page in (crow_gui.stamped_page(), crow_gui.stamped_page(remote=True)):
+            self.assertEqual(page.count("scrollbarsAutoHide(document);"), 1)
+            self.assertIn("const SB_LINGER_MS = 800;", page)
+
+    def _run(self, steps: str) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        start = self.source.index("const SB_LINGER_MS")
+        end = self.source.index("scrollbarsAutoHide(document);")
+        js = ("let now=0, seq=0; const timers=new Map();\n"
+              "function setTimeout(f, ms){ const id=++seq; timers.set(id,[now+ms,f]); return id; }\n"
+              "function clearTimeout(id){ timers.delete(id); }\n"
+              "function tick(ms){ const until=now+ms;\n"
+              "  for(;;){ let best=null;\n"
+              "    for(const [id,[t]] of timers) if(t<=until && (!best || t<timers.get(best)[0])) best=id;\n"
+              "    if(best===null) break;\n"
+              "    const [t,f]=timers.get(best); timers.delete(best); now=t; f(); }\n"
+              "  now=until; }\n"
+              "const listeners=[];\n"
+              "const doc={nodeType:9, addEventListener(type, fn, opt){ listeners.push([type, fn, opt]); }};\n"
+              "const el={nodeType:1, classList:{s:new Set(), add(c){this.s.add(c);},\n"
+              "  remove(c){this.s.delete(c);}, has(c){return this.s.has(c);}}};\n"
+              "doc.scrollingElement=el;\n"
+              "const fire=(type, target)=>listeners.filter(l=>l[0]===type)\n"
+              "  .forEach(l=>l[1]({type, target}));\n"
+              "const on=()=>el.classList.has('is-scrolling');\n"
+              "const out={};\n"
+              + self.source[start:end] + "\nscrollbarsAutoHide(doc);\n"
+              + steps + "\nconsole.log(JSON.stringify(out));\n")
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_one_capture_passive_listener_for_every_scroll(self):
+        out = self._run("out.l=listeners.map(l=>[l[0], l[2]]);")
+        scroll = [opt for kind, opt in out["l"] if kind == "scroll"]
+        self.assertEqual(scroll, [{"capture": True, "passive": True}])
+
+    def test_it_shows_while_scrolling_and_hides_after_the_linger(self):
+        out = self._run(
+            "out.rest=on();\n"
+            "fire('scroll', el); out.first=on();\n"
+            "tick(500); fire('scroll', el); tick(500); out.still=on();\n"
+            "tick(299); out.before=on(); tick(1); out.after=on();\n"
+            "fire('scroll', doc); out.root=on();")
+        self.assertEqual(out, {"rest": False, "first": True, "still": True,
+                               "before": True, "after": False, "root": True})
+
+    def test_a_held_pointer_keeps_it_until_release(self):
+        out = self._run(
+            "fire('pointerdown', el); fire('scroll', el);\n"
+            "tick(5000); out.held=on();\n"
+            "fire('pointerup', el); tick(799); out.released=on();\n"
+            "tick(1); out.gone=on();\n"
+            "fire('pointerdown', el); fire('scroll', el); fire('pointercancel', el);\n"
+            "tick(800); out.cancel=on();")
+        self.assertEqual(out, {"held": True, "released": True, "gone": False,
+                               "cancel": False})
 
 
 class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
@@ -10378,11 +10526,12 @@ class TheGoalPanelShowsTheGoalsOwnCostTests(ApiCase):
         self.assertEqual([m["goal"] for m in said], [None])
 
 
-class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
+class AFailedStepIsRetriedNotSkippedTests(ApiCase):
     """#289, the window's half. 2026-09-24: step 4 went `failed`, the nudge
     after it said only "step 4 still open" (session.json msg 327), and
     after robin's hand skip the goal bar kept the old step for the whole
-    next turn -- only goal_set/goal_step results repainted it."""
+    next turn -- only goal_set/goal_step results repainted it. #294: the
+    second failure no longer skips; it rolls into a fresh context."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -10413,9 +10562,16 @@ class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
         self.assertIn("different approach", nudge)
         self.assertNotIn("still open. Continue", nudge)
         self.turn(api, nudge)
-        # The second `failed` skips it: the engine hands out step 2.
+        # #294: the second `failed` (after the reflection) does NOT skip:
+        # attempt 3 goes out in a fresh context, still on step 1.
+        crow_core.tool_goal_step(1, "running", "reflection: rotate first")
         crow_core.tool_goal_step(1, "failed", "still rotated away")
-        self.assertIn("Next is step 2: write the fix", api._goal_nudge())
+        fresh = api._goal_nudge()
+        self.assertIn("Step 1, attempt 3, in a FRESH context", fresh)
+        self.assertIn("reflection: rotate first", fresh)
+        self.assertTrue(api._goal_roll_due, "no rollover for attempt 3")
+        self.assertNotIn("Next is step 2", fresh)
+        self.assertEqual(crow_core.goal_skipped(), [])
 
     def test_a_hand_edit_of_goal_json_repaints_the_bar_within_a_round(self):
         api = self.api()
@@ -10467,6 +10623,144 @@ class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
         self.assertTrue('if(state==="skipped")' in source)
         self.assertTrue('partial ? "Complete · "+skipText' in source)
         self.assertTrue("#goalpanel li.skipped" in source)
+
+
+class TheGoalEnginePausesAndAsksTests(ApiCase):
+    """#294 B/D, the window's half. 2026-09-24/25: steps 5-8 of the diorama
+    goal were skipped without a word to robin. Every stop of the engine is
+    now a PAUSE: one report turn (what, why, 2-3 proposals, the question),
+    then the engine waits for a typed line -- window and phone alike."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-pause-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.goal_write, None)
+        # getattr: the red run without #294 fails on behaviour, not setUp.
+        limits = getattr(crow_core, "goal_limits_set", None)
+        if limits is not None:
+            self.addCleanup(limits, None, None)
+        crow_core.goal_command("Neon voxel diorama | plan it | build the "
+                               "scene | animate the rain")
+        crow_core.goal_step_end(0, note="PLAN.md written")
+
+    def turn(self, api, text, answer="working on it") -> None:
+        api._conversation.append("user", text)
+        api._conversation.append(
+            "assistant", "", tool_calls=[{"id": "c0", "name": "read_file",
+                                          "arguments": "{}"}])
+        api._conversation.append("tool", "...", tool_call_id="c0")
+        api._conversation.append("assistant", answer)
+
+    def notes(self, api) -> list:
+        return [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+
+    def goals(self, api) -> list:
+        return [m["goal"] for m in self.drained(api) if m.get("k") == "goal"]
+
+    def test_a_pause_gets_one_report_turn_then_waits_for_a_line(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.goal_pause(1, "environment",
+                             "the environment failed 3 times: software GL")
+        report = api._goal_nudge()
+        self.assertIn("PAUSED at step 2 (environment)", report)
+        self.assertIn("Two or three concrete proposals", report)
+        self.assertIn("Ask robin whether he has further input", report)
+        self.turn(api, report, "1. software GL 2. no GPU 3. A) stop serve "
+                               "B) llama.cpp 4. Do you have more input?")
+        self.assertIsNone(api._goal_nudge())
+        self.assertIsNone(api._goal_nudge(), "the engine went on by itself")
+        pause = crow_core.goal_load()["pause"]
+        self.assertIn("Do you have more input?", pause["report"])
+        notes = self.notes(api)
+        self.assertTrue(any("waits for your line" in n for n in notes), notes)
+        # Only a typed line resumes -- through `send`, as window and phone.
+        api._pump = lambda *a, **k: None
+        self.assertTrue(api.send("free the GPU, then go on"))
+        goal = crow_core.goal_load()
+        self.assertEqual(goal["status"], "open")
+        self.assertEqual(goal["last_pause"]["class"], "environment")
+
+    def test_a_slash_command_does_not_resume(self):
+        api = self.api()
+        crow_core.goal_pause(1, "budget", "over")
+        api.send("/goal")
+        self.assertEqual(crow_core.goal_load()["status"], "paused")
+
+    def test_an_environment_retry_waits_and_stop_drops_it(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.goal_fail(1, crow_core.GOAL_ENV, "software GL",
+                            capture="/r/a.png")
+        nudge = api._goal_nudge()
+        self.assertIn("the ENVIRONMENT failed, not your work", nudge)
+        self.assertEqual(api._goal_delay, crow_core.GOAL_ENV_DELAY)
+        self.assertIsNone(crow_core.goal_pending(crow_core.goal_load(), 1))
+        api._goal_paused = True
+        self.assertFalse(api._goal_wait(5.0))
+        api._goal_paused = False
+        self.assertTrue(api._goal_wait(0.0))
+
+    def test_the_step_budget_pauses_with_a_report(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        goal = crow_core.goal_load()
+        goal["steps"][1]["started"] = time.time() - 61 * 60
+        crow_core.goal_write(goal)
+        report = api._goal_nudge()
+        self.assertIn("PAUSED at step 2 (budget)", report)
+        self.assertIn("over its budget of 60 min", report)
+
+    def test_no_newly_passed_item_pauses_after_n_turns(self):
+        crow_core.goal_limits_set(None, 3)
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.goal_checklist_write(1, ["neon signs glow"])
+        texts = []
+        for n in range(4):          # the first nudge starts the count
+            text = api._goal_nudge()
+            texts.append(text)
+            self.turn(api, text, "round %d" % n)
+        self.assertIn("PAUSED at step 2 (no progress)", texts[-1])
+        # GEGENPROBE: a newly passed item starts the count again.
+        crow_core.goal_resume()
+        api._goal_reset()
+        self.turn(api, api._goal_nudge())
+        crow_core.judge_store(1, {"checklist": {"neon signs glow": "yes"}})
+        self.assertNotIn("PAUSED", api._goal_nudge())
+
+    def test_the_bar_carries_the_pause_and_the_sub_steps(self):
+        api = self.api()
+        goal = crow_core.goal_load()
+        goal["steps"][1]["subs"] = [{"text": "emissive", "status": "done"},
+                                    {"text": "bloom", "status": "open"}]
+        crow_core.goal_write(goal)
+        crow_core.goal_pause(1, "capability", "sub-step 2.2 failed")
+        api.push_goal(force=True)
+        said = self.goals(api)[-1]
+        self.assertEqual(said["status"], "paused")
+        self.assertEqual(said["pause"]["step"], 2)
+        self.assertEqual([x["status"] for x in said["steps"][1]["subs"]],
+                         ["done", "open"])
+
+    def test_the_page_draws_skipped_apart_from_running_and_the_pause(self):
+        """#296: robin read a skipped step as running -- both were --warn.
+        NEGATIVPROBE AM QUELLTEXT: skipped has its own token in every theme,
+        the running rule keeps amber, and a pause has its own glyph."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count("--skip:#"), 3, "a theme lacks --skip")
+        self.assertIn("#goalpanel li.skipped .m,#goalpanel .gh .st.sk"
+                      "{color:var(--skip)}", source)
+        self.assertIn("#goalpanel li.running .m{color:var(--warn)}", source)
+        self.assertNotIn("li.skipped .m,#goalpanel .gh .st.sk{color:var(--warn)}",
+                         source)
+        self.assertIn('stroke-dasharray="3 2.6"', source)
+        self.assertIn('l.textContent="skipped"', source)
+        self.assertIn('if(state==="held")', source)
+        self.assertIn('"Paused · step "+pz.step', source)
 
 
 class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
@@ -10613,10 +10907,15 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
             nudge = api._goal_nudge()
             self.assertIsNotNone(nudge, "the step cap fired after %d turns" % n)
             self.turn(api, nudge, "round %d, still on it" % n)
+        # #294: the cap pauses WITH a report turn, then waits.
+        report = api._goal_nudge()
+        self.assertIn("PAUSED at step 1 (turn cap): step 1 has taken 25 "
+                      "turns", report)
+        self.turn(api, report, "1. stuck 2. why 3. A, B 4. any input?")
         self.assertIsNone(api._goal_nudge())
-        self.assertIn("goal mode paused: step 1 has taken 25 turns. `/goal` "
-                      "shows where it stands -- a typed line carries on.",
-                      self.notes(api))
+        notes = self.notes(api)
+        self.assertTrue(any(n.startswith("goal mode paused at step 1 (turn "
+                                         "cap)") for n in notes), notes)
 
     def test_the_step_counter_starts_over_on_the_next_step(self):
         """GEGENPROBE: der Zaehler gehoert dem Schritt, nicht dem Ziel. Ein Plan,
@@ -13057,6 +13356,106 @@ class ARestoreNeverMeetsARunningChatTests(ApiCase):
         # ... and not a note about a late session: nothing arrived late.
         self.assertFalse([m for m in after if m.get("k") == "note"
                           and "kept the running" in m.get("t", "")])
+
+
+class AStatedRootWinsOverTheRestoredChatTests(ApiCase):
+    """#303. Live 2026-09-25 15:19 CEST: robin started the window
+    with `--root .../lighthouse-test`; `ready()` bound it, then `_probe`
+    restored the last chat ("Voxel", 101 messages, no `crow_root` in
+    session.json) and `_adopt_chat_root` fell through to `restore_root()` --
+    roots.json `active` still named diorama-test from a 09:45 pick. The chip
+    showed diorama-test, the goal bar (lighthouse-test/.crow/goal.json) was
+    gone, and the next line ran in the wrong working area.
+
+    THE RULE: a `--root` typed for THIS window is a person's choice made at
+    this start, the newest one there is. It wins over the template and over
+    the restored chat's own record, and becomes the next start's `active` --
+    the flag's help already says "the same as picking a folder in the
+    window". A chat's own root still wins when nothing was stated (#101)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._roots = crow_core.ROOTS_FILE
+        crow_core.ROOTS_FILE = os.path.join(self.dir, "roots.json")
+        self.addCleanup(setattr, crow_core, "ROOTS_FILE", self._roots)
+        self.addCleanup(crow_core.set_root, None)
+        crow_core.set_root(None)
+        self.template = os.path.join(self.dir, "diorama-test")
+        self.stated = os.path.join(self.dir, "lighthouse-test")
+        self.own = os.path.join(self.dir, "own-choice")
+        for path in (self.template, self.stated, self.own):
+            os.makedirs(path)
+            crow_core.write_root_mode(path, "auto")
+        crow_core.set_active_root(self.template)   # the 09:45 pick
+
+    def _saved_chat(self, own=None, chosen=False):
+        """session.json the way the window writes it; with `chosen`, the chat
+        carries `own` as its own root, pinned head included."""
+        old = self.api()
+        crow_core.set_root(own)
+        old._pin_memory(None)
+        old._root_chosen = chosen
+        self.a_chat(old, "continue", "working on it")
+        old._persist_live()
+        crow_core.set_root(None)
+        with open(self.session, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual("crow_root" in data, chosen)
+
+    def _start(self, *argv):
+        api = self.api(*argv)
+        api._mic_probe = lambda: None
+        api.git_refresh = lambda: None
+        with mock.patch.object(crow_gui, "check_endpoint", return_value="ok"), \
+             mock.patch.object(crow_gui, "fetch_model_name", return_value="m"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000), \
+             mock.patch.object(crow_gui.threading, "Thread", _RunsNow):
+            api.ready()
+        self.assertIn("continue", [m.get("content")
+                                   for m in api._conversation.payload()])
+        return api
+
+    def _is(self, got, want):
+        self.assertEqual(os.path.normcase(got or ""),
+                         os.path.normcase(os.path.realpath(want)))
+
+    def test_the_stated_root_survives_the_restore_of_a_chat_that_never_chose(self):
+        """THE LIVE CASE. Before the fix: diorama-test, from roots.json."""
+        self._saved_chat(own=self.stated)          # head names lighthouse-test
+        api = self._start("--root", self.stated)
+        self._is(crow_core.get_root(), self.stated)
+        roots = [m for m in self.drained(api) if m.get("k") == "root"]
+        self._is(roots[-1]["path"], self.stated)
+        with open(crow_core.ROOTS_FILE, encoding="utf-8") as fh:
+            self._is(json.load(fh)["active"], self.stated)
+
+    def test_the_stated_root_wins_over_the_chats_own_and_the_model_is_told(self):
+        """A chat that recorded another folder is re-bound to the typed one,
+        the #224 notice is queued, and the head no longer names the old one."""
+        self._saved_chat(own=self.own, chosen=True)
+        api = self._start("--root", self.stated)
+        self._is(crow_core.get_root(), self.stated)
+        self.assertTrue(api._root_chosen)
+        notice = api._conversation.pending_notice or ""
+        self.assertIn(os.path.realpath(self.stated), notice)
+        head = api._conversation.memory or ""
+        self.assertIn(crow_core.working_area_line(os.path.realpath(self.stated)),
+                      head)
+        self.assertNotIn(crow_core.working_area_line(os.path.realpath(self.own)),
+                         head)
+
+    def test_without_a_stated_root_the_chats_own_still_wins(self):
+        """#101 unchanged: no flag, the restored chat brings its own folder."""
+        self._saved_chat(own=self.own, chosen=True)
+        api = self._start()
+        self._is(crow_core.get_root(), self.own)
+        self.assertIsNone(api._conversation.pending_notice)
+
+    def test_without_a_stated_root_a_chat_that_never_chose_takes_the_template(self):
+        """#101 unchanged: no flag, no own choice -> roots.json `active`."""
+        self._saved_chat()
+        self._start()
+        self._is(crow_core.get_root(), self.template)
 
 
 class AStreamWithoutARoundTests(unittest.TestCase):

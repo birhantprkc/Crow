@@ -182,7 +182,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
 # one line the README documents. tools/pack-release.ps1:254 reads the same
 # pattern to stamp the package, and tools/check_operating_point.py holds it
 # against manifests/operating-point.json.
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 # The core carries no version of its own -- the owner of the literal hands it
 # over. Three places in there need one: the session file's `version` field, the
@@ -1047,7 +1047,8 @@ HELP = """commands:
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
   /budget        cap the thinking per request, /budget <tokens>|off
   /goal          the goal this chat works towards, /goal <title> | <step> | <step>
-                 /goal skip <n> [reason] gives step n up, /goal off clears it
+                 /goal skip <n> [reason] gives step n up, /goal redo <n> takes
+                 a skip back, /goal off clears it
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /image         hold an image for the next line, /image <path>
   /delegate      hand a task to the remote subtask model, /delegate <task>

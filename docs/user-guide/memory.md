@@ -24,7 +24,7 @@ Two files. Plain text, `§` on its own line between entries, editable by hand.
 | No `read` action | the content is already in the prompt |
 | Exact duplicates | answered with success and one entry |
 | Injection and invisible Unicode | refused before the entry is written |
-| Contradicts the machine (#270) | refused with the fact: "no GPU" / "CPU-only" while nvidia-smi names a card (a note that names the card passes, e.g. "render_page runs software GL while the model server holds the RTX 5090"), and "a tool changes bytes" (every write is byte-exact, #252) |
+| Contradicts the machine (#270) | refused with the fact: "no GPU" / "CPU-only" while nvidia-smi names a card (a note that names the card passes, e.g. "render_page refuses while the model server holds the RTX 5090"), and "a tool changes bytes" (every write is byte-exact, #252) |
 | No working directory bound | `memory` is refused with a reason; `user` still works |
 
 ## The head is pinned

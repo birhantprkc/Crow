@@ -5,6 +5,179 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 2.7.0 — 2026-09-25
+
+**Goal runs stop skipping silently, render_page renders on the GPU only, and voxel dioramas get a path-tracing
+kit.** A failed goal step climbs a classified ladder and then pauses and asks robin; the judge answers a frozen
+yes/no/unknown checklist on clock-stepped frames; a skip is never stored as done (#294–#296). render_page drops the
+SwiftShader fallback, captures up to 4 frames at controlled page time with pixel prechecks, borrows VRAM from an
+idle crow-nest serve around the capture, and lets path-traced kit pages converge for up to 120 s (#293, #297,
+#302). The voxel kit vendors three-gpu-pathtracer with a skill, a scaffold, animation, a photo mode, a props
+registry and a diorama checker, opt-in with `install.sh --pathtracer` / `install.ps1 -PathTracer` (#298, #299,
+#304). Also: `read_file` refuses binary files and names `read_image` (#301), `--root` survives the restored chat
+(#303), and scrollbars show only while used (#305).
+
+Everything on local `main` since 2.6.0 (21d7505): 24 commits, 12 tickets (#293–#299, #301–#305), 2026-09-25.
+Most numbers come from the 2026-09-24/25 diorama and lighthouse goal runs. #300 (image generation beside a live
+session) is not in this release. Tickets are released pending robin's live check.
+
+### Added
+
+- **Voxel kit: path-traced voxel dioramas as one offline page** (#298, 2026-09-25).
+  - `kits/pathtracer/` ships in every install. It holds three 0.186.1 + three-mesh-bvh 0.9.15 + three-gpu-pathtracer 0.0.24 as one esbuild-minified ES module (958,266 bytes; sha256, npm integrity and licence hashes in `kit.json`; the MIT texts beside it; a NOTICE entry). Next to it: `voxel-kit.js`, a scaffold, and the skill `voxel-diorama`.
+  - The kit provides a voxel grid; culled-face meshing with one `MeshStandardMaterial` per palette colour; a telephoto near-isometric camera with slight depth of field; a dome, a ground plane and a soft key light; lamps with the spot light below a solid shade; emission capped at 1; a despeckle pass; context-loss recovery; and `window.__SCENE__` / `__PT__` probes.
+  - `build_bundle` resolves `crow-voxel-kit` and `crow-pathtracer` to the installed kit, so the library never passes through the model.
+  - `install.sh --pathtracer` / `install.ps1 -PathTracer` verify the bundle, switch the skill on and name the esbuild. A kit skill is seeded once, switched off, through a `skills/.seeded` ledger: 0 prompt tokens until someone switches it on.
+  - Measured on 2026-09-25, headless Chromium 152, ANGLE/Vulkan, RTX 5090, 1024×1024: the scaffold room (26,627 voxels, 46,168 triangles) ran at 13.0 samples/s at 10 s and 14.3 at 40 s, and lost and restored the context once. The rules come from the pt-proof runs: vertex colours rendered black in 1 of 3 starts, and a spot inside a hollow shade gave 30.6 dB where one below a solid shade gave 38.6 dB (PSNR 60 s vs 180 s).
+  - Before: the 2026-09-24/25 goal run hand-wrote a WebGL2 ray tracer for ~16 h (#293–#295).
+  - The model's use of the kit in a live goal run is not measured.
+
+- **Voxel kit v2: animated live preview, photo mode, orbit, props registry, diorama checker** (#299, 2026-09-25).
+  - The page opens in LIVE mode (since 9e4daa4 this flat preview is `?mode=raster`; see Changed): a rasterised three.js preview of the same scene and materials, with real lights, soft shadow maps (`PCFShadowMap` + `shadow.radius`; `PCFSoftShadowMap` is gone in three r182+) and the scene's `d.animate((t, dt, scene) => …)` every frame. PHOTO mode pauses at t and path-traces as before (despeckle, context-loss restore). Switch with key P or a small Foto/Live button that shows only under the pointer. `?mode=photo&t=<s>` opens the photo directly, `?mode=live` the preview, `&ui=0` hides the button. Drag orbits, wheel or pinch zooms; in photo mode a camera change restarts the accumulation.
+  - New API: `d.part(name, grid, {pivot})` returns a movable `THREE.Group` built from its own grid; `d.addSpot({...})`; `addLamp` / `addAreaLight` / `addSpot` return a light rig the callback can rotate (a lighthouse beam). Time comes only from the page clock, so render_page's 4 frames (#293) differ and repeat byte-identically.
+  - Against empty scenes: `g.prop(name, build)` records the name, voxels and bbox of each prop. `window.__SCENE__` and the console line `[crow-scene] {json}` report `props`, `propKinds`, `coverage` (terrain columns with a prop above their top cell, divided by all terrain columns), `parts`, `animated`, `mode` and `errors`. The skill sets the targets: ≥ 40 props of ≥ 12 kinds, ≥ 60,000 voxels, coverage ≥ 0.5.
+  - `kits/pathtracer/check_diorama.py <index.html>` is a goal `check:` command. It renders through Crow's own `render_page` and prints PASS/FAIL for gpu, probe, samples, props, kinds, voxels, coverage, motion (all 6 frame pairs > 0.5 % changed), repeat, photo precheck and errors; it exits 0 only when all pass.
+  - Measured on 2026-09-25, scaffold with its pinwheel part, headless Chromium, ANGLE/Vulkan, RTX 5090, 1024×1024: live 60 fps; photo 289 samples at 20 s (14.5 samples/s); live frame pairs changed 0.69–1.26 %; a second capture was byte-identical; 0 page errors. The scaffold fails the density targets by design (6 props, 26,751 voxels, coverage 0.118). A model-built dense scene is not measured yet.
+- **render_page captures frames at controlled page time** (#293, 2026-09-25). `frames` (1–4) and `frame_ms`
+  (16–5000, default 500): with more than one frame the page's clock is frozen from its first script
+  (`Date`, `performance.now`, timers, `requestAnimationFrame`, a seeded `Math.random`), and each capture follows
+  exactly `frame_ms` of page time. Also written: a 2×2 contact sheet at half size, `render-<stamp>-sheet.png`.
+  No-GPU smoke on Chromium 152 (canvas 2D, `--disable-gpu`, 640×400, 4 frames × 250 ms): 1.6 s per call, 4
+  pairwise different frames, a second call byte-identical (sha256). Not measured on the GPU; that is robin's live
+  check.
+- **A structured render record** (#293). Every capture and every ENVIRONMENT error carries one line,
+  `render: {render_mode, renderer, frames, contact_sheet, precheck}`, and `crow_core.last_render()` returns the
+  same dict. `precheck` holds `uniform`, `distinct_colours`, `one_colour_pct`, `dark_pct` and `clipped_pct` (last
+  frame), plus `max_frame_diff` and `identical_frames` (all frame pairs; a pixel counts as changed when a channel
+  moves by more than 25, and the frames count as moving from 0.5 % changed).
+- **render_page borrows VRAM from an idle crow-nest serve** (#297, crow-nest#117, 2026-09-25). Below the VRAM bound,
+  when this turn's endpoint is local (loopback), render_page asks serve for the shortfall + 256 MiB
+  (`POST /v1/crow/vram/lend`, TTL = the render's own ceiling + 30 s, at most 600 s), reads the free VRAM again, and
+  renders on the GPU if it now clears the bound. The loan goes back (`POST /v1/crow/vram/return`, a 503 retried 3×)
+  in a `finally` after the browser is closed or killed, on a capture, an error, a timeout or an exception, and before
+  the result reaches the model, so `judge` only ever asks after the return. Still short after the loan: the
+  ENVIRONMENT error says lending was tried and how much was lent. llama.cpp or an older serve (404), lending off
+  (501), a loan already out (409), no answer (then the idempotent return is sent anyway), or a remote endpoint: the
+  ENVIRONMENT error as before. Each loan and return is a `render:` line in `crow.log` with MiB and milliseconds.
+  Before: under serve, 0.07–0.5 GiB free (#271, #293, crow-nest#117) and every capture refused. Tested against a
+  fake serve only; not measured live.
+
+- **Frozen per-step checklist for the judge, with yes/no/unknown, frames, a precheck and reference images**
+  (#295, 2026-09-25). Each visual step gets a checklist when it starts. It comes from `accept:` lines
+  (`accept: 5: <item>` binds to step 5), or the model writes it once with `goal_step(n, "running", checklist=[…])`,
+  or the first `judge` call writes it. A second write is refused, and a replan keeps it. The judge answers each item
+  yes/no/unknown with one line of evidence. `done` needs every must-item "yes" (`optional:` items do not gate).
+  "unknown" twice on one step pauses the goal. When the render recorded clock-stepped `frames` or a
+  `contact_sheet`, the judge sees them. A capture that is software-rendered on a GPU step, uniform, black, under 16
+  colours, or frozen on a step that needs motion never reaches the judge model: it is an environment failure.
+  `reference: <image> -- <criterion>` in `/goal` sends robin's reference image for a pairwise item. These items are
+  advisory until calibrated. Before, on 2026-09-25, 8 judge calls on steps 5–8 used criteria the model wrote at
+  judge time, each scored 1–10 on one software frame. Not measured live.
+- **Step budget and no-progress timer** (#294). A goal step gets 60 min of active wall clock (`goal_step_minutes`,
+  `CROW_GOAL_STEP_MINUTES`). A step with a checklist pauses after 10 nudges with no item newly passed
+  (`goal_no_progress_turns`, `CROW_GOAL_NO_PROGRESS_TURNS`). The clock stops while the goal is paused. On
+  2026-09-24/25 step 5 carried 8 idle night hours (43,130 s). Not measured live.
+
+### Changed
+
+- **Voxel kit: live mode path-traces the island; a person's page fills the window** (#299 follow-up, 9e4daa4,
+  2026-09-25). LIVE (the default) now path-traces the static island, which keeps converging while the camera rests,
+  and rasterises only the animated parts (`d.part`) on top, depth-tested against the island. `?mode=raster` (alias
+  `preview`) keeps #299's flat raster preview, and `check_diorama.py` takes its motion and repeat captures there,
+  because the accumulating path tracer would make a still scene "move". A page opened by a person (`ui` not 0)
+  fills the window at `devicePixelRatio` (cap 2) and follows resizes; `ui=0` (Crow's captures, the checker) keeps
+  the fixed `width` × `height` at pixel ratio 1. Before: robin opened the flat raster preview after a 6/6 run and it
+  looked nothing like the photos, and the fixed 1024×1024 canvas at pixel ratio 1 looked pixelated on his scaled
+  1440p screen. Node tests for the mode parser and the checker only; the live mode is not measured on the GPU.
+- **Scrollbars show only while their strip is scrolled or pointed at** (#305, 2026-09-25). Every scroll container in
+  the window and the phone mirror — the chat, the per-turn stats line (`[24 rounds | … tok/s | prefill …]`), code
+  blocks, tables, the Code/Tool-Calls, git, goal and Subtasks panels, the rail, settings, menus — now draws a
+  transparent thumb at rest. It appears on any scroll (wheel, keyboard, touch, drag) and goes 0.8 s after the last
+  scroll event; a held pointer keeps it; a mouse pointer over the strip shows it (`@media (hover:hover)`, so not on
+  a phone). Only the colour changes: bar widths, the 10 px chat gutter and the column do not move. Before: the thumb
+  was drawn permanently on every strip. Source and node-run tests only; not yet seen in WebKitGTK, WebView2 or on
+  iOS (robin's live check).
+- **render_page renders on the GPU only** (#293, 2026-09-25). The SwiftShader fallback is gone. Below the VRAM
+  bound (512 MiB, or 1,536 MiB with the panel open), or when the browser's own `UNMASKED_RENDERER_WEBGL` is
+  software (SwiftShader, llvmpipe, lavapipe) or not the NVIDIA card, the result is `error: ENVIRONMENT -- ...`
+  naming the free VRAM or the renderer string, and no image comes back. The renderer is read before the page
+  loads and again after the last capture. Before: in the 2026-09-24/25 diorama run, 35 of the 42 surviving
+  results were `software (swiftshader)` captures taken at 51–317 MiB free. ANGLE runs on Vulkan first, with one
+  retry on `--use-gl=angle` (`CROW_RENDER_ANGLE` pins one). `CROW_RENDER_GL=swiftshader` is now a refusal. Chromium
+  152 still hands WebGL to SwiftShader under `--disable-gpu`, even without `--enable-unsafe-swiftshader` (measured,
+  the smoke above); the renderer check is what caught it. On Windows the renderer cannot be read (no DevTools pipe),
+  so it says `unverified`, and `frames` > 1 is refused there.
+
+- **render_page lets path-traced kit pages wait up to 120 s** (#302, 2026-09-25). A local page that carries the
+  voxel kit's `[crow-pt]` marker gets a `wait_ms` ceiling of 120,000; every other page keeps 20,000 (#213). The
+  pathtracer skill asks for 60,000–120,000 on night or dark scenes and says never to shrink the scene to fit a short
+  capture. Before: the 2026-09-25 lighthouse goal run capped every photo at 20 s, which held ~295 samples (291.5,
+  295.5, 298), stayed grainy, and paused step 2 with an offer to shrink the scene. At the measured ~15 samples/s at
+  1024² (RTX 5090), 90 s holds ~1,350 samples. Not measured live.
+
+- **A failed goal step is never skipped by the engine; it climbs a ladder and then pauses and asks** (#294,
+  2026-09-25, replaces #289's skip). Each failure has a class. *Environment* (render_mode unavailable, software on a
+  GPU step, blank or identical frames, no judge answered): two retries 15 s apart, then pause. *Capability* (a valid
+  capture the judge does not pass): a written reflection, then attempt 3 in a fresh context, then a split into 2–3
+  sub-steps (`goal_step(n, "split", substeps=[…])`, reported with `sub`), then pause. The 25-turn and 60-turn caps
+  and the budget pause too. On every pause the model writes robin a report: what it found, why it cannot go on,
+  2–3 proposals, and whether he has more input. The report is shown in the window and on the phone. Only a typed
+  line resumes. Before: the 2026-09-24/25 diorama run ended "complete with 4 skipped", with steps 5–8 skipped on
+  software-GL captures and nobody asked. After: 0 skips without `/goal skip` in the unit replay. Not measured live.
+
+### Fixed
+
+- **A skip stored as `done`, and skipped drawn in the running step's amber** (#296). A `done` step whose note starts
+  with "skipped" loads as `skipped`, which repairs the 2026-09-24 hand edit of step 4 (counted 5/9, now 4/9). The
+  model can no longer set a user-skipped step `done` or `running`; `/goal redo <n>` reopens it. In the goal bar
+  (window and phone), skipped has its own colour (`--skip`, violet), a dashed ring with a skip glyph and the word
+  "skipped". Running keeps amber with a dot. A paused step shows a red pause glyph, and the head reads
+  "Paused · step N".
+- **`read_file` refuses images and other binary files, and names `read_image`** (#301, 2026-09-25). A file whose
+  first 8,000 bytes hold a NUL, or that starts with a PNG/JPEG/GIF/WebP/BMP/PDF signature, is detected by its
+  content, not its extension. It gets one line instead of bytes decoded as text: `error: …/island.png is a PNG image
+  (543x768, 502,797 bytes) -- read_file returns text only; use read_image to see it`. A PDF names `pdftotext`, other
+  binaries `file`/`xxd`. Before: the 2026-09-25 lighthouse run got 16,056 characters (~5,946 tokens) of mojibake for
+  `reference/island.png`, blamed `read_image` and saved "read_image returns raw bytes" into `.crow/MEMORY.md`.
+  UTF-8 text reads as before, including a multi-byte character at the 8,000-byte edge. `read_image` on a missing
+  `-crop.png` whose frame exists now says a crop is written only under 50 % coverage and names the frame. Before: a
+  bare `no such image`, twice in the same run. Not measured live.
+- **A window started with `--root` keeps that folder when it restores the last chat** (#303, 2026-09-25).
+  `crow --root DIR` now binds DIR for the restored chat and saves DIR as the folder the next start opens (`active` in
+  `roots.json`), the same as a pick in the chip. Before: on 2026-09-25 15:19, `--root …/lighthouse-test` restored the
+  chat "Voxel" (no folder of its own) into `diorama-test`, the last folder picked in the chip (09:45). The goal bar
+  disappeared, and the next line ran in the wrong folder. A restored chat that recorded another folder is moved to DIR:
+  the model gets #224's notice, and the memory head is rebuilt only if it named the other folder. Without `--root`,
+  nothing changes. The terminal already let `--root` win. Covered by 4 window tests, 2 of them red without the fix;
+  not verified live.
+- **`check_diorama.py` borrows VRAM from serve like a Crow turn does** (#304, 2026-09-25). The checker runs as its
+  own process, outside any Crow turn, so #297's lending had no endpoint and never asked serve. It now names the local
+  serve before the first capture: `--serve` (default `http://127.0.0.1:8099/v1`, env `CROW_SERVE_URL`, `none` = never
+  borrow). Before: on 2026-09-25 ~15:35 the lighthouse goal's `check.sh` failed all 10 checks with the ENVIRONMENT
+  error at 280 MiB free while serve held the card, and `crow.log` had no `render:` line for it; render_page inside the
+  same turn had borrowed 582 MiB twice minutes earlier. Covered by 3 tests, red without the fix; not verified live.
+
+### Known limitations
+
+- **Agent-built dioramas stay far below the references, and robin did not accept them.** The voxel kit renders
+  reference-grade stills: proven with a hand-built scene (2026-09-25, RTX 5090). In the 2026-09-25
+  lighthouse goal run the agent-built diorama stayed far below robin's reference images: crude props, a flat
+  pond, and a lighthouse beam that read as a windmill. robin did not accept the result.
+- **The diorama gates do not measure visual quality against references.** `check_diorama.py` and the judge's
+  checklist measure the GPU, sample counts, prop counts and kinds, voxels, coverage, motion, repeatability, a
+  near-uniform/near-black precheck and page errors. A page can pass every gate and still look nothing like the
+  reference; `reference:` items are advisory until calibrated, and `--reference` only prints luma/saturation.
+- **Live checks pending for every ticket in this release** (#293–#299, #301–#305): unit tests, node runs, a fake
+  serve and GPU smokes of the scaffold only. The lend (#297, #304) was tested against a fake serve; the path-traced
+  live mode (9e4daa4) and the 120 s wait (#302) were not run on the GPU for this release.
+- **Windows**: render_page cannot read the renderer there (no DevTools pipe), says `unverified` and refuses
+  `frames` > 1 (#293). `install.ps1 -PathTracer`, `install.ps1 -Selftest` and `tools/pack-release.ps1` were not run
+  for this release (no PowerShell on the Linux release machine).
+- `check_gui_prereqs` (not in CI) reports 2 of 3 prerequisites: point (ii), 26 glyph problems over the 2 shipped
+  Google Sans Code faces, unchanged since 2.6.0.
+- Not in this release: #300 (image generation beside a live session: decision open). Still open from 2.5.0: the
+  Windows installer bundle (#196); `sampling_no_thinking`'s presence_penalty 1.5 (#246).
+
 ## 2.6.0 — 2026-09-24
 
 **The phone becomes a second view of the session, and goal runs get a fresh-eyes judge.** A paired phone mirrors

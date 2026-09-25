@@ -32,14 +32,14 @@ there — it would be empty.
 Run them under the runtime venv (`~/.local/share/crow/venv/bin/python` on Linux), not the
 system Python: that venv is made with `--system-site-packages`, which puts pip's `webview` and
 the distribution's PyGObject in one interpreter. `just test` does exactly that, and `just check`
-runs lint, the four suites, `check_shared_core`, `check_operating_point`, `check_gui_prereqs`
-and `bash install.sh --selftest` in that order.
+runs lint, the four suites, `check_shared_core`, `check_operating_point`, `check_gui_prereqs`,
+`check_pathtracer_kit`, `test_pathtracer_kit` and `bash install.sh --selftest` in that order.
 
 `AWriteParsesWhatItWroteTests` (#251) calls the real `node --check` and is skipped when `node`
 is not on `PATH`; the skipped count in a run's `OK (skipped=N)` line includes it then.
 
-CI (`.github/workflows/ci.yml`) runs ruff, the suites, `check_shared_core` and
-`check_operating_point` on `ubuntu-latest` and `windows-latest` (Windows without
+CI (`.github/workflows/ci.yml`) runs ruff, the suites, `check_shared_core`,
+`check_operating_point`, `check_pathtracer_kit` and `test_pathtracer_kit` on `ubuntu-latest` and `windows-latest` (Windows without
 `test_crow_gui`), and `install.sh --selftest` on Linux only. `check_gui_prereqs` is not in CI.
 
 The window's own suite needs `pywebview` importable; without it the folder-picker
@@ -59,10 +59,20 @@ Run from the repo root.
 | `tools/check_chat_template.py` | DeepSeek-V4-Flash ships no Jinja template. The hand-written one is held against the vectors DeepSeek published, byte for byte |
 | `tools/check_routing_tables.py` | REAP-pruned checkpoints can carry duplicate expert ids, which crashes CUDA `ggml_mul_mat_id()` on the tokens that hit them. Reads the static routing table without loading the model |
 | `tools/check_gui_prereqs.py` | what the window stands on: font, glyph coverage, runtime versions. It checks the machine it runs on, not the code, and is not run in CI |
+| `tools/check_pathtracer_kit.py` | the voxel kit (#298): bundle sha256 and size against `kits/pathtracer/kit.json`, the three licence texts, NOTICE naming each pinned version, exact MIT pins, the kit importing only the bundle, no `vertexColors: true`, emission capped at 1, a skill description that fits |
 
 The checkers carry their own suites: `tools/test_check_operating_point.py`,
 `tools/test_check_shared_core.py`, `tools/test_check_gui_prereqs.py`, plus
 `tools/test_gguf_header.py` and `tools/test_run_server_block.py`.
+
+`tools/test_pathtracer_kit.py` (41 cases) is the kit's suite: the checker red per broken link, and
+the mesher run in `node` against the real `voxel-kit.js` and the vendored three.js — culled-face
+counts, one material per colour, no colour attribute, winding against the normal on every
+triangle, the emission cap, the scene rules, despeckle; the props registry (count, bbox, nesting,
+a cell taken back by the terrain), the coverage maths, the `?mode=` parser and prop kinds (#299).
+The node half is skipped without `node`. The rest drives `kits/pathtracer/check_diorama.py` on
+fake render results: the `render:` record and `[crow-scene]` parsing, and each check red on its
+own defect (#299), the lend spot bound from `--serve` (#304), and the motion captures on `?mode=raster`.
 
 ## The manifest
 

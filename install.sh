@@ -55,6 +55,9 @@
 #   bash install.sh --tailscale          also the phone over HTTPS: what is missing
 #                                        for Tailscale, as commands (never sudo)
 #   bash install.sh --build-engine       build llama-server now (~20 min)
+#   bash install.sh --pathtracer         also switch on the voxel-diorama skill: the
+#                                        model path-traces voxel scenes with the kit
+#                                        in kits/pathtracer (three.js, shipped always)
 #   bash install.sh --selftest           check this script, install nothing
 #
 # ENVIRONMENT
@@ -87,7 +90,7 @@ PACMAN_LINE="sudo pacman -S --needed python-gobject gtk3 webkit2gtk-4.1 wl-clipb
 
 # The payload. Directories are copied whole minus the exclusions in
 # payload_paths(); files are copied if they exist.
-PAYLOAD_DIRS="cli manifests tools patches"
+PAYLOAD_DIRS="cli manifests tools patches kits"
 PAYLOAD_FILES="README.md LICENSE NOTICE CHANGELOG.md install.sh"
 
 ICON_SIZES="16 24 32 48 64 128 256 512"
@@ -241,6 +244,45 @@ installer_env_p() {
          NR == 3 && /^export CROW_MODELS="[^"]*"$/ { c = 1; next }
          { extra = 1 }
          END { exit !(a && b && c && !extra && NR == 3) }' "$1"
+}
+
+# --pathtracer (#298). The kit ships with every install (kits/pathtracer,
+# ~1 MB); the flag switches its skill on, because a switched-off skill costs the
+# prompt nothing and a switched-on one costs every turn a line.
+#
+# The kit's bundle against its own kit.json: ok | missing | corrupt. The first
+# `"sha256": "` in kit.json is the bundle's -- tools/build-pathtracer-kit.sh
+# writes the bundle block first, and the licence hashes sit under another key.
+pathtracer_kit_verdict() {
+    local kit="$1" want
+    [ -f "$kit/kit.json" ] && [ -f "$kit/crow-pathtracer.js" ] || { echo missing; return 0; }
+    want="$(awk -F'"' '/"sha256": "/ { print $4; exit }' "$kit/kit.json")"
+    if [ -n "$want" ] && [ "$(sha_of "$kit/crow-pathtracer.js")" = "$want" ]; then echo ok
+    else echo corrupt; fi
+}
+
+# The voxel-diorama skill's switch, read from its SKILL.md: on | off | absent.
+# Absent is the normal state of a machine that has not started Crow since the
+# kit shipped -- the core seeds the skill (off) at its next start.
+kit_skill_state() {
+    local file="$1"
+    [ -f "$file" ] || { echo absent; return 0; }
+    if grep -qx 'enabled: false' "$file"; then echo off; else echo on; fi
+}
+
+# Switch the skill on through the core's own function, the same act as the
+# switch in the settings sheet. Prints enabled | already | missing, or !error.
+enable_kit_skill() {
+    local py="$1" cli="$2"
+    "$py" - "$cli" <<'EOF' 2>/dev/null || echo "!the core could not be imported"
+import sys
+sys.path.insert(0, sys.argv[1])
+try:
+    import crow_core
+    print(crow_core.enable_kit_skill())
+except Exception as exc:
+    print("!%s" % exc)
+EOF
 }
 
 # The files this package ships, as paths relative to ROOT, sorted.
@@ -743,6 +785,47 @@ FAKE
           "$(sed -n '/^tailscale_install_line()/,/^# ---.*$/p' "$REPO/install.sh" \
              | grep -vE '^\s*#|printf|cmd |note |serve=|say ' | grep -q 'sudo' && echo 1 || echo 0)"
 
+    # --pathtracer (#298): the kit verdict both ways, the switch reader,
+    # and the enable path end to end against a throwaway config directory.
+    mkdir -p "$tmp/kit"
+    printf 'export const x = 1;\n' > "$tmp/kit/crow-pathtracer.js"
+    printf '{\n  "bundle": {\n    "sha256": "%s"\n  },\n  "license_sha256": {\n    "LICENSE.x": "00"\n  }\n}\n' \
+        "$(sha_of "$tmp/kit/crow-pathtracer.js")" > "$tmp/kit/kit.json"
+    check "pathtracer: a kit whose bundle matches kit.json is 'ok'" \
+          "$([ "$(pathtracer_kit_verdict "$tmp/kit")" = ok ] && echo 0 || echo 1)" "$(pathtracer_kit_verdict "$tmp/kit")"
+    printf 'export const x = 2;\n' > "$tmp/kit/crow-pathtracer.js"
+    check "NEGATIVE: pathtracer: one changed byte in the bundle is 'corrupt'" \
+          "$([ "$(pathtracer_kit_verdict "$tmp/kit")" = corrupt ] && echo 0 || echo 1)" "$(pathtracer_kit_verdict "$tmp/kit")"
+    check "NEGATIVE: pathtracer: no kit is 'missing'" \
+          "$([ "$(pathtracer_kit_verdict "$tmp/nokit")" = missing ] && echo 0 || echo 1)"
+    if [ -n "$REPO" ]; then
+        check "pathtracer: this repository's kit matches its kit.json" \
+              "$([ "$(pathtracer_kit_verdict "$REPO/kits/pathtracer")" = ok ] && echo 0 || echo 1)" \
+              "$(pathtracer_kit_verdict "$REPO/kits/pathtracer")"
+        check "pathtracer: the payload ships the kit and its licences" \
+              "$(payload_paths "$REPO" | grep -qx 'kits/pathtracer/crow-pathtracer.js' \
+                 && payload_paths "$REPO" | grep -qx 'kits/pathtracer/LICENSE.three-gpu-pathtracer' && echo 0 || echo 1)"
+        check "pathtracer: --help lists --pathtracer" \
+              "$(sed -n '/^# USAGE/,/^# ---/p' "$REPO/install.sh" | grep -q -- '--pathtracer' && echo 0 || echo 1)"
+    fi
+    printf -- '---\nname: voxel-diorama\nenabled: false\n---\nx\n' > "$tmp/off.md"
+    printf -- '---\nname: voxel-diorama\nenabled: true\n---\nx\n' > "$tmp/on.md"
+    check "pathtracer: the skill switch reads on / off / absent" \
+          "$([ "$(kit_skill_state "$tmp/on.md")" = on ] && [ "$(kit_skill_state "$tmp/off.md")" = off ] \
+             && [ "$(kit_skill_state "$tmp/none.md")" = absent ] && echo 0 || echo 1)"
+    if [ -n "$REPO" ] && [ -n "$PY" ]; then
+        local first second
+        first="$(XDG_CONFIG_HOME="$tmp/cfg" XDG_STATE_HOME="$tmp/state" XDG_CACHE_HOME="$tmp/cache" \
+                 XDG_DATA_HOME="$tmp/data" enable_kit_skill "$PY" "$REPO/cli")"
+        second="$(XDG_CONFIG_HOME="$tmp/cfg" XDG_STATE_HOME="$tmp/state" XDG_CACHE_HOME="$tmp/cache" \
+                  XDG_DATA_HOME="$tmp/data" enable_kit_skill "$PY" "$REPO/cli")"
+        check "pathtracer: the opt-in switches the skill on, a second run says 'already'" \
+              "$([ "$first" = enabled ] && [ "$second" = already ] \
+                 && [ "$(kit_skill_state "$tmp/cfg/crow/skills/voxel-diorama/SKILL.md")" = on ] \
+                 && [ -f "$tmp/cfg/crow/skills/skill-creator/SKILL.md" ] && echo 0 || echo 1)" \
+              "first '$first', second '$second'"
+    fi
+
     printf '\n%s%d checks, %d failed%s\n' "$B" "$((pass + fail))" "$fail" "$Z"
     [ "$fail" -eq 0 ] || return 1
     printf 'RESULT: PASS\n'
@@ -1001,6 +1084,46 @@ install_engine() {
     note "It is built here, from llama.cpp pin 6c84c7d5d + PR #27880 + PR #28040, with a"
     note "CUDA toolkit unpacked under \$CROW_HOME -- no root, ~20 minutes, ~8 GB:"
     cmd "CROW_HOME=$CROW_HOME bash $builder"
+}
+
+# --pathtracer (#298): verify the kit, switch its skill on, say whether
+# build_bundle has an esbuild to put it into a page. Without the flag: one line
+# saying the kit is there and how to switch it on -- or that it already is.
+install_pathtracer() {
+    local kit="$CROW_HOME/kits/pathtracer" verdict state esb
+    local skill="${XDG_CONFIG_HOME:-$HOME/.config}/crow/skills/voxel-diorama/SKILL.md"
+    verdict="$(pathtracer_kit_verdict "$kit")"
+    state="$(kit_skill_state "$skill")"
+    if [ "$WITH_PATHTRACER" != 1 ]; then
+        if [ "$state" = on ]; then ok "voxel kit: the voxel-diorama skill is on (kits/pathtracer, $verdict)"
+        else note "voxel kit: installed, skill off -- re-run with --pathtracer to switch it on"; fi
+        return 0
+    fi
+    case "$verdict" in
+        ok)      ok "voxel kit: kits/pathtracer/crow-pathtracer.js matches kit.json" ;;
+        missing) warn "voxel kit: $kit is missing -- the package did not ship it"; return 0 ;;
+        *)       warn "voxel kit: the bundle does not match kit.json -- re-run install.sh"; return 0 ;;
+    esac
+    state="$(enable_kit_skill "$CROW_HOME/venv/bin/python" "$CROW_HOME/cli")"
+    case "$state" in
+        enabled) ok "voxel kit: the voxel-diorama skill is switched on" ;;
+        already) ok "voxel kit: the voxel-diorama skill was already on" ;;
+        *)       warn "voxel kit: could not switch the skill on (${state#!})"
+                 note "switch it on by hand: the Skills page of the window's settings" ;;
+    esac
+    esb="$("$CROW_HOME/venv/bin/python" - "$CROW_HOME/cli" "$CROW_HOME" <<'EOF' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import crow_core
+exe, version, where, _ = crow_core.find_esbuild(sys.argv[2])
+print("%s %s (%s)" % (exe, version, where) if exe else "")
+EOF
+)"
+    if [ -n "$esb" ]; then ok "voxel kit: build_bundle has an esbuild: $esb"
+    else warn "voxel kit: no esbuild on this machine -- build_bundle cannot inline the kit into a page"
+         note "any esbuild works: a project's node_modules, PATH, the deno or npx cache, or"
+         note "\"bundler\": \"<path>\" in ${XDG_CONFIG_HOME:-$HOME/.config}/crow/settings.json"
+    fi
 }
 
 write_launcher() {
@@ -1316,6 +1439,7 @@ CROW_REF="${CROW_REF:-main}"
 BUILD_ENGINE="${CROW_BUILD_ENGINE:-0}"
 WITH_VOICE=0
 WITH_TAILSCALE=0
+WITH_PATHTRACER=0
 WITH_DESKTOP=1
 WITH_ENGINE=1
 MODELS_ARG=""
@@ -1334,6 +1458,7 @@ while [ $# -gt 0 ]; do
         --ref)          CROW_REF="$2"; shift 2 ;;
         --voice)        WITH_VOICE=1; shift ;;
         --tailscale)    WITH_TAILSCALE=1; shift ;;
+        --pathtracer)   WITH_PATHTRACER=1; shift ;;
         --build-engine) BUILD_ENGINE=1; shift ;;
         --no-engine)    WITH_ENGINE=0; shift ;;
         --no-desktop)   WITH_DESKTOP=0; shift ;;
@@ -1383,6 +1508,7 @@ install_payload
 step "The runtime"
 install_venv
 [ "$WITH_ENGINE" = 1 ] && install_engine || note "engine check skipped (--no-engine)"
+install_pathtracer
 write_launcher
 link_models
 install_desktop

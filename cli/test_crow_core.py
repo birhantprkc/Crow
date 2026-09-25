@@ -122,6 +122,10 @@ crow_core.SECRETS_FILE = os.path.join(_NOWHERE, "secrets.json")
 crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
+# #298: the kit of THIS checkout would seed its skill into every case that
+# lists skills. The cases that want the kit take _REAL_KIT explicitly.
+_REAL_KIT = crow_core.PATHTRACER_KIT
+crow_core.PATHTRACER_KIT = os.path.join(_NOWHERE, "kits", "pathtracer")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
 # #262: Crow's own log file, never the real one under the state dir.
 crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
@@ -145,7 +149,16 @@ crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 _PINNED: dict = {}
 
 
+# #297: NO CASE LENDS A REAL SERVE'S VRAM. render_page asks this turn's
+# local endpoint for a loan below the VRAM bound, and a turn case leaves
+# `_TURN_SPOT` pointing at 127.0.0.1:<port> -- on robin's machine a live
+# serve may answer there. The pin makes every case "no local endpoint";
+# TheRenderLendsVramTests puts the real lookup back against its fake server.
+_REAL_LEND_ROOT = crow_core._render_lend_root
+
+
 def setUpModule() -> None:
+    crow_core._render_lend_root = lambda: None
     for module in (crow, crow_core):
         for name, value in list(vars(module).items()):
             if isinstance(value, str) and value.startswith("\033"):
@@ -161,6 +174,7 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
+    crow_core._render_lend_root = _REAL_LEND_ROOT
     for (module_name, name), value in _PINNED.items():
         setattr(sys.modules[module_name], name, value)
     _PINNED.clear()
@@ -7085,6 +7099,11 @@ class SeededSkillTests(unittest.TestCase):
         self.addCleanup(setattr, crow_core, "SKILLS_DIR", self._skills)
         # LEFT MISSING ON PURPOSE -- that absence is the state being tested.
         crow_core.SKILLS_DIR = os.path.join(self.dir, "skills")
+        # No kit here: the builtin seed is what this class holds. The kit's
+        # skill has its own ledger rule and KitSkillTests below.
+        self._kit = crow_core.PATHTRACER_KIT
+        self.addCleanup(setattr, crow_core, "PATHTRACER_KIT", self._kit)
+        crow_core.PATHTRACER_KIT = os.path.join(self.dir, "no-kit")
 
     def test_a_machine_with_no_skills_gets_the_shipped_one(self):
         """Without it the only guidance is one sentence in the tool description,
@@ -7121,6 +7140,111 @@ class SeededSkillTests(unittest.TestCase):
             self.assertIn("When", description, name)
             self.assertIsNone(crow_core.memory_threat(description), name)
             self.assertGreater(len(body), 500, name)
+
+
+class KitSkillTests(unittest.TestCase):
+    """#298: the voxel-diorama skill that ships with kits/pathtracer.
+
+    It must reach machines that ALREADY have a skills directory (every existing
+    install), which the builtin rule -- seed when the directory is absent --
+    cannot do. So a ledger: seeded once per name, OFF, refreshed only while the
+    user has not touched it, never resurrected after a delete.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-kitskill-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._skills, self._kit = crow_core.SKILLS_DIR, crow_core.PATHTRACER_KIT
+        self.addCleanup(setattr, crow_core, "SKILLS_DIR", self._skills)
+        self.addCleanup(setattr, crow_core, "PATHTRACER_KIT", self._kit)
+        crow_core.SKILLS_DIR = os.path.join(self.dir, "skills")
+        crow_core.PATHTRACER_KIT = os.path.join(self.dir, "kits", "pathtracer")
+        os.makedirs(crow_core.PATHTRACER_KIT)
+        self.kit_text("1. Copy @CROW_KITS@/pathtracer/scaffold.")
+
+    def kit_text(self, body: str, desc: str = "When asked for a voxel diorama: use the kit.") -> None:
+        with open(os.path.join(crow_core.PATHTRACER_KIT, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: voxel-diorama\ndescription: %s\n---\n\n%s\n" % (desc, body))
+
+    def names(self):
+        return [s["name"] for s in crow_core.skills()]
+
+    def test_an_existing_skills_directory_gets_the_kit_skill_switched_off(self):
+        """The upgrade path: the directory exists (the builtin seed will never
+        run again), and the kit skill still arrives -- off, so it costs the
+        prompt nothing until somebody switches it on."""
+        os.makedirs(crow_core.SKILLS_DIR)
+        self.assertEqual(self.names(), ["voxel-diorama"])
+        self.assertFalse(crow_core.read_skill("voxel-diorama")["enabled"])
+        self.assertEqual(crow_core.skill_block(), "")
+        self.assertTrue(os.path.isfile(os.path.join(crow_core.SKILLS_DIR, crow_core.SKILL_LEDGER)))
+
+    def test_a_fresh_machine_gets_the_builtin_on_and_the_kit_skill_off(self):
+        self.assertEqual(self.names(), ["skill-creator", "voxel-diorama"])
+        block = crow_core.skill_block()
+        self.assertIn("skill-creator", block)
+        self.assertNotIn("voxel-diorama", block)
+
+    def test_a_deleted_kit_skill_does_not_come_back(self):
+        """NEGATIVE: the ledger remembers it was written once."""
+        os.makedirs(crow_core.SKILLS_DIR)
+        crow_core.skills()
+        crow_core.tool_skill("remove", name="voxel-diorama")
+        self.assertEqual(self.names(), [])
+        self.kit_text("a newer kit text")
+        self.assertEqual(self.names(), [])
+
+    def test_an_untouched_copy_follows_a_newer_kit_and_keeps_its_switch(self):
+        os.makedirs(crow_core.SKILLS_DIR)
+        self.assertEqual(crow_core.enable_kit_skill(), "enabled")
+        self.kit_text("2. The new step.")
+        crow_core.skills()
+        got = crow_core.read_skill("voxel-diorama")
+        self.assertIn("The new step", got["body"])
+        self.assertTrue(got["enabled"])
+
+    def test_an_edited_copy_is_never_overwritten(self):
+        """NEGATIVE: the user's own wording beats a newer kit text."""
+        os.makedirs(crow_core.SKILLS_DIR)
+        crow_core.skills()
+        crow_core.write_skill("voxel-diorama", "When I say so.", "my own steps", False)
+        self.kit_text("2. The new step.")
+        crow_core.skills()
+        self.assertEqual(crow_core.read_skill("voxel-diorama")["body"], "my own steps")
+
+    def test_enable_says_enabled_then_already_and_missing_without_a_kit(self):
+        """What install.sh --pathtracer and install.ps1 -PathTracer print from.
+        On a machine that never started Crow it seeds the builtin too, so the
+        skills directory it creates is never one that holds only the kit skill."""
+        self.assertEqual(crow_core.enable_kit_skill(), "enabled")
+        self.assertEqual(crow_core.enable_kit_skill(), "already")
+        self.assertIn("skill-creator", self.names())
+        self.assertIn("voxel-diorama", crow_core.skill_block())
+        crow_core.PATHTRACER_KIT = os.path.join(self.dir, "none")
+        crow_core.SKILLS_DIR = os.path.join(self.dir, "skills2")
+        self.assertEqual(crow_core.enable_kit_skill(), "missing")
+
+    def test_read_fills_in_the_kits_path_and_the_file_keeps_the_placeholder(self):
+        """An install that moves keeps a true body: the path is filled in at
+        read time and never written into SKILL.md."""
+        crow_core.enable_kit_skill()
+        got = json.loads(crow_core.tool_skill("read", name="voxel-diorama"))
+        self.assertIn(os.path.join(self.dir, "kits") + "/pathtracer/scaffold", got["body"])
+        self.assertNotIn(crow_core.KITS_PLACEHOLDER, got["body"])
+        self.assertIn(crow_core.KITS_PLACEHOLDER, crow_core.read_skill("voxel-diorama")["body"])
+
+    def test_the_shipped_kit_skill_holds_the_skill_rules(self):
+        """The real kits/pathtracer/SKILL.md: a description the prompt can carry,
+        and the measured rules in the body."""
+        with open(os.path.join(_REAL_KIT, "SKILL.md"), encoding="utf-8") as fh:
+            head, body = crow_core.parse_skill(fh.read())
+        desc = head["description"]
+        self.assertLessEqual(len(desc), crow_core.SKILL_DESC_CHARS)
+        self.assertTrue(desc.startswith("When"))
+        self.assertIsNone(crow_core.memory_threat(desc))
+        for words in ("64 voxels wide", "8-16 voxels", "vertexColors", "addLamp",
+                      "build_bundle", "render_page", crow_core.KITS_PLACEHOLDER):
+            self.assertIn(words, body)
 
 
 class SessionSearchTests(unittest.TestCase):
@@ -14434,7 +14558,8 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.dir = tempfile.mkdtemp(prefix="crow-render-t-")
-        self.src = inspect.getsource(crow_core.tool_render_page)
+        self.src = (inspect.getsource(crow_core.tool_render_page)
+                    + inspect.getsource(crow_core._render_page))   # #297
         # DER WAECHTER PRUEFT DEN CODE, NICHT DIE ERKLAERUNG. Der Docstring
         # NENNT `taskkill /IM`, um zu sagen, dass es das hier nicht gibt -- ein
         # Muster, das an seinem eigenen Kommentar rot wird, ist genau der
@@ -14510,7 +14635,7 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
         self.assertIn("render_scope_prefix", self.src)
         self.assertIn("render_gl_mode", self.src)
         self.assertIn("render_memory_bounds", self.src)
-        self.assertIn("--use-gl=angle", self.src)
+        self.assertIn("render_gpu_flags", self.src)
         # Der Deckel-Tot ist kein "done": der Grund steht in der Antwort.
         self.assertIn("memory ceiling", self.src)
         self.assertIn("would not die", self.src)
@@ -14598,7 +14723,7 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
                 mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
                 mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
                 mock.patch.object(crow_platform, "render_gl_mode",
-                                  getattr(self, "gl", lambda *a, **k: "swiftshader")), \
+                                  getattr(self, "gl", lambda *a, **k: "angle")), \
                 mock.patch.object(crow_platform, "gpu_free_mib", lambda: 73), \
                 mock.patch.object(crow_core.subprocess, "Popen", Browser):
             return crow_core.tool_render_page(path)
@@ -14610,7 +14735,7 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
 
         def gl(free_mib=None, panel=False):
             seen.append((free_mib, panel))
-            return "swiftshader"
+            return "unavailable"
         self.gl = gl
         self.addCleanup(crow_core.render_panel_set, False)
         crow_core.render_panel_set(True)
@@ -14699,21 +14824,25 @@ class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
     und die WARN-Form, mit der beides vor die Pixel des Ergebnisses tritt."""
 
     def setUp(self) -> None:
-        self.src = inspect.getsource(crow_core.tool_render_page)
+        self.src = (inspect.getsource(crow_core.tool_render_page)
+                    + inspect.getsource(crow_core._render_page))   # #297
 
     # -- die Schalter ------------------------------------------------------
 
-    def test_the_swiftshader_pair_travels_with_disable_gpu(self):
-        """Chromium 144+ hat den automatischen SwiftShader-Fallback fuer
-        WebGL gestrichen (chromestatus "Remove SwiftShader fallback") --
-        ohne --enable-unsafe-swiftshader scheitert headless die
-        Kontexterzeugung, ohne --use-angle=swiftshader blieb rAF hier im
-        Versuchsstau (3 Frames je Budget, byte-gleiche Fangs).
-        --disable-gpu bleibt: SwiftShader ist Software, die Karte wird
-        nicht angefasst."""
-        self.assertIn("--enable-unsafe-swiftshader", self.src)
-        self.assertIn("--use-angle=swiftshader", self.src)
-        self.assertIn("--disable-gpu", self.src)
+    def test_no_backend_carries_the_swiftshader_pair(self):
+        """#293 (was #175-Nachtrag's "the SwiftShader pair travels"): Chrome
+        >= 137 deprecated the automatic WebGL-to-SwiftShader fallback, and
+        --enable-unsafe-swiftshader is its opt-in. render_page renders on
+        the GPU only now, so no backend may carry it. (Measured 2026-09-25:
+        Chromium 152 with --disable-gpu still fell back without the flag --
+        the renderer probe, TheRenderIsGpuOnlyTests, is the guard.)"""
+        for backend in ("vulkan", "default"):
+            flags = crow_platform.render_gpu_flags(backend)
+            self.assertIn("--use-gl=angle", flags)
+            for bad in ("--enable-unsafe-swiftshader", "--use-angle=swiftshader",
+                        "--disable-gpu"):
+                self.assertNotIn(bad, flags, backend)
+        self.assertIn("--use-angle=vulkan", crow_platform.render_gpu_flags("vulkan"))
 
     def test_console_logging_went_to_the_canonical_flag(self):
         """--v=0, nicht --log-level=0: die Verbositaet des Chromium-Loggers
@@ -15051,7 +15180,7 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
                 self.assertNotIn(escalation, low)
 
     def test_the_tool_uses_the_pipe_and_a_ceiling_that_does_not_follow_wait(self):
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("devtools_pipe", src)
         self.assertIn("--remote-debugging-pipe", src)
         self.assertIn("_render_over_devtools", src)
@@ -15073,7 +15202,7 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
         command-line screenshot, never reach _Devtools (whose select() takes
         sockets only there)."""
         self.assertIsNone(crow_platform.devtools_pipe())
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("--virtual-time-budget=", src)
         self.assertIn("--screenshot=", src)
 
@@ -15403,7 +15532,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
         self.assertEqual(api, {})
 
     def test_the_tool_puts_the_hints_under_the_warnings(self):
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("_console_hints(_console_lines(log_text, 0), api,", src)
         self.assertIn("api=api", src)
         self.assertLess(src.index("said = _capture_warnings("),
@@ -15638,10 +15767,116 @@ class ASmallSceneGetsAnEnlargedSecondViewTests(unittest.TestCase):
                                                      "flat-crop.png")))
 
     def test_render_page_puts_the_metrics_in_its_result(self):
-        src = inspect.getsource(crow_core.tool_render_page)
+        src = inspect.getsource(crow_core._render_page)     # #297: the body
         self.assertIn("_capture_metrics(shot, pixels)", src)
         self.assertLess(src.index("said.extend(metrics)"),
                         src.index('"read_image it to look at the page."'))
+
+
+class ReadFileRefusesBinaryTests(unittest.TestCase):
+    """#301. read_file handed a PNG back as 16,000 characters of mojibake: the
+    2026-09-25 lighthouse run read reference/island.png that way, blamed
+    read_image ("comes back as RAW BYTES") and saved that into MEMORY.md.
+    A binary file is now refused by its content, and the line names the tool
+    that can open it."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-bin-")
+        crow_core.take_image_ride()
+
+    def tearDown(self) -> None:
+        crow_core.take_image_ride()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, name: str, data: bytes) -> str:
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return path
+
+    def png(self, name="island.png", width=54, height=76) -> str:
+        data = ASmallSceneGetsAnEnlargedSecondViewTests._png(
+            width, height, lambda x, y: (x * 4 % 256, y * 3 % 256, 90))
+        return self.write(name, data)
+
+    def test_a_png_is_refused_with_its_size_and_read_image_named(self):
+        path = self.png()
+        out = crow_core.tool_read_file(path)
+        self.assertTrue(out.startswith("error: %s is a PNG image (54x76, "
+                                       % path), out)
+        self.assertIn("{:,} bytes".format(os.path.getsize(path)), out)
+        self.assertIn("read_file returns text only; use read_image to see it",
+                      out)
+        self.assertNotIn("\ufffd", out)
+        self.assertLess(len(out), 300)
+
+    def test_the_line_range_branch_refuses_too(self):
+        out = crow_core.tool_read_file(self.png(), start_line=1, end_line=5)
+        self.assertIn("is a PNG image", out)
+        self.assertNotIn("1: ", out)
+
+    def test_content_decides_not_the_extension(self):
+        out = crow_core.tool_read_file(self.png("island.dat"))
+        self.assertIn("is a PNG image", out)
+        self.assertIn("copy it to a .png name first", out)
+
+    def test_a_jpeg_header_is_an_image(self):
+        path = self.write("photo.jpg", b"\xff\xd8\xff\xe0\x00\x10JFIF\x00"
+                          + b"\x11" * 200)
+        out = crow_core.tool_read_file(path)
+        self.assertIn("is a JPEG image (", out)
+        self.assertIn("use read_image", out)
+
+    def test_a_pdf_names_pdftotext(self):
+        path = self.write("doc.pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n")
+        out = crow_core.tool_read_file(path)
+        self.assertIn("is a PDF document (", out)
+        self.assertIn("pdftotext", out)
+
+    def test_a_nul_in_the_first_8000_bytes_is_binary(self):
+        path = self.write("blob.bin", b"a" * 7000 + b"\x00" + b"b" * 100)
+        out = crow_core.tool_read_file(path)
+        self.assertIn("is a binary file (7,101 bytes, NUL bytes in its first "
+                      "8,000)", out)
+        self.assertIn("run_command", out)
+
+    def test_text_reads_as_before_even_split_utf8_at_the_edge(self):
+        """NEGATIVE PROBE (OpenHands#5038): a multi-byte character across the
+        sniff boundary, an ASCII 'GIF89a' opening and a NUL after the first
+        8,000 bytes are all still text."""
+        body = "x" * 7999 + "\u00e4\u00f6\u00fc gr\u00fc\u00dfe\n"
+        path = self.write("umlaut.md", body.encode("utf-8"))
+        self.assertEqual(crow_core.tool_read_file(path), body)
+        path = self.write("gif.txt", b"GIF89a is a header, not this file\n")
+        self.assertEqual(crow_core.tool_read_file(path),
+                         "GIF89a is a header, not this file\n")
+        path = self.write("late.txt", b"y" * 8000 + b"\x00")
+        self.assertTrue(crow_core.tool_read_file(path).startswith("yyy"))
+
+    def test_missing_files_and_directories_answer_as_before(self):
+        out = crow_core.tool_read_file(os.path.join(self.dir, "nope.txt"))
+        self.assertTrue(out.startswith("error: no such file:"), out)
+        self.assertIn("is a directory -- use list_dir",
+                      crow_core.tool_read_file(self.dir))
+
+    def test_the_declaration_says_read_image(self):
+        desc = next(t["function"]["description"] for t in crow_core.TOOLS
+                    if t["function"]["name"] == "read_file")
+        self.assertIn("binary file is refused", desc)
+        self.assertIn("read_image", desc)
+
+    def test_a_missing_crop_names_the_rule_and_the_frame(self):
+        """#301: the model asked twice for a -crop.png of a capture that
+        covered 68.6 %; the bare 'no such image' did not say why."""
+        frame = self.png("render-20260925-142722.png")
+        crop = frame[:-4] + "-crop.png"
+        out = crow_core.tool_read_image(crop)
+        self.assertIn("error: no such image: %s" % crop, out)
+        self.assertIn("only when the content covers under 50 %", out)
+        self.assertIn("read_image %s" % frame, out)
+        lone = os.path.join(self.dir, "render-1-crop.png")
+        self.assertEqual(crow_core.tool_read_image(lone),
+                         "error: no such image: %s" % lone)
 
 
 class ATurnsBillOutlivesTheCutTests(unittest.TestCase):
@@ -16035,12 +16270,13 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
         self.assertEqual(crow_core.rollover_note_split("frage"), (None, ""))
 
 
-class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
+class AFailedStepIsRetriedNotSkippedTests(unittest.TestCase):
     """#289. 2026-09-24, diorama run: step 4 went `failed` with an honest
     note (session.json msg 324), the answer named step 4 as `next_step`
     again (msg 325), and the run sat on it for ~2 h 20 min until robin
-    edited goal.json by hand. One retry with the note in the nudge, then
-    `skipped`, and the goal moves on."""
+    edited goal.json by hand. #294 (2026-09-25): a failed step is retried
+    with its note, and it is never skipped by the engine -- only robin
+    skips (`/goal skip`)."""
 
     def setUp(self):
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goalskip-"))
@@ -16060,24 +16296,25 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
     def status(self, n):
         return crow_core.goal_load()["steps"][n - 1]["status"]
 
-    def test_two_failures_skip_the_step_and_the_goal_moves_on(self):
-        """The ticket's unit: `goal_step(4, "failed")` twice -> step 4 is
-        `skipped` and `next_step` is 5."""
+    def test_two_failures_never_skip_the_step(self):
+        """#294 (replaces #289's skip): `goal_step(4, "failed")` twice keeps
+        step 4 the next step -- `failed`, never `skipped`. 2026-09-25: steps
+        5-8 were skipped this way (session.json msg 176/269/313/347)."""
         for n in (1, 2, 3):
             self.assertTrue(self.step(n, "done", "ok, checked")["ok"])
         first = self.step(4, "failed", "no GPU here to trace on")
         self.assertEqual(first["next_step"], 4, "one retry, not none")
-        self.assertIn("retry", first)
         self.assertEqual(self.status(4), "failed")
-        # The engine sets the step running before the retry, as it does live.
         crow_core.goal_step_begin(3)
+        self.step(4, "running", "reflection: the tracer needs a GPU path")
         second = self.step(4, "failed", "still no GPU")
-        self.assertEqual(self.status(4), "skipped")
-        self.assertEqual(second["next_step"], 5)
-        self.assertIn("skipped", second)
-        self.assertEqual(crow_core.goal_next_open(), 4)
-        self.assertEqual(crow_core.goal_counts(), (3, 5),
-                         "a skipped step counted as done")
+        self.assertEqual(self.status(4), "failed", "the second failure skipped")
+        self.assertEqual(second["next_step"], 4)
+        self.assertEqual(first["failure"]["action"], "reflect")
+        self.assertEqual(second["failure"]["action"], "fresh")
+        self.assertNotIn("skipped", second)
+        self.assertEqual(crow_core.goal_next_open(), 3)
+        self.assertEqual(crow_core.goal_skipped(), [])
 
     def test_the_retry_nudge_quotes_the_failure_note(self):
         self.step(1, "failed", "the parser grammar is ambiguous at line 12")
@@ -16094,8 +16331,7 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
     def test_a_goal_with_a_skipped_step_ends_partial_not_done(self):
         for n in (1, 2, 3):
             self.step(n, "done", "ok, checked")
-        self.step(4, "failed", "no GPU")
-        self.step(4, "failed", "no GPU")
+        crow_core.goal_command("skip 4 no GPU")
         out = self.step(5, "done", "ok, checked")
         goal = crow_core.goal_load()
         self.assertEqual(goal["status"], crow_core.GOAL_PARTIAL)
@@ -16103,8 +16339,9 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
         self.assertIsNone(out["next_step"])
         self.assertEqual(out["ended"], "complete with 1 skipped")
         self.assertIn("complete with 1 skipped", crow_core.goal_summary(goal))
-        # Taking a skipped step up again reopens the goal.
-        crow_core.goal_step_begin(3)
+        # robin takes his skip back: the goal reopens (#296).
+        said, goal, changed = crow_core.goal_command("redo 4")
+        self.assertTrue(changed, said)
         self.assertEqual(crow_core.goal_load()["status"], crow_core.GOAL_OPEN)
 
     def test_goal_skip_sets_skipped_with_the_users_note(self):
@@ -16152,6 +16389,449 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
         block = crow_core.goal_block(include_status=True)
         self.assertIn("4. [skipped] trace it", block)
         self.assertIn("Next: step 5. ship it", block)
+
+
+def _write_png(path, size=16, colour=None):
+    """A real PNG: a gradient with size*size distinct colours, or one
+    `colour` everywhere (a blank frame)."""
+    import zlib
+    rows = []
+    for y in range(size):
+        row = b"\x00"
+        for x in range(size):
+            px = colour if colour is not None else (
+                (x * 15) % 256, (y * 15) % 256, 128)
+            row += bytes(px)
+        rows.append(row)
+
+    def chunk(kind, body):
+        return (len(body).to_bytes(4, "big") + kind + body
+                + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+    head = size.to_bytes(4, "big") * 2 + bytes([8, 2, 0, 0, 0])
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                 + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+                 + chunk(b"IEND", b""))
+    return path
+
+
+def _checklist_reply(answers, overall=6):
+    return {"choices": [{"message": {"content": json.dumps({
+        "checklist": {k: {"answer": v, "evidence": "seen: %s" % v}
+                      for k, v in answers.items()},
+        "overall": overall, "weakest": ["dark"], "verdict": "ok"})}}]}
+
+
+class _GoalCase(unittest.TestCase):
+    """A goal in a temp working area, with the judge's HTTP mocked out."""
+
+    GOAL = ("Neon voxel diorama | plan it | build the scene | "
+            "animate the rain and steam")
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-ladder-"))
+        self.state = tempfile.mkdtemp(prefix="crow-ladder-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        # getattr: the red run against the code without #294/#295 must
+        # fail on behaviour, not on a missing name in setUp.
+        contracts = getattr(crow_core, "_RENDER_CONTRACTS", {})
+        self.addCleanup(contracts.clear)
+        contracts.clear()
+        limits = getattr(crow_core, "goal_limits_set", None)
+        if limits is not None:
+            self.addCleanup(limits, None, None)
+        crow_core.goal_command(self.GOAL)
+        self.seq = 0
+
+    def step(self, n, status, note="", **kw):
+        return json.loads(crow_core.tool_goal_step(n, status, note, **kw))
+
+    def capture(self, mode="gpu", colour=None, extra=""):
+        """A render_page result through run_tool's hook, as live."""
+        self.seq += 1
+        path = _write_png(os.path.join(crow_core._render_dir(),
+                                       "render-20260925-1000%02d.png" % self.seq),
+                          colour=colour)
+        gl = "gpu (angle)" if mode == "gpu" else "software (swiftshader)"
+        result = ("%s -- 800 bytes, 1280x720, done, %s\n%sread_image it to "
+                  "look at the page." % (path, gl, extra))
+        seen = getattr(crow_core, "goal_capture_seen", None)
+        if seen is not None:
+            seen(result, "index.html")
+        return path
+
+    def judge(self, answers=None, **kw):
+        sent = []
+
+        def urlopen(request, timeout=None):
+            sent.append(json.loads(request.data))
+            return _JudgeAnswer(_checklist_reply(answers or {}))
+        spot = {"provider": "openrouter", "model": "v/eyes", "remote": True,
+                "base_url": "https://example.invalid/v1", "api_key": "k",
+                "headers": {}, "transport": crow_core.TRANSPORT_CHAT,
+                "how": "the delegate spot"}
+        with mock.patch.object(crow_core, "judge_spots", return_value=[spot]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
+            out = json.loads(crow_core.tool_judge(**kw))
+        return out, sent
+
+    def goal(self):
+        return crow_core.goal_load()
+
+
+class AFailureHasAClassAndALadderTests(_GoalCase):
+    """#294. 2026-09-24/25 diorama run: steps 5-8 auto-skipped after two
+    `failed` each (goal.json `failures` 3/2/2/2, session.json msg 176/269/
+    313/347), judged on software-GL frames (msg 305/331/341/355). No step is
+    skipped by the engine now: environment failures retry twice and pause,
+    capability failures reflect, roll, split, then pause -- and every pause
+    asks robin."""
+
+    def test_software_captures_on_a_gpu_step_retry_twice_then_pause(self):
+        """The N4 case: a GPU step whose captures are software pauses on the
+        third environment failure, never reaches the judge model, never
+        skips."""
+        self.step(1, "done", "PLAN.md written")
+        self.step(2, "running")
+        actions = []
+        for _ in range(3):
+            self.capture(mode="software")
+            out, sent = self.judge()
+            self.assertEqual(sent, [], "the judge model was asked about a "
+                                       "software frame")
+            self.assertEqual(out["class"], "environment")
+            actions.append(out["action"])
+            # A second software frame before the engine's retry is the same
+            # attempt; the engine clears the rung when the retry goes out.
+            if out["action"] == "retry":
+                self.capture(mode="software")
+                self.assertEqual(self.judge()[0]["action"], "retry")
+                crow_core.goal_pending_clear(1, "retry")
+        self.assertEqual(actions, ["retry", "retry", "pause"])
+        goal = self.goal()
+        self.assertEqual(goal["status"], "paused")
+        self.assertEqual(goal["pause"]["step"], 2)
+        self.assertEqual(goal["pause"]["class"], "environment")
+        self.assertIn("software-rendered", goal["pause"]["why"])
+        self.assertEqual(crow_core.goal_skipped(goal), [])
+        self.assertEqual(goal["steps"][1]["status"], "running")
+
+    def test_render_mode_unavailable_is_an_environment_failure(self):
+        """#293's contract: no image, `error: ENVIRONMENT -- ...` and a
+        `render:` line. No judge can see it, so the render itself counts."""
+        self.step(2, "running")
+        crow_core.goal_capture_seen(
+            "error: ENVIRONMENT -- 186 MiB free on the GPU, 512 needed\n"
+            'render: {"render_mode": "unavailable", "renderer": null, '
+            '"frames": [], "contact_sheet": null, "precheck": null}',
+            "index.html")
+        step = self.goal()["steps"][1]
+        self.assertEqual(step["env_failures"], 1)
+        self.assertEqual(step["pending"], "retry")
+        self.assertIn("186 MiB free", step["fail_log"][-1]["why"])
+
+    def test_the_same_capture_counts_once(self):
+        self.step(2, "running")
+        self.capture(mode="software")
+        first, _ = self.judge()
+        again, _ = self.judge()
+        self.assertTrue(first["action"] == again["action"] == "retry")
+        self.assertEqual(self.goal()["steps"][1]["env_failures"], 1)
+
+    def test_a_blank_frame_is_the_environment_without_any_contract(self):
+        self.step(2, "running")
+        path = _write_png(os.path.join(crow_core._render_dir(),
+                                       "render-20260925-110000.png"),
+                          colour=(0, 0, 0))
+        out, sent = self.judge(images=path)
+        self.assertEqual(sent, [])
+        self.assertEqual(out["class"], "environment")
+        self.assertIn("one colour", out["precheck"])
+
+    def test_capability_goes_reflect_fresh_split_then_pause(self):
+        """Attempt 2 after a written reflection, attempt 3 in a fresh
+        context, then ADaPT's split, and a failed sub-step pauses. The
+        ladder is climbed once per attempt, not once per judge call."""
+        self.step(2, "running", checklist=["neon signs glow"])
+        self.capture()
+        no = {"delivers: build the scene": "yes", "neon signs glow": "no"}
+        out, sent = self.judge(no)
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(out["passes"])
+        self.assertEqual(out["failure"]["action"], "reflect")
+        # A second judge call in the same attempt does not climb.
+        self.capture()
+        out, _ = self.judge(no)
+        self.assertEqual(out["failure"], {"class": "capability",
+                                          "action": "reflect",
+                                          "counted": False})
+        self.assertTrue(self.step(2, "running",
+                                  "reflection: the emissive pass is never "
+                                  "added")["reflection"])
+        self.capture()
+        out, _ = self.judge(no)
+        self.assertEqual(out["failure"]["action"], "fresh")
+        crow_core.goal_pending_clear(1, "fresh")          # the engine rolled
+        self.capture()
+        out, _ = self.judge(no)
+        self.assertEqual(out["failure"]["action"], "decompose")
+        nudge = crow_core.goal_ladder_nudge(self.goal(), 1, "decompose")
+        self.assertIn("status='split'", nudge)
+        bad = self.step(2, "split", substeps=["one"])
+        self.assertFalse(bad["ok"])
+        split = self.step(2, "split", substeps=["emissive pass alone",
+                                                "bloom on top"])
+        self.assertTrue(split["ok"], split)
+        self.assertEqual(self.goal()["steps"][1]["pending"], "subs")
+        refused = self.step(2, "done", "render-20260925-100004.png")
+        self.assertIn("sub-step 2.1", refused["error"])
+        self.assertTrue(self.step(2, "done", "emissive pass renders", sub=1)["ok"])
+        out = self.step(2, "failed", "bloom kills the frame", sub=2)
+        self.assertIn("PAUSED", out["paused"])
+        goal = self.goal()
+        self.assertEqual(goal["status"], "paused")
+        self.assertIn("sub-step 2.2 failed", goal["pause"]["why"])
+        self.assertEqual(crow_core.goal_skipped(goal), [])
+
+    def test_the_models_failed_on_a_software_capture_is_environment(self):
+        self.step(2, "running")
+        self.capture(mode="software")
+        out = self.step(2, "failed", "ray lighting cannot be seen here")
+        self.assertEqual(out["failure"]["class"], "environment")
+        self.assertEqual(out["failure"]["action"], "retry")
+        # GEGENPROBE: on a GPU capture the same note is capability.
+        crow_core.goal_step_begin(1)
+        self.capture(mode="gpu")
+        out = self.step(2, "failed", "ray lighting cannot be seen here")
+        self.assertEqual(out["failure"]["class"], "capability")
+
+    def test_a_css_page_in_software_is_no_environment_failure(self):
+        """Software GL is only the environment failing on a GPU step."""
+        crow_core.goal_command("Landing page | write the page | style it")
+        self.step(1, "running")
+        self.capture(mode="software")
+        out, sent = self.judge({"delivers: write the page": "yes",
+                                crow_core.GOAL_CHECK_DEFAULT_FRAME: "yes"})
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(out["passes"], out)
+
+    def test_a_pause_reports_and_asks_and_only_a_line_resumes(self):
+        self.step(2, "running")
+        crow_core.goal_pause(1, "budget", "step 2 has run 61 min")
+        goal = self.goal()
+        nudge = crow_core.goal_pause_nudge(goal)
+        for part in ("PAUSED at step 2 (budget)", "Do not call any tools",
+                     "What you identified", "Why you cannot proceed",
+                     "Two or three concrete proposals",
+                     "Ask robin whether he has further input"):
+            self.assertIn(part, nudge)
+        self.assertIsNone(goal["steps"][1]["started"], "the clock runs on")
+        self.assertIn("PAUSED at step 2", crow_core.goal_summary(goal))
+        # Paused: the model can move nothing, nor replace the plan.
+        self.assertFalse(self.step(2, "done", "x.png")["ok"])
+        self.assertFalse(json.loads(crow_core.tool_goal_set(
+            "other", ["a", "b"]))["ok"])
+        self.assertIn("PAUSED", self.judge()[0]["error"])
+        crow_core.goal_pause_report("1. found X 2. cannot 3. A/B 4. input?")
+        self.assertIn("found X", self.goal()["pause"]["report"])
+        resumed = crow_core.goal_resume()
+        self.assertEqual(resumed["status"], "open")
+        self.assertNotIn("pause", resumed)
+        self.assertEqual(resumed["last_pause"]["class"], "budget")
+        self.assertIsNone(crow_core.goal_resume(), "resumed twice")
+
+    def test_the_step_budget_is_wall_clock_since_the_last_resume(self):
+        self.step(2, "running")
+        goal = self.goal()
+        step = goal["steps"][1]
+        at = step["started"]
+        self.assertIsNone(crow_core.goal_budget_due(goal, 1, now=at + 59 * 60))
+        self.assertIn("over its budget of 60 min",
+                      crow_core.goal_budget_due(goal, 1, now=at + 61 * 60))
+        crow_core.goal_limits_set(90, None)
+        self.assertIsNone(crow_core.goal_budget_due(goal, 1, now=at + 61 * 60))
+        with mock.patch.dict(os.environ, {"CROW_GOAL_STEP_MINUTES": "0"}):
+            self.assertIsNone(crow_core.goal_budget_due(goal, 1,
+                                                        now=at + 9e5))
+        with mock.patch.dict(os.environ, {"CROW_GOAL_NO_PROGRESS_TURNS": "4"}):
+            self.assertEqual(crow_core.goal_no_progress_turns(), 4)
+        crow_core.goal_limits_set(None, None)
+        crow_core.goal_pause(1, "budget", "over", now=at + 61 * 60)
+        resumed = crow_core.goal_resume()
+        self.assertEqual(resumed["steps"][1]["budget_base"],
+                         resumed["steps"][1]["seconds"])
+        self.assertIsNone(crow_core.goal_budget_due(
+            resumed, 1, now=at + 70 * 60))
+
+
+class TheJudgeChecksAFrozenChecklistTests(_GoalCase):
+    """#295. 2026-09-25, steps 5-8: every judge call carried criteria the
+    model wrote at judge time (session.json msg 202-345), scored 1-10 on one
+    frame, with no way to say "cannot tell". The checklist is frozen when the
+    step starts; the judge answers yes/no/unknown on the render's frames."""
+
+    def test_accept_lines_freeze_the_checklist_at_step_start(self):
+        crow_core.goal_command(self.GOAL + " | accept: 2: neon signs glow, "
+                                           "wet ground | accept: no black frame")
+        self.step(2, "running")
+        items = [c["item"] for c in crow_core.goal_checklist(self.goal(), 1)]
+        self.assertEqual(items, ["neon signs glow", "wet ground",
+                                 "no black frame"])
+        self.assertEqual(self.goal()["steps"][1]["checklist_from"],
+                         "the user's accept lines")
+        out = self.step(2, "running", checklist=["looks nice"])
+        self.assertIn("frozen", out["checklist_error"])
+        self.step(3, "running")
+        self.assertEqual([c["item"] for c in crow_core.goal_checklist(
+            self.goal(), 2)], ["no black frame"])
+        # A replan by the model keeps the frozen contract.
+        crow_core.tool_goal_set("again", ["plan it", "build the scene", "x"])
+        self.assertEqual(len(crow_core.goal_checklist(self.goal(), 1)), 3)
+
+    def test_the_model_writes_its_checklist_once_behind_the_step(self):
+        out = self.step(2, "running", checklist=["neon signs glow",
+                                                 "optional: fog"])
+        self.assertEqual(out["checklist"], ["delivers: build the scene",
+                                            "neon signs glow", "optional: fog"])
+        again = self.step(2, "running", checklist=["anything"])
+        self.assertIn("frozen", again["checklist_error"])
+
+    def test_pass_needs_every_must_item_yes_and_done_reads_it(self):
+        self.step(2, "running", checklist=["neon signs glow", "optional: fog"])
+        cap = self.capture()
+        refused = self.step(2, "done", cap)
+        self.assertIn("no judge verdict", refused["error"])
+        out, sent = self.judge({"delivers: build the scene": "yes",
+                                "neon signs glow": "yes", "fog": "no"})
+        prompt = sent[0]["messages"][0]["content"][0]["text"]
+        self.assertIn("- neon signs glow", prompt)
+        self.assertIn("- fog (optional)", prompt)
+        self.assertIn("yes, no or unknown", prompt)
+        self.assertTrue(out["passes"], out)
+        self.assertEqual(out["checklist"]["fog"], "no")
+        self.assertTrue(self.step(2, "done", cap)["ok"])
+
+    def test_a_no_refuses_done_and_unknown_twice_pauses(self):
+        self.step(2, "running", checklist=["neon signs glow"])
+        cap = self.capture()
+        self.judge({"delivers: build the scene": "yes",
+                    "neon signs glow": "no"})
+        self.assertIn("neon signs glow: no", self.step(2, "done", cap)["error"])
+        crow_core.goal_resume()
+        unknown = {"delivers: build the scene": "yes",
+                   "neon signs glow": "unknown"}
+        self.step(2, "running", "reflection: x")
+        out, _ = self.judge(unknown)
+        self.assertEqual(out["failure"]["class"], "unknown")
+        self.assertIn("second 'unknown' pauses", out["next"])
+        out, _ = self.judge(unknown)
+        self.assertEqual(out["failure"]["action"], "pause")
+        self.assertEqual(self.goal()["pause"]["class"], "unknown")
+
+    def test_frames_go_to_the_judge_and_frozen_frames_on_motion_are_env(self):
+        self.step(3, "running")
+        frames = [_write_png(os.path.join(crow_core._render_dir(),
+                                          "frame-%d.png" % k))
+                  for k in range(4)]
+        contract = json.dumps({"render_mode": "gpu", "renderer": "angle",
+                               "frames": frames,
+                               "precheck": {"uniform": False,
+                                            "identical_frames": False}})
+        self.capture(extra="render: %s\n" % contract)
+        out, sent = self.judge({"delivers: animate the rain and steam": "yes",
+                                crow_core.GOAL_CHECK_DEFAULT_FRAME: "yes"})
+        parts = sent[0]["messages"][0]["content"]
+        self.assertEqual([p["type"] for p in parts], ["text"] + ["image_url"] * 4)
+        self.assertIn("clock-stepped frames", parts[0]["text"])
+        self.assertTrue(out["passes"])
+        frozen = json.dumps({"render_mode": "gpu", "frames": frames,
+                             "precheck": {"identical_frames": True,
+                                          "max_frame_diff": 0}})
+        self.capture(extra="render: %s\n" % frozen)
+        out, sent = self.judge()
+        self.assertEqual(sent, [])
+        self.assertIn("needs motion", out["precheck"])
+
+    def test_the_contract_reads_json_key_value_and_the_legacy_line(self):
+        c = crow_core.render_contract(
+            "/r/render-1.png -- 9 bytes, 1x1, done, gpu (angle)\n"
+            "render_mode: unavailable\ncontact_sheet: /r/sheet.png\n"
+            'precheck: {"uniform": true, "dark_pct": 99.5}')
+        self.assertEqual(c["render_mode"], "unavailable")
+        self.assertEqual(c["renderer"], "angle")
+        self.assertEqual(c["contact_sheet"], "/r/sheet.png")
+        self.assertTrue(c["precheck"]["uniform"])
+        self.assertEqual(c["capture"], "/r/render-1.png")
+        self.assertEqual(crow_core.render_contract(
+            "/r/x.png -- 9 bytes, done, software (swiftshader)")["render_mode"],
+            "software")
+        self.assertIsNone(crow_core.render_contract("error: timed out"))
+        self.assertIn("unavailable", crow_core.capture_precheck(
+            [], c, self.goal(), 1))
+
+    def test_a_reference_image_is_sent_pairwise_and_advisory(self):
+        ref = _write_png(os.path.join(self.root, "reference.png"))
+        said, _g, changed = crow_core.goal_command(
+            self.GOAL + " | reference: reference.png -- lighting mood")
+        self.assertTrue(changed, said)
+        self.assertIn("1 reference image", said)
+        self.assertEqual(crow_core.goal_references(),
+                         [{"path": ref, "criterion": "lighting mood"}])
+        said, _g, changed = crow_core.goal_command(
+            self.GOAL + " | reference: nope.png")
+        self.assertFalse(changed)
+        self.assertIn("no such reference image", said)
+        self.step(2, "running")
+        self.capture()
+        item = "as good as the reference image reference.png on: lighting mood"
+        out, sent = self.judge({"delivers: build the scene": "yes",
+                                crow_core.GOAL_CHECK_DEFAULT_FRAME: "yes",
+                                item: "no"})
+        self.assertTrue(out["passes"], "an advisory reference item gated")
+        parts = sent[0]["messages"][0]["content"]
+        self.assertIn("REFERENCE image", parts[0]["text"])
+        self.assertIn("- %s (optional)" % item, parts[0]["text"])
+        self.assertEqual(len(parts), 3, "capture + reference")
+        crow_core.goal_command("off")
+        self.assertEqual(crow_core.goal_references(), [])
+
+
+class ASkipIsNeverStoredAsDoneTests(_GoalCase):
+    """#296. goal.json of 2026-09-24/25: step 4 `done` with the note
+    "skipped by robin (2026-09-24 ~22:00): ray lighting is not verifiable"
+    -- a hand edit before `/goal skip` existed, counted 5/9."""
+
+    def test_a_done_step_whose_note_says_skipped_loads_as_skipped(self):
+        goal = self.goal()
+        goal["steps"][1].update(status="done", note=(
+            "skipped by robin (2026-09-24 ~22:00): ray lighting is not "
+            "verifiable on this machine's software GL"))
+        goal["steps"][2].update(status="done", note="built; nothing skipped")
+        crow_core.goal_write(goal)
+        loaded = self.goal()
+        self.assertEqual(loaded["steps"][1]["status"], "skipped")
+        self.assertEqual(loaded["steps"][1]["skipped_by"], "user")
+        self.assertEqual(loaded["steps"][2]["status"], "done")
+        self.assertEqual(crow_core.goal_counts(loaded), (1, 3))
+
+    def test_the_model_cannot_undo_robins_skip_and_redo_can(self):
+        crow_core.goal_command("skip 2 not here")
+        for status in ("done", "running"):
+            out = self.step(2, status, "render-x.png")
+            self.assertFalse(out["ok"])
+            self.assertIn("/goal redo 2", out["error"])
+        said, goal, changed = crow_core.goal_command("redo 2")
+        self.assertTrue(changed)
+        self.assertEqual(goal["steps"][1]["status"], "open")
+        self.assertNotIn("skipped_by", goal["steps"][1])
+        said, _g, changed = crow_core.goal_command("redo 2")
+        self.assertFalse(changed)
+        self.assertIn("not skipped", said)
 
 
 class GoalDoneNeedsEvidenceTests(unittest.TestCase):
@@ -16441,7 +17121,10 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
 
     # -- the whole call ------------------------------------------------------
 
-    def test_the_judge_sees_one_message_and_its_scores_land_on_the_step(self):
+    def test_the_judge_sees_one_message_and_its_answers_land_on_the_step(self):
+        """#295: the verdict is the frozen checklist answered yes/no/unknown;
+        a judge that still answers in 1-10 scores is read against the
+        threshold."""
         crow_core.goal_command("Neon diorama | plan it | build the scene")
         crow_core.tool_goal_step(2, "running")
         self.capture(crop=True)
@@ -16450,18 +17133,18 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
         def urlopen(request, timeout=None):
             sent.append((request.full_url, json.loads(request.data)))
             return _JudgeAnswer(_judge_reply({"delivers: build the scene": 7,
-                                              "x": 2, "y": 3}))
+                                              "x": 2, "y": 9}))
         with mock.patch.object(crow_core, "judge_spots",
                                return_value=[dict(self.spot("v/eyes"),
                                                   how="the delegate spot")]), \
                 mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
             out = json.loads(crow_core.tool_judge(criteria="x, y"))
         self.assertTrue(out["ok"], out)
-        self.assertEqual(out["min"], 2)
         self.assertFalse(out["passes"])
         self.assertEqual(out["step"], 2)
-        self.assertEqual(out["rubric_from"], "the step + the caller")
-        self.assertIn("delivers: build the scene", out["scores"])
+        self.assertEqual(out["checklist_from"], "the first judge call")
+        self.assertEqual(out["checklist"], {"delivers: build the scene": "no",
+                                            "x": "no", "y": "yes"})
         url, body = sent[0]
         self.assertTrue(url.endswith("/chat/completions"))
         self.assertEqual(len(body["messages"]), 1)
@@ -16472,13 +17155,21 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
         self.assertIn("enlarged crop", parts[0]["text"])
         self.assertNotIn("min_p", body)             # remote_body ran
         stored = crow_core.goal_load()["steps"][1]["judge"]
-        self.assertEqual(stored["min"], 2)
+        self.assertFalse(stored["pass"])
         self.assertEqual(stored["model"], "openrouter/v/eyes")
         # #286: the verdict says what was judged, the step's own text first.
         self.assertEqual(stored["criteria"],
                          ["delivers: build the scene", "x", "y"])
-        self.assertEqual(stored["rubric_source"], "the step + the caller")
         self.assertIn("- delivers: build the scene", parts[0]["text"])
+        # #295: the checklist is frozen now -- the next call's criteria
+        # change nothing.
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[dict(self.spot("v/eyes"),
+                                                  how="the delegate spot")]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
+            again = json.loads(crow_core.tool_judge(criteria="z"))
+        self.assertEqual(sorted(again["checklist"]),
+                         ["delivers: build the scene", "x", "y"])
 
     def test_a_dead_spot_falls_through_and_a_blind_local_server_refuses(self):
         self.capture()
@@ -18377,6 +19068,10 @@ class BuildBundleTests(unittest.TestCase):
         os.environ["FAKE_ARGV_LOG"] = self.argv_log
         for key in ("FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS", "FAKE_ORPHAN_PID"):
             os.environ.pop(key, None)
+        # No kit unless a case asks for it (the module preamble points it
+        # nowhere): the kit's two aliases would sit in every argv compared below.
+        self._kit = _REAL_KIT
+        self.addCleanup(setattr, crow_core, "PATHTRACER_KIT", crow_core.PATHTRACER_KIT)
 
     def tearDown(self):
         os.chdir(self._old)
@@ -18603,6 +19298,62 @@ class BuildBundleTests(unittest.TestCase):
         inline = [c for c in calls if c["stdin"] is not None][0]
         self.assertEqual(inline["stdin"], "import './main.js';")
         self.assertEqual(os.path.realpath(inline["cwd"]), os.path.realpath(self.root))
+
+    def test_the_kit_names_reach_esbuild_as_aliases_of_the_installed_kit(self):
+        """#298: `import ... from 'crow-voxel-kit'` resolves to the kit in
+        <install>/kits/pathtracer -- no copy of the library in the working area,
+        no import map for the model to get right."""
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        crow_core.PATHTRACER_KIT = self._kit
+        self._write("src/scene.js", "import { VoxelGrid } from 'crow-voxel-kit';\n")
+        self._write("src/index.html", "<html><head></head><body>"
+                                      "<script type=\"module\" src=\"scene.js\"></script></body></html>")
+        out = crow_core.tool_build_bundle("src/index.html", "index.html")
+        self.assertIn("0 error(s)", out)
+        aliases = [a for a in self._calls()[0]["argv"] if a.startswith("--alias:")]
+        self.assertEqual(aliases, [
+            "--alias:crow-pathtracer=" + os.path.join(self._kit, "crow-pathtracer.js"),
+            "--alias:crow-voxel-kit=" + os.path.join(self._kit, "voxel-kit.js")])
+        # a module entry gets them too
+        crow_core.tool_build_bundle("src/scene.js", "scene.iife.js", global_name="S")
+        self.assertIn("--alias:crow-voxel-kit=" + os.path.join(self._kit, "voxel-kit.js"),
+                      self._calls()[1]["argv"])
+
+    def test_a_page_import_map_beats_the_kit_name_and_no_kit_means_no_alias(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        crow_core.PATHTRACER_KIT = self._kit
+        self._write("index.src.html", (
+            "<html><head><script type=\"importmap\">{\"imports\": "
+            "{\"crow-voxel-kit\": \"./my-kit.js\"}}</script></head><body>"
+            "<script type=\"module\">import 'crow-voxel-kit';</script></body></html>"))
+        crow_core.tool_build_bundle("index.src.html", "index.html")
+        argv = self._calls()[0]["argv"]
+        self.assertIn("--alias:crow-voxel-kit=" + os.path.join(self.root, "my-kit.js"), argv)
+        crow_core.PATHTRACER_KIT = os.path.join(self.caches, "no-kit")
+        self.assertEqual(crow_core.kit_aliases(), {})
+
+    def test_the_real_esbuild_builds_the_kit_scaffold_into_one_offline_page(self):
+        """ONE REAL RUN of the shipped scaffold, skipped where no esbuild exists:
+        the page must come out import-free with the kit, the library and its
+        licence comment inside."""
+        os.environ["PATH"] = self._saved[2] or ""
+        crow_core._esbuild_caches = self._saved[1]
+        exe = crow_core.find_esbuild(self.root)[0]
+        if not exe:
+            self.skipTest("no esbuild on this machine")
+        crow_core.PATHTRACER_KIT = self._kit
+        for name in ("index.html", "scene.js"):
+            with open(os.path.join(self._kit, "scaffold", name), encoding="utf-8") as fh:
+                self._write(os.path.join("src", name), fh.read())
+        out = crow_core.tool_build_bundle("src/index.html", "index.html")
+        self.assertIn("0 error(s), 0 warning(s)", out)
+        self.assertIn("self-contained", out)
+        with open(os.path.join(self.root, "index.html"), encoding="utf-8") as fh:
+            page = fh.read()
+        self.assertNotIn("type=\"module\"", page)
+        self.assertIn("[crow-pt]", page)                 # the kit's probe line
+        self.assertIn("@license", page)                  # three.js's notice travels along
+        self.assertGreater(len(page), 500_000)           # the library is inside
 
     def test_a_module_entry_to_a_page_says_the_page_is_bare_and_names_the_exports(self):
         """#212 follow-up, the .js-entry trap: diorama's src/app.js bundled to an
@@ -20296,17 +21047,19 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         nicht auf eine Karte raten, die er nicht lesen konnte."""
         self._env("CROW_RENDER_GL", "angle")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=0), "angle")
+        # #293: a software pin is a refusal now, never software pixels.
         self._env("CROW_RENDER_GL", "swiftshader")
-        self.assertEqual(crow_platform.render_gl_mode(free_mib=99999), "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=99999), "unavailable")
+        self.assertIn("renders on the GPU only", crow_platform.render_gl_reason(99999))
         self._env("CROW_RENDER_GL", "")
-        self.assertEqual(crow_platform.render_gl_mode(free_mib=511), "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=511), "unavailable")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=512), "angle")
         # free_mib=None heisst FRAGEN -- und eine Frage ohne Antwort (die
         # Karte nicht lesbar) ist Software, nie ein Raten.
         real = crow_platform.gpu_free_mib
         crow_platform.gpu_free_mib = lambda: None
         self.addCleanup(setattr, crow_platform, "gpu_free_mib", real)
-        self.assertEqual(crow_platform.render_gl_mode(), "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(), "unavailable")
         crow_platform.gpu_free_mib = lambda: 4096
         self.assertEqual(crow_platform.render_gl_mode(), "angle")
 
@@ -20317,11 +21070,11 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         the panel open the bound is 1,536; without it #213's 512 stands."""
         self._env("CROW_RENDER_GL", "")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=True),
-                         "swiftshader")
+                         "unavailable")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=False),
                          "angle")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=1535, panel=True),
-                         "swiftshader")
+                         "unavailable")
         self.assertEqual(crow_platform.render_gl_mode(free_mib=1536, panel=True),
                          "angle")
         why = crow_platform.render_gl_reason(free_mib=560, panel=True)
@@ -22307,6 +23060,671 @@ class ConversationFreshTests(unittest.TestCase):
         self.assertFalse(talk.fresh)
 
 
+class TheRenderIsGpuOnlyTests(unittest.TestCase):
+    """#293. The 2026-09-24/25 diorama run (16 hours): 35 of 42 surviving
+    render_page results were `software (swiftshader)` at 51-317 MiB free, a
+    1-spp path tracer captured as one still of CPU noise, and nothing in the
+    result was an error. robin's rule of 2026-09-25: the card or no image,
+    the renderer read from the browser, frames at controlled page time,
+    and cheap pixel checks as fields. The CDP peer is
+    TheRenderBudgetCanBeMetTests' stand-in; no browser starts here."""
+
+    # TheRenderBudgetCanBeMetTests' peer, borrowed (not inherited: its own
+    # cases would run twice).
+    PNG = TheRenderBudgetCanBeMetTests.PNG
+    setUp = TheRenderBudgetCanBeMetTests.setUp
+    tearDown = TheRenderBudgetCanBeMetTests.tearDown
+    _peer = TheRenderBudgetCanBeMetTests._peer
+    _browser = TheRenderBudgetCanBeMetTests._browser
+    methods = TheRenderBudgetCanBeMetTests.methods
+
+    CARD = ("NVIDIA GeForce RTX 5090", 32607)
+    NVIDIA = "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 5090/PCIe/SSE2, Vulkan 1.4.312)"
+    SWIFT = ("ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) "
+             "(0x0000C0DE)), SwiftShader driver)")
+
+    def _gpu_browser(self, renderer, after=None, clock=True):
+        """The peer, plus answers for the renderer probe (`renderer`, then
+        `after` once a capture was taken) and for __crowClock.runFor."""
+        import base64 as _b64
+        base = self._browser()
+        shots = []
+
+        def answer(msg):
+            method, mid = msg.get("method"), msg.get("id")
+            if method == "Runtime.evaluate":
+                expr = msg["params"]["expression"]
+                if "UNMASKED_RENDERER_WEBGL" in expr:
+                    r = after if (shots and after is not None) else renderer
+                    return [{"id": mid, "sessionId": "S1", "result": {"result": {
+                        "type": "object", "value": {"renderer": r, "why": "" if r else
+                                                    "getContext returned null"}}}}]
+                if "__crowClock" in expr:
+                    val = ({"type": "number", "value": 250 * (len(shots) + 1)}
+                           if clock else {"type": "object", "subtype": "null",
+                                          "value": None})
+                    return [{"id": mid, "sessionId": "S1", "result": {"result": val}}]
+            if method == "Page.captureScreenshot":
+                shots.append(mid)
+                return [{"id": mid, "sessionId": "S1", "result": {
+                    "data": _b64.b64encode(self.PNG + bytes([len(shots)])).decode()}}]
+            return base(msg)
+        return answer
+
+    def _check(self, renderer, why):
+        return crow_platform.render_renderer_verdict(renderer, why, card=self.CARD)
+
+    def _gpu_run(self, renderer, frames=1, **kw):
+        dt, _ = self._peer(self._gpu_browser(renderer, **kw))
+        seen: dict = {}
+        got = crow_core._render_over_devtools(
+            dt, "file:///x/index.html", 640, 360, 200, self.shot,
+            load_s=0.6, capture_s=0.6, check_gpu=self._check, seen=seen,
+            frames=frames, frame_ms=250)
+        return got, seen
+
+    # -- the renderer, read from the browser --------------------------------
+
+    def test_a_software_renderer_is_refused_before_the_page_loads(self):
+        (captured, reason), seen = self._gpu_run(self.SWIFT)
+        self.assertFalse(captured)
+        self.assertIn("software rasterer", reason)
+        self.assertIn("SwiftShader", reason)
+        self.assertEqual(seen["renderer"], self.SWIFT)
+        self.assertEqual(seen["rejected"], reason)
+        m = self.methods()
+        self.assertNotIn("Page.navigate", m)
+        self.assertNotIn("Page.captureScreenshot", m)
+        self.assertFalse(os.path.exists(self.shot))
+
+    def test_no_webgl_context_is_refused_with_its_reason(self):
+        (captured, reason), seen = self._gpu_run(None)
+        self.assertFalse(captured)
+        self.assertIn("no WebGL context", reason)
+        self.assertIn("getContext returned null", reason)
+        self.assertIsNone(seen["renderer"])
+
+    def test_the_card_captures_and_is_asked_before_and_after(self):
+        (captured, reason), seen = self._gpu_run(self.NVIDIA)
+        self.assertTrue(captured, reason)
+        self.assertEqual(seen["renderer"], self.NVIDIA)
+        self.assertNotIn("rejected", seen)
+        m = self.methods()
+        probes = [i for i, x in enumerate(self.seen)
+                  if x.get("method") == "Runtime.evaluate"
+                  and "UNMASKED_RENDERER_WEBGL" in x["params"]["expression"]]
+        self.assertEqual(len(probes), 2)
+        self.assertLess(probes[0], m.index("Page.navigate"))
+        self.assertGreater(probes[1], m.index("Page.captureScreenshot"))
+
+    def test_a_context_lost_during_the_capture_is_refused(self):
+        (captured, reason), seen = self._gpu_run(self.NVIDIA, after=None)
+        self.assertTrue(captured, reason)          # after=None: same renderer
+        self.seen.clear()
+        (captured, reason), seen = self._gpu_run(self.NVIDIA, after="")
+        self.assertFalse(captured)
+        self.assertTrue(reason.startswith("after the capture:"), reason)
+
+    def test_the_verdict_on_renderer_strings(self):
+        v = crow_platform.render_renderer_verdict
+        self.assertIsNone(v(self.NVIDIA, card=self.CARD))
+        for soft in (self.SWIFT, "llvmpipe (LLVM 19.1.7, 256 bits)",
+                     "ANGLE (Mesa, lavapipe, Vulkan 1.4)",
+                     "ANGLE (Microsoft, Microsoft Basic Render Driver, D3D11)"):
+            self.assertIn("software rasterer", v(soft, card=self.CARD), soft)
+            self.assertIn("software rasterer", v(soft, card=False), soft)
+        self.assertIn("not on the NVIDIA GeForce RTX 5090",
+                      v("ANGLE (Intel, Mesa Intel(R) Graphics, OpenGL 4.6)",
+                        card=self.CARD))
+        self.assertIsNone(v("ANGLE (AMD, Radeon RX 7900, Vulkan)", card=False))
+        self.assertIn("no WebGL context", v(None, "boom", card=self.CARD))
+
+    # -- frames at controlled page time ---------------------------------------
+
+    def test_frames_step_page_time_then_capture_each(self):
+        (captured, reason), _ = self._gpu_run(self.NVIDIA, frames=4)
+        self.assertTrue(captured, reason)
+        self.assertIn("4 frames 250 ms of page time apart", reason)
+        m = self.methods()
+        self.assertLess(m.index("Page.addScriptToEvaluateOnNewDocument"),
+                        m.index("Page.navigate"))
+        installed = [x for x in self.seen if x.get("method")
+                     == "Page.addScriptToEvaluateOnNewDocument"][0]
+        self.assertIn("__crowClock", installed["params"]["source"])
+        steps = [x.get("method") if x.get("method") != "Runtime.evaluate" else
+                 ("runFor" if "runFor(250)" in x["params"]["expression"] else "probe")
+                 for x in self.seen[m.index("Page.navigate"):]]
+        steps = [x for x in steps if x in ("runFor", "Page.captureScreenshot")]
+        self.assertEqual(steps, ["runFor", "Page.captureScreenshot"] * 4)
+        run = [x for x in self.seen if x.get("method") == "Runtime.evaluate"
+               and "runFor" in x["params"]["expression"]][0]
+        self.assertTrue(run["params"]["awaitPromise"])
+        paths = [crow_core._frame_path(self.shot, i) for i in range(4)]
+        self.assertEqual(paths[0], self.shot)
+        self.assertTrue(paths[3].endswith("shot-f4.png"), paths[3])
+        blobs = []
+        for p in paths:
+            with open(p, "rb") as fh:
+                blobs.append(fh.read())
+        self.assertEqual(len(set(blobs)), 4)
+
+    def test_one_frame_installs_no_clock(self):
+        (captured, reason), _ = self._gpu_run(self.NVIDIA, frames=1)
+        self.assertTrue(captured, reason)
+        m = self.methods()
+        self.assertNotIn("Page.addScriptToEvaluateOnNewDocument", m)
+        self.assertFalse(any("runFor" in x["params"].get("expression", "")
+                             for x in self.seen if x.get("method") == "Runtime.evaluate"))
+
+    def test_a_page_without_the_clock_is_a_reason(self):
+        (captured, reason), _ = self._gpu_run(self.NVIDIA, frames=2, clock=False)
+        self.assertFalse(captured)
+        self.assertIn("frame 1 of 2", reason)
+        self.assertIn("no Crow clock", reason)
+
+
+class TheRenderPrecheckTests(unittest.TestCase):
+    """#293. The pixel checks and the contact sheet, on synthetic PNGs
+    decoded by the same _png_pixels the tool uses."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-pre-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    @staticmethod
+    def _img(w, h, pixel):
+        rows = [b"".join(bytes(pixel(x, y)) for x in range(w)) for y in range(h)]
+        return crow_core._png_pixels(crow_core._png_encode(w, h, 2, rows))
+
+    def _scene(self, dx=0):
+        """A lit gradient with a white square at x 10+dx."""
+        return self._img(80, 60, lambda x, y: (
+            (255, 255, 255) if 10 + dx <= x < 30 + dx and 20 <= y < 40
+            else ((x * 3) % 256, (y * 4) % 256, (x + y) % 256)))
+
+    def test_identical_frames_say_no_motion(self):
+        a = self._scene()
+        pre = crow_core.render_precheck([a, a, a, a])
+        self.assertEqual(pre["max_frame_diff"], 0.0)
+        self.assertIs(pre["identical_frames"], True)
+        self.assertFalse(pre["uniform"])
+        self.assertTrue(any("no motion" in w for w in crow_core._precheck_warnings(pre)))
+
+    def test_a_moving_square_is_motion(self):
+        pre = crow_core.render_precheck([self._scene(0), self._scene(10),
+                                         self._scene(20), self._scene(30)])
+        self.assertGreater(pre["max_frame_diff"], 0.5)
+        self.assertIs(pre["identical_frames"], False)
+        self.assertFalse(any("no motion" in w for w in crow_core._precheck_warnings(pre)))
+
+    def test_one_frame_has_no_frame_verdict(self):
+        pre = crow_core.render_precheck([self._scene()])
+        self.assertIsNone(pre["max_frame_diff"])
+        self.assertIsNone(pre["identical_frames"])
+        self.assertEqual(set(pre), {"uniform", "distinct_colours", "one_colour_pct",
+                                    "dark_pct", "clipped_pct", "max_frame_diff",
+                                    "identical_frames"})
+
+    def test_black_is_uniform_and_dark_white_is_clipped(self):
+        black = crow_core.render_precheck([self._img(40, 30, lambda x, y: (0, 0, 0))])
+        self.assertTrue(black["uniform"])
+        self.assertEqual(black["dark_pct"], 100.0)
+        self.assertEqual(black["one_colour_pct"], 100.0)
+        self.assertEqual(black["distinct_colours"], 1)
+        warns = crow_core._precheck_warnings(black)
+        self.assertTrue(any("near-uniform" in w for w in warns), warns)
+        self.assertTrue(any("near-black" in w for w in warns), warns)
+        # #268's stuck counter must not read a precheck line as its own.
+        for w in warns:
+            for mark in crow_core._RENDER_STUCK_WARNS:
+                self.assertNotIn(mark, w)
+        white = crow_core.render_precheck([self._img(40, 30, lambda x, y: (255, 252, 250))])
+        self.assertEqual(white["clipped_pct"], 100.0)
+        self.assertEqual(white["dark_pct"], 0.0)
+        self.assertIsNone(crow_core.render_precheck([None]))
+
+    def test_the_contact_sheet_is_2x2_at_half_size(self):
+        colours = [(200, 0, 0), (0, 200, 0), (0, 0, 200), (200, 200, 0)]
+        frames = [self._img(64, 48, lambda x, y, c=c: c) for c in colours]
+        sheet = os.path.join(self.dir, "s.png")
+        self.assertTrue(crow_core._contact_sheet(frames, sheet))
+        with open(sheet, "rb") as fh:
+            img = crow_core._png_pixels(fh.read())
+        w, h, _c, ch, rows = img
+        self.assertEqual((w, h), (64, 48))
+        for (x, y), c in zip(((16, 12), (48, 12), (16, 36), (48, 36)), colours):
+            self.assertEqual(tuple(rows[y][x * ch:x * ch + 3]), c, (x, y))
+        # Two frames: the lower row stays black.
+        self.assertTrue(crow_core._contact_sheet(frames[:2], sheet))
+        with open(sheet, "rb") as fh:
+            rows = crow_core._png_pixels(fh.read())[4]
+        self.assertEqual(tuple(rows[36][16 * 3:16 * 3 + 3]), (0, 0, 0))
+        self.assertFalse(crow_core._contact_sheet([frames[0], None], sheet))
+
+
+class TheRenderToolIsGpuOnlyTests(unittest.TestCase):
+    """#293 at the tool: below the VRAM bound no browser starts and the
+    result is an ENVIRONMENT error with a `render:` record; a capture
+    carries the record too, and last_render() returns it."""
+
+    def setUp(self) -> None:
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-t293-"))
+        self.page = os.path.join(self.dir, "index.html")
+        with open(self.page, "w", encoding="utf-8") as fh:
+            fh.write("<p>hi")
+        self.root = crow_core.get_root()
+        crow_core.set_root(self.dir)
+        self.argv: "list[list[str]]" = []
+        crow_core._LAST_CAPTURES.clear()
+        self.addCleanup(crow_core._RENDER_RIDE.clear)
+        self.addCleanup(crow_core._LAST_CAPTURES.clear)
+        self.addCleanup(crow_core.set_root, self.root)
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(os.environ.pop, "CROW_RENDER_GL", None)
+        os.environ.pop("CROW_RENDER_GL", None)
+
+    def _render(self, free_mib, **kw):
+        test = self
+        png = crow_core._png_encode(
+            40, 30, 2, [bytes((x * 5 % 256, y * 7 % 256, 90)) * 1
+                        for y in range(30) for x in [0]][:0] or
+            [b"".join(bytes(((x * 5) % 256, (y * 7) % 256, 90)) for x in range(40))
+             for y in range(30)])
+
+        class Browser:
+            pid, returncode = 4242, 0
+
+            def __init__(self, argv, **_):
+                test.argv.append(list(argv))
+                shot = [a for a in argv if a.startswith("--screenshot=")]
+                if shot:
+                    with open(shot[0].split("=", 1)[1], "wb") as fh:
+                        fh.write(png)
+
+            def wait(self, timeout=None):
+                return 0
+
+        with mock.patch.object(crow_core, "find_browser", lambda: "/bin/chromium"), \
+                mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
+                mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
+                mock.patch.object(crow_platform, "gpu_free_mib", lambda: free_mib), \
+                mock.patch.object(crow_platform, "gpu_card", lambda: TheRenderIsGpuOnlyTests.CARD), \
+                mock.patch.object(crow_core.subprocess, "Popen", Browser):
+            return crow_core.tool_render_page("index.html", **kw)
+
+    @staticmethod
+    def _record(said):
+        line = [x for x in said.splitlines() if x.startswith("render: ")]
+        return json.loads(line[0][len("render: "):]) if line else None
+
+    def test_below_the_bound_no_browser_and_an_environment_error(self):
+        said = self._render(104)
+        self.assertEqual(self.argv, [], "no browser below the bound")
+        self.assertTrue(said.startswith("error: ENVIRONMENT -- "), said)
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertIn("No image was taken", said)
+        rec = self._record(said)
+        self.assertEqual(rec["render_mode"], "unavailable")
+        self.assertEqual((rec["frames"], rec["contact_sheet"], rec["precheck"]),
+                         ([], None, None))
+        self.assertEqual(rec["free_mib"], 104)
+        self.assertEqual(crow_core.last_render(), rec)
+        self.assertIsNone(crow_core.take_render_ride())
+        # Not a render_page "timeout" for #202's classes: a refusal that
+        # names what it is.
+        self.assertNotIn("timed out", said)
+        self.assertNotIn("wrote no screenshot", said)
+
+    def test_a_software_pin_is_refused_too(self):
+        os.environ["CROW_RENDER_GL"] = "swiftshader"
+        said = self._render(30000)
+        self.assertEqual(self.argv, [])
+        self.assertTrue(said.startswith("error: ENVIRONMENT"), said)
+        self.assertIn("CROW_RENDER_GL=swiftshader", said)
+
+    def test_no_argv_carries_a_software_flag(self):
+        self._render(30000)
+        self.assertEqual(len(self.argv), 1)
+        for bad in ("--enable-unsafe-swiftshader", "--use-angle=swiftshader",
+                    "--disable-gpu"):
+            self.assertNotIn(bad, self.argv[0])
+        self.assertIn("--use-gl=angle", self.argv[0])
+
+    def test_a_capture_carries_the_record(self):
+        said = self._render(30000)
+        self.assertFalse(said.startswith("error"), said)
+        self.assertTrue(said.startswith("render: "), said)
+        rec = self._record(said)
+        self.assertEqual(rec["render_mode"], "gpu")
+        self.assertTrue(rec["renderer"].startswith("unverified"), rec)
+        self.assertEqual(len(rec["frames"]), 1)
+        self.assertTrue(os.path.isfile(rec["frames"][0]))
+        self.assertIsNone(rec["contact_sheet"])
+        self.assertEqual(rec["precheck"]["identical_frames"], None)
+        self.assertGreater(rec["precheck"]["distinct_colours"], 16)
+        self.assertEqual(crow_core.last_render(), rec)
+        # #268's scan still finds the file line.
+        sig = crow_core.render_signature(said, "index.html")
+        self.assertEqual(sig["path"], rec["frames"][0])
+
+    def test_frames_without_the_pipe_is_an_environment_error(self):
+        said = self._render(30000, frames=4)
+        self.assertEqual(self.argv, [])
+        self.assertTrue(said.startswith("error: ENVIRONMENT"), said)
+        self.assertIn("frames > 1 needs the DevTools pipe", said)
+
+
+class _FakeLendServe(http.server.BaseHTTPRequestHandler):
+    """#297: crow-nest#117's lend API, scripted per case. Every request
+    lands in the server's `events` list, in arrival order."""
+
+    def log_message(self, *_):
+        pass
+
+    def _send(self, status, doc):
+        raw = json.dumps(doc).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        size = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(size) or b"{}")
+        srv = self.server
+        if self.path == "/v1/crow/vram/lend":
+            srv.events.append(("lend", body))
+            time.sleep(getattr(srv, "lend_delay", 0))
+            status, doc = srv.lend
+            self._send(status, doc)
+        elif self.path == "/v1/crow/vram/return":
+            srv.events.append(("return", body))
+            status = srv.returns.pop(0) if srv.returns else 200
+            self._send(status, {"returned_mib": 664.0, "remap_ms": 3.5,
+                                "lent_s": 1.0} if status == 200
+                       else {"error": "remap failed"})
+        elif self.path == "/v1/chat/completions":
+            srv.events.append(("chat", None))
+            self._send(200, {"choices": [{"message": {"content": "ok"}}]})
+        else:
+            self._send(404, {"error": "not found"})
+
+
+class TheRenderLendsVramTests(unittest.TestCase):
+    """#297 / crow-nest#117. Below the VRAM bound render_page borrows the
+    shortfall from this turn's local serve, gives it back in tool_render_page's
+    `finally` after the browser is gone, and the judge asks only after the
+    return. Anything but a 200 leaves #293's ENVIRONMENT error as it was."""
+
+    LENT = {"lent_mib": 664.0, "requested_mib": 664, "free_vram_mib": 768.0,
+            "release_ms": 4.2, "regions": 5, "ttl_s": 119}
+
+    def setUp(self) -> None:
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-t297-"))
+        with open(os.path.join(self.dir, "index.html"), "w", encoding="utf-8") as fh:
+            fh.write("<p>hi")
+        self.root = crow_core.get_root()
+        crow_core.set_root(self.dir)
+        self.addCleanup(crow_core.set_root, self.root)
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for name in ("CROW_RENDER_GL", "CROW_RENDER_ANGLE"):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ.pop(name, None)
+        self.addCleanup(crow_core._RENDER_RIDE.clear)
+        self.addCleanup(crow_core._LAST_CAPTURES.clear)
+        self.addCleanup(crow_core._RENDER_LENT.clear)
+        crow_core._RENDER_LENT.clear()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeLendServe)
+        self.server.daemon_threads = True
+        self.server.events = []
+        self.server.lend = (200, dict(self.LENT))
+        self.server.returns = []
+        threading.Thread(target=self.server.serve_forever, args=(0.05,),
+                         daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = "http://127.0.0.1:%d/v1" % self.server.server_address[1]
+        self.addCleanup(crow_core._TURN_SPOT.clear)
+        self.spot(self.base)
+        # The module pins the lookup to None (setUpModule); these cases
+        # need the real one, against the fake serve above.
+        patcher = mock.patch.object(crow_core, "_render_lend_root", _REAL_LEND_ROOT)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(crow_core, "RENDER_RETURN_WAIT_S", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def spot(self, base, remote=False):
+        crow_core._TURN_SPOT.clear()
+        crow_core._TURN_SPOT.update({"base_url": base, "model": "crow",
+                                     "api_key": "x", "remote": remote,
+                                     "headers": {}, "served": "crow"})
+
+    def events(self):
+        return [e[0] for e in self.server.events]
+
+    def _render(self, readings, browser=None, **kw):
+        """render_page with the free-VRAM readings in order (the last one
+        repeats) and a fake browser that writes its screenshot."""
+        test = self
+        readings = list(readings)
+        png = crow_core._png_encode(
+            40, 30, 2, [b"".join(bytes(((x * 5) % 256, (y * 7) % 256, 90))
+                                 for x in range(40)) for y in range(30)])
+
+        def free():
+            return readings.pop(0) if len(readings) > 1 else readings[0]
+
+        class Browser:
+            pid, returncode = 4242, 0
+
+            def __init__(self, argv, **_):
+                test.server.events.append(("browser", None))
+                shot = [a for a in argv if a.startswith("--screenshot=")]
+                if shot:
+                    with open(shot[0].split("=", 1)[1], "wb") as fh:
+                        fh.write(png)
+
+            def wait(self, timeout=None):
+                test.server.events.append(("closed", None))
+                return 0
+
+        with mock.patch.object(crow_core, "find_browser", lambda: "/bin/chromium"), \
+                mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
+                mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
+                mock.patch.object(crow_platform, "gpu_free_mib", free), \
+                mock.patch.object(crow_platform, "gpu_card",
+                                  lambda: TheRenderIsGpuOnlyTests.CARD), \
+                mock.patch.object(crow_core.subprocess, "Popen", browser or Browser):
+            return crow_core.tool_render_page("index.html", **kw)
+
+    def test_a_loan_brackets_the_capture_and_the_judge_comes_after(self):
+        said = self._render([104, 768])
+        self.assertTrue(said.startswith("render: "), said)
+        self.assertEqual(TheRenderToolIsGpuOnlyTests._record(said)["free_mib"], 768)
+        self.assertEqual(self.events(), ["lend", "browser", "closed", "return"])
+        # The ask: the shortfall + 256 MiB; the TTL: two ANGLE attempts of
+        # (15 s load + 4 s wait + 10 s capture + 0.5 s frame + 15 s close) + 30 s.
+        self.assertEqual(self.server.events[0][1], {"mib": 512 - 104 + 256,
+                                                    "ttl_s": 119})
+        self.assertEqual(crow_core._RENDER_LENT, {})
+        crow_core._judge_ask({"base_url": self.base, "model": "crow",
+                              "remote": False}, "rate it", [])
+        self.assertEqual(self.events(),
+                         ["lend", "browser", "closed", "return", "chat"])
+
+    def test_the_judge_gives_a_loan_left_open_back_first(self):
+        crow_core._RENDER_LENT.update({"root": self.base[:-len("/v1")],
+                                       "lent_mib": 664.0, "asked": 664,
+                                       "at": time.monotonic()})
+        crow_core._judge_ask({"base_url": self.base, "model": "crow",
+                              "remote": False}, "rate it", [])
+        self.assertEqual(self.events(), ["return", "chat"])
+
+    def test_the_loan_comes_back_when_the_browser_raises(self):
+        class Broken:
+            def __init__(self, argv, **_):
+                raise RuntimeError("spawn failed")
+
+        with self.assertRaises(RuntimeError):
+            self._render([104, 768], browser=Broken)
+        self.assertEqual(self.events(), ["lend", "return"])
+        self.assertEqual(crow_core._RENDER_LENT, {})
+
+    def test_the_loan_comes_back_after_a_timeout(self):
+        test = self
+
+        class Hangs:
+            pid, returncode = 4242, None
+            waits = []
+
+            def __init__(self, argv, **_):
+                test.server.events.append(("browser", None))
+
+            def wait(self, timeout=None):
+                Hangs.waits.append(timeout)
+                if len(Hangs.waits) == 1:
+                    raise subprocess.TimeoutExpired("chromium", timeout)
+                test.server.events.append(("closed", None))
+                return -9
+
+            def kill(self):
+                pass
+
+        with mock.patch.object(crow_platform, "terminate_tree", lambda proc: None):
+            said = self._render([104, 768], browser=Hangs)
+        self.assertIn("timed out", said)
+        self.assertEqual(self.events(), ["lend", "browser", "closed", "return"])
+
+    def test_a_503_on_return_is_retried(self):
+        self.server.returns = [503, 200]
+        self._render([104, 768])
+        self.assertEqual(self.events(),
+                         ["lend", "browser", "closed", "return", "return"])
+
+    def test_lent_but_still_short_returns_and_says_so(self):
+        self.server.lend = (200, dict(self.LENT, lent_mib=100.0))
+        said = self._render([104, 204])
+        self.assertTrue(said.startswith("error: ENVIRONMENT -- "), said)
+        self.assertIn("lending was tried: the model server lent 100 MiB", said)
+        self.assertIn("204 MiB were free after it", said)
+        self.assertEqual(TheRenderToolIsGpuOnlyTests._record(said)["free_mib"], 204)
+        self.assertEqual(self.events(), ["lend", "return"])
+
+    def test_a_refused_lend_keeps_todays_error_and_returns_nothing(self):
+        for status in (404, 409, 501, 400):
+            with self.subTest(status=status):
+                self.server.events.clear()
+                self.server.lend = (status, {"error": "no"})
+                said = self._render([104, 2000])
+                self.assertTrue(said.startswith("error: ENVIRONMENT -- "), said)
+                self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+                self.assertNotIn("lending was tried", said)
+                self.assertEqual(self.events(), ["lend"])
+
+    def test_no_answer_keeps_todays_error(self):
+        self.spot("http://127.0.0.1:9/v1")      # discard port, nothing listens
+        said = self._render([104, 2000])
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertNotIn("lending was tried", said)
+        self.assertEqual(crow_core._RENDER_LENT, {})
+
+    def test_a_lend_that_timed_out_is_returned_anyway(self):
+        """serve may read the lend after Crow gave up on it: the idempotent
+        return follows, so no loan waits out its TTL unasked."""
+        self.server.lend_delay = 0.5
+        with mock.patch.object(crow_core, "RENDER_LEND_HTTP_S", 0.1):
+            said = self._render([104, 2000])
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertNotIn("lending was tried", said)
+        deadline = time.monotonic() + 3
+        while "return" not in self.events() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.events(), ["lend", "return"])
+        self.assertEqual(crow_core._RENDER_LENT, {})
+
+    def test_a_remote_endpoint_is_never_asked(self):
+        self.spot(self.base, remote=True)
+        said = self._render([104, 2000])
+        self.assertIn("104 MiB VRAM free, below the 512 MiB", said)
+        self.assertEqual(self.events(), [])
+        self.assertIsNone(crow_core._render_lend_root())
+        self.spot("http://192.0.2.7:8099/v1")   # local provider, other host
+        self.assertIsNone(crow_core._render_lend_root())
+        self.spot("http://localhost:8099/v1")
+        self.assertEqual(crow_core._render_lend_root(), "http://localhost:8099")
+
+    def test_enough_free_vram_asks_for_nothing(self):
+        said = self._render([2000])
+        self.assertTrue(said.startswith("render: "), said)
+        self.assertEqual(self.events(), ["browser", "closed"])
+
+    def test_a_software_pin_asks_for_nothing(self):
+        os.environ["CROW_RENDER_GL"] = "swiftshader"
+        said = self._render([104, 2000])
+        self.assertIn("CROW_RENDER_GL=swiftshader", said)
+        self.assertEqual(self.events(), [])
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+class ThePageClockTests(unittest.TestCase):
+    """#293. _CLOCK_JS itself, run in node with `window` = globalThis:
+    page time stands still until runFor, rAF fires at 60 Hz of page time,
+    timers fire in order, Math.random is seeded -- the same numbers twice."""
+
+    SCRIPT = r"""
+globalThis.window = globalThis;
+%s;
+const log = [];
+let frames = 0, lastTs = -1;
+function loop(ts) { frames++; lastTs = ts; requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+setTimeout(() => log.push('t100@' + performance.now()), 100);
+const iv = setInterval(() => log.push('i200@' + performance.now()), 200);
+const d0 = Date.now(), p0 = performance.now(), r = [Math.random(), Math.random()];
+(async () => {
+  const still = performance.now();
+  await window.__crowClock.runFor(500);
+  const f1 = frames;
+  await window.__crowClock.runFor(500);
+  clearInterval(iv);
+  console.log(JSON.stringify({d0, p0, still, f1, f2: frames, lastTs,
+    now: performance.now(), date: Date.now(), newDate: new Date().getTime(),
+    log, r}));
+  process.exit(0);   // the clock's MessageChannel keeps node's loop alive
+})();
+"""
+
+    def _run(self):
+        done = subprocess.run(["node", "-e", self.SCRIPT % crow_core._CLOCK_JS],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_page_time_moves_only_by_run_for(self):
+        got = self._run()
+        self.assertEqual((got["p0"], got["still"]), (0, 0))
+        self.assertEqual(got["d0"], 1767225600000)
+        self.assertEqual(got["f1"], 30)            # 500 ms / (1000/60)
+        self.assertEqual(got["f2"], 60)
+        self.assertAlmostEqual(got["lastTs"], 1000, places=6)
+        self.assertEqual(got["now"], 1000)
+        self.assertEqual(got["date"], 1767225600000 + 1000)
+        self.assertEqual(got["newDate"], got["date"])
+        self.assertEqual(got["log"], ["t100@100", "i200@200", "i200@400",
+                                      "i200@600", "i200@800", "i200@1000"])
+
+    def test_the_same_script_gives_the_same_numbers(self):
+        a, b = self._run(), self._run()
+        self.assertEqual(a, b)
+        self.assertNotEqual(a["r"][0], a["r"][1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
@@ -22350,3 +23768,29 @@ class ChatTitleSkipsCrowNotesTests(unittest.TestCase):
                     {"role": "user", "content": "the typed one"}]
         self.assertEqual(crow_core.chat_title(messages), "the typed one")
         self.assertIsNone(crow_core.chat_title(messages[:2]))
+
+
+class RenderWaitCapForPathTracedPages(unittest.TestCase):
+    """#302: a page built with the path-tracing kit may wait up to 120 s; others keep 20 s."""
+
+    def _page(self, body):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "index.html")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return p
+
+    def test_a_kit_page_gets_the_long_ceiling(self):
+        p = self._page("<script>console.log('[crow-pt] samples=1')</script>")
+        self.assertEqual(crow_core._render_wait_cap(p), crow_core.RENDER_WAIT_PT_MAX_MS)
+        self.assertEqual(crow_core.RENDER_WAIT_PT_MAX_MS, 120000)
+
+    def test_any_other_page_keeps_the_20_s_ceiling(self):
+        p = self._page("<canvas></canvas><script>requestAnimationFrame(()=>{})</script>")
+        self.assertEqual(crow_core._render_wait_cap(p), crow_core.RENDER_WAIT_MAX_MS)
+        self.assertEqual(crow_core._render_wait_cap(None), crow_core.RENDER_WAIT_MAX_MS)
+        self.assertEqual(crow_core._render_wait_cap("/no/such/file.html"), crow_core.RENDER_WAIT_MAX_MS)
+
+    def test_the_clamp_uses_the_page_ceiling(self):
+        src = inspect.getsource(crow_core._render_page)
+        self.assertIn("_render_wait_cap(page_file)", src)
