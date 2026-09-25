@@ -65,14 +65,14 @@ The checkers carry their own suites: `tools/test_check_operating_point.py`,
 `tools/test_check_shared_core.py`, `tools/test_check_gui_prereqs.py`, plus
 `tools/test_gguf_header.py` and `tools/test_run_server_block.py`.
 
-`tools/test_pathtracer_kit.py` (37 cases) is the kit's suite: the checker red per broken link, and
+`tools/test_pathtracer_kit.py` (41 cases) is the kit's suite: the checker red per broken link, and
 the mesher run in `node` against the real `voxel-kit.js` and the vendored three.js — culled-face
 counts, one material per colour, no colour attribute, winding against the normal on every
 triangle, the emission cap, the scene rules, despeckle; the props registry (count, bbox, nesting,
 a cell taken back by the terrain), the coverage maths, the `?mode=` parser and prop kinds (#299).
 The node half is skipped without `node`. The rest drives `kits/pathtracer/check_diorama.py` on
 fake render results: the `render:` record and `[crow-scene]` parsing, and each check red on its
-own defect (#299).
+own defect (#299), the lend spot bound from `--serve` (#304), and the motion captures on `?mode=raster`.
 
 ## The manifest
 
