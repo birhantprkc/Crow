@@ -65,6 +65,14 @@ The reasoning is in the commit and on the issue.
 
 ### Changed
 
+- **Scrollbars show only while their strip is scrolled or pointed at** (#305, 2026-09-25). Every scroll container in
+  the window and the phone mirror — the chat, the per-turn stats line (`[24 rounds | … tok/s | prefill …]`), code
+  blocks, tables, the Code/Tool-Calls, git, goal and Subtasks panels, the rail, settings, menus — now draws a
+  transparent thumb at rest. It appears on any scroll (wheel, keyboard, touch, drag) and goes 0.8 s after the last
+  scroll event; a held pointer keeps it; a mouse pointer over the strip shows it (`@media (hover:hover)`, so not on
+  a phone). Only the colour changes: bar widths, the 10 px chat gutter and the column do not move. Before: the thumb
+  was drawn permanently on every strip. Source and node-run tests only; not yet seen in WebKitGTK, WebView2 or on
+  iOS (robin's live check).
 - **render_page renders on the GPU only** (#293, 2026-09-25). The SwiftShader fallback is gone. Below the VRAM
   bound (512 MiB, or 1,536 MiB with the panel open), or when the browser's own `UNMASKED_RENDERER_WEBGL` is
   software (SwiftShader, llvmpipe, lavapipe) or not the NVIDIA card, the result is `error: ENVIRONMENT -- ...`

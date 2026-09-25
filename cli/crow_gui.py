@@ -835,8 +835,31 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
   user-select:none}
 ::-webkit-scrollbar{width:var(--sbw)}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
-::-webkit-scrollbar-thumb:hover{background:var(--bevel)}
+::-webkit-scrollbar-corner{background:transparent}
+/* #305. THE THUMB SHOWS ONLY WHILE ITS STRIP IS SCROLLED OR POINTED AT
+   (robin, 2026-09-25: the stats line, the Code panel and the chat carried a
+   bar at rest). Transparent by default; `is-scrolling` is set by the one
+   capture listener in the script (`scrollbarsAutoHide`) and cleared
+   SB_LINGER_MS after the last scroll event; a hovering pointer shows it too,
+   but only where the input CAN hover -- a phone keeps `:hover` after a tap,
+   and a bar stuck there is what this removes.
+   ONLY THE COLOUR CHANGES. Width, `--sbw`, #flow's gutter and the #235 track
+   margins stay as they were, so nothing moves when a bar appears. No fade:
+   scrollbar parts cannot transition in WebKit/Blink, so a reader who asked
+   the system for less motion gets exactly what everyone gets. */
+::-webkit-scrollbar-thumb{background:transparent;border-radius:99px}
+.is-scrolling::-webkit-scrollbar-thumb{background:var(--line)}
+@media (hover:hover){:hover::-webkit-scrollbar-thumb{background:var(--line)}}
+::-webkit-scrollbar-thumb:hover,::-webkit-scrollbar-thumb:active{background:var(--bevel)}
+/* GECKO ONLY. A non-auto `scrollbar-color` switches `::-webkit-scrollbar`
+   off for the element AND, inherited, for everything inside it -- in
+   Chromium since 121 (WebView2) and in WebKitGTK since 2.52.3. Ungated it
+   would throw away the 10 px bars above. `*` rather than inheritance so a
+   scrolling #flow does not light the bars of the blocks inside it. */
+@supports not selector(::-webkit-scrollbar){
+  *{scrollbar-color:transparent transparent}
+  .is-scrolling{scrollbar-color:var(--line) transparent}
+  @media (hover:hover){:hover{scrollbar-color:var(--line) transparent}}}
 /* #235. DIE LEISTE BLEIBT AUS DEN RUNDEN ECKEN. Ein Scrollcontainer,
    der selbst (oder dessen Rahmen) gerundet ist, legt seine Leiste bis in die
    Ecke; gerendert in WebKitGTK 2.52 lief der Daumen der Zielkarte in deren
@@ -3593,6 +3616,36 @@ if (window.CROW_REMOTE) (function(){
 <script>
 const $ = s => document.querySelector(s);
 const flow = $("#flow"), input = $("#in"), go = $("#go"), box = $("#box");
+
+// #305. A SCROLLBAR SHOWS WHILE ITS STRIP SCROLLS, like an overlay bar on
+// macOS/iOS (robin, 2026-09-25). The stylesheet keeps every thumb transparent
+// unless its element carries `is-scrolling`; this sets it on each scroll event
+// and takes it off SB_LINGER_MS after the last one.
+// ONE LISTENER, ON THE DOCUMENT, IN THE CAPTURE PHASE. `scroll` does not
+// bubble, but capture sees it on its way to every element -- the chat, the
+// Code panel, and the stats lines, code blocks and tables that are created per
+// message and would each need their own listener. Passive: it never cancels.
+// A POINTER HELD DOWN (dragging the thumb, a selection that drags the view)
+// keeps the bar until it is released, then the linger starts.
+const SB_LINGER_MS = 800;
+function scrollbarsAutoHide(doc){
+  const lit = new Map();                     // element -> its hide timer
+  let held = false;
+  const arm = el => { clearTimeout(lit.get(el));
+    lit.set(el, setTimeout(() => {
+      if(held) return;                       // the release re-arms it
+      lit.delete(el); el.classList.remove("is-scrolling"); }, SB_LINGER_MS)); };
+  const opt = {capture:true, passive:true};
+  doc.addEventListener("scroll", e => {
+    const el = e.target && e.target.nodeType === 9 ? e.target.scrollingElement : e.target;
+    if(!el || !el.classList) return;
+    el.classList.add("is-scrolling"); arm(el); }, opt);
+  doc.addEventListener("pointerdown", () => { held = true; }, opt);
+  const release = () => { held = false; lit.forEach((t, el) => arm(el)); };
+  doc.addEventListener("pointerup", release, opt);
+  doc.addEventListener("pointercancel", release, opt);
+}
+scrollbarsAutoHide(document);
 
 // DOES THE COMPOSITOR OWN THIS WINDOW'S FRAME? Stamped in by Python before the
 // page is handed over, the same way the theme and the rail state are, and for

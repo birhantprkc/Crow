@@ -8797,6 +8797,148 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
                       self._rule("#goalpanel::-webkit-scrollbar-track{"))
 
 
+class ScrollbarsShowOnlyWhileScrolledTests(unittest.TestCase):
+    """#305. robin, 2026-09-25: the stats line under an answer, the Code panel
+    and the chat carried a scrollbar at rest. A thumb shows only while its
+    strip scrolls, or while a mouse pointer is over it -- never at rest, and
+    never stuck on a phone after a tap. Only the colour changes; the widths
+    the column arithmetic rests on (#256/#280) stay."""
+
+    GECKO = "@supports not selector(::-webkit-scrollbar){"
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):
+                               self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def _gecko_block(self, css: str) -> tuple[int, int]:
+        start = css.index(self.GECKO)
+        depth, i = 0, start
+        while True:
+            ch = css[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return start, i + 1
+            i += 1
+
+    def test_the_thumb_is_transparent_at_rest(self):
+        self.assertIn("background:transparent",
+                      self._rule("\n::-webkit-scrollbar-thumb{"))
+        self.assertIn("background:transparent",
+                      self._rule("\n::-webkit-scrollbar-corner{"))
+        # the width is untouched: only the colour comes and goes
+        self.assertIn("\n::-webkit-scrollbar{width:var(--sbw)}", self.css)
+        self.assertIn("--sbw:10px;", self.css)
+        self.assertIn("scrollbar-gutter:stable", self._rule("#flow{overflow-y"))
+
+    def test_scrolling_or_a_hovering_pointer_shows_it(self):
+        self.assertIn(".is-scrolling::-webkit-scrollbar-thumb{background:var(--line)}",
+                      self.css)
+        self.assertIn("@media (hover:hover){:hover::-webkit-scrollbar-thumb"
+                      "{background:var(--line)}}", self.css)
+        self.assertIn("::-webkit-scrollbar-thumb:hover,::-webkit-scrollbar-thumb:active"
+                      "{background:var(--bevel)}", self.css)
+
+    def test_hover_shows_it_only_where_the_input_can_hover(self):
+        """A phone keeps `:hover` after a tap; ungated, the bar would stick."""
+        page = crow_gui.stamped_page(remote=True)
+        hovers = [m.start() for m in re.finditer(r":hover::-webkit-scrollbar-thumb", page)]
+        self.assertTrue(hovers)
+        for at in hovers:
+            self.assertEqual(page[at - len("@media (hover:hover){"):at],
+                             "@media (hover:hover){")
+        # and the phone layer paints no thumb of its own
+        self.assertNotIn("scrollbar-thumb", crow_gui.REMOTE_CSS)
+
+    def test_no_standard_property_switches_the_webkit_path_off(self):
+        """A non-auto scrollbar-color/-width disables ::-webkit-scrollbar in
+        Chromium 121+ and WebKitGTK 2.52.3+ (and scrollbar-color inherits).
+        The Gecko fallback therefore lives behind @supports; outside it only
+        the three strips hidden on purpose say `scrollbar-width:none`."""
+        for css in (self.css, crow_gui.REMOTE_CSS):
+            lo, hi = self._gecko_block(css) if self.GECKO in css else (0, 0)
+            for m in re.finditer(r"scrollbar-(color|width):([^;}]*)", css):
+                if lo <= m.start() < hi:
+                    continue
+                self.assertEqual((m.group(1), m.group(2)), ("width", "none"),
+                                 css[max(0, m.start() - 60):m.end()])
+        lo, hi = self._gecko_block(self.css)
+        block = self.css[lo:hi]
+        self.assertIn("*{scrollbar-color:transparent transparent}", block)
+        self.assertIn(".is-scrolling{scrollbar-color:var(--line) transparent}", block)
+        self.assertIn("@media (hover:hover){:hover{scrollbar-color:", block)
+
+    def test_the_script_is_on_the_window_and_the_phone(self):
+        for page in (crow_gui.stamped_page(), crow_gui.stamped_page(remote=True)):
+            self.assertEqual(page.count("scrollbarsAutoHide(document);"), 1)
+            self.assertIn("const SB_LINGER_MS = 800;", page)
+
+    def _run(self, steps: str) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        start = self.source.index("const SB_LINGER_MS")
+        end = self.source.index("scrollbarsAutoHide(document);")
+        js = ("let now=0, seq=0; const timers=new Map();\n"
+              "function setTimeout(f, ms){ const id=++seq; timers.set(id,[now+ms,f]); return id; }\n"
+              "function clearTimeout(id){ timers.delete(id); }\n"
+              "function tick(ms){ const until=now+ms;\n"
+              "  for(;;){ let best=null;\n"
+              "    for(const [id,[t]] of timers) if(t<=until && (!best || t<timers.get(best)[0])) best=id;\n"
+              "    if(best===null) break;\n"
+              "    const [t,f]=timers.get(best); timers.delete(best); now=t; f(); }\n"
+              "  now=until; }\n"
+              "const listeners=[];\n"
+              "const doc={nodeType:9, addEventListener(type, fn, opt){ listeners.push([type, fn, opt]); }};\n"
+              "const el={nodeType:1, classList:{s:new Set(), add(c){this.s.add(c);},\n"
+              "  remove(c){this.s.delete(c);}, has(c){return this.s.has(c);}}};\n"
+              "doc.scrollingElement=el;\n"
+              "const fire=(type, target)=>listeners.filter(l=>l[0]===type)\n"
+              "  .forEach(l=>l[1]({type, target}));\n"
+              "const on=()=>el.classList.has('is-scrolling');\n"
+              "const out={};\n"
+              + self.source[start:end] + "\nscrollbarsAutoHide(doc);\n"
+              + steps + "\nconsole.log(JSON.stringify(out));\n")
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_one_capture_passive_listener_for_every_scroll(self):
+        out = self._run("out.l=listeners.map(l=>[l[0], l[2]]);")
+        scroll = [opt for kind, opt in out["l"] if kind == "scroll"]
+        self.assertEqual(scroll, [{"capture": True, "passive": True}])
+
+    def test_it_shows_while_scrolling_and_hides_after_the_linger(self):
+        out = self._run(
+            "out.rest=on();\n"
+            "fire('scroll', el); out.first=on();\n"
+            "tick(500); fire('scroll', el); tick(500); out.still=on();\n"
+            "tick(299); out.before=on(); tick(1); out.after=on();\n"
+            "fire('scroll', doc); out.root=on();")
+        self.assertEqual(out, {"rest": False, "first": True, "still": True,
+                               "before": True, "after": False, "root": True})
+
+    def test_a_held_pointer_keeps_it_until_release(self):
+        out = self._run(
+            "fire('pointerdown', el); fire('scroll', el);\n"
+            "tick(5000); out.held=on();\n"
+            "fire('pointerup', el); tick(799); out.released=on();\n"
+            "tick(1); out.gone=on();\n"
+            "fire('pointerdown', el); fire('scroll', el); fire('pointercancel', el);\n"
+            "tick(800); out.cancel=on();")
+        self.assertEqual(out, {"held": True, "released": True, "gone": False,
+                               "cancel": False})
+
+
 class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
     """robin, 2026-08-26, with the screenshot: the same question stood in the
     chat TWICE, `Memory updated (2)` between the two, and only the second one
