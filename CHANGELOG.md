@@ -28,6 +28,17 @@ The reasoning is in the commit and on the issue.
   same dict. `precheck` holds `uniform`, `distinct_colours`, `one_colour_pct`, `dark_pct` and `clipped_pct` (last
   frame), plus `max_frame_diff` and `identical_frames` (all frame pairs; a pixel counts as changed when a channel
   moves by more than 25, and the frames count as moving from 0.5 % changed).
+- **render_page borrows VRAM from an idle crow-nest serve** (#297, crow-nest#117, 2026-09-25). Below the VRAM bound,
+  when this turn's endpoint is local (loopback), render_page asks serve for the shortfall + 256 MiB
+  (`POST /v1/crow/vram/lend`, TTL = the render's own ceiling + 30 s, at most 600 s), reads the free VRAM again, and
+  renders on the GPU if it now clears the bound. The loan goes back (`POST /v1/crow/vram/return`, a 503 retried 3×)
+  in a `finally` after the browser is closed or killed, on a capture, an error, a timeout or an exception, and before
+  the result reaches the model, so `judge` only ever asks after the return. Still short after the loan: the
+  ENVIRONMENT error says lending was tried and how much was lent. llama.cpp or an older serve (404), lending off
+  (501), a loan already out (409), no answer (then the idempotent return is sent anyway), or a remote endpoint: the
+  ENVIRONMENT error as before. Each loan and return is a `render:` line in `crow.log` with MiB and milliseconds.
+  Before: under serve, 0.07–0.5 GiB free (#271, #293, crow-nest#117) and every capture refused. Tested against a
+  fake serve only; not measured live.
 
 
 - **Frozen per-step checklist for the judge, with yes/no/unknown, frames, a precheck and reference images**

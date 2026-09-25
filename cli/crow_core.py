@@ -56,6 +56,7 @@ import hashlib
 import json
 import logging
 import logging.handlers
+import math
 import os
 import random
 import re
@@ -11137,7 +11138,7 @@ def _page_target(path: str) -> "tuple[str | None, str]":
 
 
 # #293. THE STRUCTURED SIDE OF A RENDER. The last render's record (the
-# contract in tool_render_page's docstring), for code that must not parse
+# contract in _render_page's docstring), for code that must not parse
 # the text. Replaced by every call that gets past its argument checks.
 _RENDER_LAST: dict = {}
 
@@ -11172,6 +11173,135 @@ def _render_unavailable(reason: str, free_mib: "int | None" = None,
             "state, not the page's: do not change the page for it and do not "
             "judge it from an older capture; tell the user if it persists.\n"
             "render: %s" % (reason, json.dumps(record, ensure_ascii=False)))
+
+
+# #297 / crow-nest#117. VRAM ON LOAN FROM THE IDLE ENGINE. Under serve the
+# card has 0.07-0.5 GiB free (#271, #293, crow-nest#117's engine.log), below
+# the 512/1536 MiB a render needs. serve can release ~1.6 GiB of stateless
+# scratch while idle and park every chat request until it gets it back --
+# so the loan brackets the capture and nothing else: SGLang's release
+# "asserts there are no ongoing requests" (docs.sglang.io, sglang_for_rl),
+# and vLLM #28714 is what happens when memory goes while requests run.
+# The ask: the shortfall plus a margin for the driver's slack. The TTL is
+# serve's own safety net if Crow dies holding the loan: every attempt's
+# load + wait + capture ceiling, the frames' page time, and the close/kill
+# waits of launch(), plus a margin; serve refuses more than 600 s.
+RENDER_LEND_MARGIN_MIB = 256
+RENDER_CLOSE_S = 15             # launch(): Browser.close wait 5 s + kill wait 10 s
+RENDER_LEND_TTL_MARGIN_S = 30
+RENDER_LEND_TTL_MAX_S = 600
+RENDER_LEND_HTTP_S = 10.0
+RENDER_RETURN_TRIES = 3         # a 503 is serve still waiting for the VRAM
+RENDER_RETURN_WAIT_S = 1.0
+
+# The loan in flight: {"root", "lent_mib", "asked", "at"}, empty when none.
+_RENDER_LENT: dict = {}
+
+
+def _render_lend_root() -> "str | None":
+    """#297: this turn's endpoint as a server root, when it is a LOCAL one
+    (not remote, loopback host); None otherwise -- a remote provider's card
+    is not this machine's."""
+    spot = _TURN_SPOT
+    base = str(spot.get("base_url") or "")
+    if not base or spot.get("remote"):
+        return None
+    if not _loopback((urllib.parse.urlsplit(base).hostname or "").lower()):
+        return None
+    root = base.rstrip("/")
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
+def _render_vram_post(url: str, body: dict) -> "tuple[int | None, dict]":
+    """#297: (HTTP status, JSON body); status None when nothing answered."""
+    request = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=RENDER_LEND_HTTP_S) as resp:
+            status, raw = resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            status, raw = exc.code, exc.read()
+        finally:
+            exc.close()
+    except Exception as exc:                # noqa: BLE001 - no answer
+        return None, {"error": repr(exc)}
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace") or "{}")
+    except ValueError:
+        doc = {}
+    return status, doc if isinstance(doc, dict) else {}
+
+
+def _render_vram_lend(mib: int, ttl_s: int) -> "dict | None":
+    """#297: ask this turn's local serve for `mib` MiB for `ttl_s` s. The
+    loan on a 200 (kept for _render_vram_return), None on anything else --
+    llama.cpp and an older serve answer 404, a disabled lend 501, a loan
+    already out 409."""
+    root = _render_lend_root()
+    if root is None:
+        return None
+    started = time.monotonic()
+    status, doc = _render_vram_post(root + "/v1/crow/vram/lend",
+                                    {"mib": int(mib), "ttl_s": int(ttl_s)})
+    took = (time.monotonic() - started) * 1000.0
+    if status != 200:
+        log_note("render: no VRAM lend from %s (asked %d MiB, ttl %d s): %s %s"
+                 % (root, mib, ttl_s, status or "no answer",
+                    str(doc.get("error") or "")[:200]), "render")
+        if status is None:
+            # A lend that timed out may still be served once serve reads
+            # it: the return is idempotent (0 MiB when nothing is out), so
+            # the `finally` sends one anyway rather than leave a loan to
+            # the TTL while every chat request waits.
+            _RENDER_LENT.clear()
+            _RENDER_LENT.update({"root": root, "lent_mib": 0.0,
+                                 "asked": int(mib), "at": time.monotonic()})
+        return None
+    try:
+        lent = float(doc.get("lent_mib") or 0)
+    except (TypeError, ValueError):
+        lent = 0.0
+    # A 200 is a loan even at 0 MiB: serve parks requests until the return.
+    _RENDER_LENT.clear()
+    _RENDER_LENT.update({"root": root, "lent_mib": lent, "asked": int(mib),
+                         "at": time.monotonic()})
+    log_note("render: lent %.0f MiB of %d asked (ttl %d s, release %s ms, "
+             "%.0f ms round trip, serve reads %s MiB free)"
+             % (lent, mib, ttl_s, doc.get("release_ms"), took,
+                doc.get("free_vram_mib")), "render")
+    return dict(_RENDER_LENT)
+
+
+def _render_vram_return() -> None:
+    """#297: give the loan back, if there is one. NEVER RAISES. A 503 is
+    serve's remap still waiting for VRAM another process holds: retried a
+    few times, then left to serve, which retries on its own and returns at
+    the TTL anyway."""
+    if not _RENDER_LENT:
+        return
+    loan = dict(_RENDER_LENT)
+    _RENDER_LENT.clear()
+    status, doc = None, {}
+    for attempt in range(RENDER_RETURN_TRIES):
+        if attempt:
+            time.sleep(RENDER_RETURN_WAIT_S)
+        started = time.monotonic()
+        status, doc = _render_vram_post(loan["root"] + "/v1/crow/vram/return", {})
+        if status == 200:
+            log_note("render: returned %s MiB (remap %s ms, %.0f ms round trip, "
+                     "lent %.1f s)"
+                     % (doc.get("returned_mib"), doc.get("remap_ms"),
+                        (time.monotonic() - started) * 1000.0,
+                        time.monotonic() - loan["at"]), "render")
+            return
+        if status != 503:
+            break
+    log_note("render: return of %.0f MiB not confirmed by %s: %s %s -- serve "
+             "gives it back itself at the TTL"
+             % (loan["lent_mib"], loan["root"], status or "no answer",
+                str(doc.get("error") or "")[:200]), "render")
 
 
 # #293. THE PRECHECK LINES, fixed in the ticket before any result existed.
@@ -11313,10 +11443,9 @@ def _contact_sheet(images: "list", path: str) -> bool:
     return True
 
 
-def tool_render_page(path: str, wait_ms: int | None = None,
-                     width: int | None = None, height: int | None = None,
-                     frames: int | None = None, frame_ms: int | None = None,
-                     **_) -> str:
+def _render_page(path: str, wait_ms: int | None = None,
+                 width: int | None = None, height: int | None = None,
+                 frames: int | None = None, frame_ms: int | None = None) -> str:
     """Render one page in a browser Crow owns, and hand back what it saw.
 
     THE CONTRACT (#293). Every capture result and every ENVIRONMENT error
@@ -11480,6 +11609,35 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     # counted as the card's second client when the window has one open.
     free_mib = crow_platform.gpu_free_mib()
     gl = crow_platform.render_gl_mode(free_mib, panel=RENDER_PANEL_OPEN)
+    # #297 / crow-nest#117. BELOW THE BOUND, BORROW FROM THE IDLE ENGINE. The
+    # model is waiting for this result, so a local crow-nest serve has no
+    # request in flight and can lend its scratch VRAM for the capture. Only
+    # when free VRAM is the ONE reason (a reading exists and no software pin:
+    # the gate would pass with the bound's worth free), and only to this
+    # turn's own loopback endpoint. Anything but a 200 is today's error.
+    # tool_render_page's `finally` gives it back after Chromium is gone.
+    need = crow_platform.gpu_headroom_mib(RENDER_PANEL_OPEN)
+    if gl != "angle" and free_mib is not None and free_mib < need \
+            and _render_lend_root() is not None \
+            and crow_platform.render_gl_mode(need, panel=RENDER_PANEL_OPEN) == "angle":
+        attempts = len(crow_platform.render_angle_backends())
+        ttl = min(RENDER_LEND_TTL_MAX_S, int(math.ceil(
+            attempts * (RENDER_LOAD_S + wait / 1000.0 + RENDER_CAPTURE_S
+                        + n_frames * step_ms / 1000.0 + RENDER_CLOSE_S)
+            + RENDER_LEND_TTL_MARGIN_S)))
+        lent = _render_vram_lend(need - free_mib + RENDER_LEND_MARGIN_MIB, ttl)
+        if lent is not None:
+            after = crow_platform.gpu_free_mib()
+            if crow_platform.render_gl_mode(after, panel=RENDER_PANEL_OPEN) != "angle":
+                return _render_unavailable(
+                    "%s; lending was tried: the model server lent %s MiB for "
+                    "this render and %s MiB were free after it (#297)"
+                    % (crow_platform.render_gl_reason(free_mib,
+                                                      panel=RENDER_PANEL_OPEN),
+                       "{:,}".format(int(round(lent["lent_mib"]))),
+                       "?" if after is None else "{:,}".format(after)),
+                    free_mib=after)
+            free_mib, gl = after, "angle"
     if gl != "angle":
         return _render_unavailable(
             crow_platform.render_gl_reason(free_mib, panel=RENDER_PANEL_OPEN),
@@ -11763,6 +11921,23 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         return _clip("\n".join(said))
     finally:
         _shutil.rmtree(profile, ignore_errors=True)
+
+
+def tool_render_page(path: str, wait_ms: int | None = None,
+                     width: int | None = None, height: int | None = None,
+                     frames: int | None = None, frame_ms: int | None = None,
+                     **_) -> str:
+    """The render_page tool: _render_page (the contract is its docstring),
+    and the VRAM loan it may have taken given back HERE (#297) -- after the
+    capture's browser is closed or killed and its profile is gone, on a
+    capture, an ENVIRONMENT error, a timeout or an exception alike, and
+    before the result reaches the model, so a judge call can only come
+    after the return."""
+    try:
+        return _render_page(path, wait_ms=wait_ms, width=width, height=height,
+                            frames=frames, frame_ms=frame_ms)
+    finally:
+        _render_vram_return()
 
 
 def tool_read_image(path: str, **_) -> str:
@@ -26581,6 +26756,10 @@ def judge_spots(doc: "dict | None" = None) -> "list[dict]":
 def _judge_ask(spot: dict, prompt: str, paths: "list[str]") -> str:
     """One request, no history: the prompt and the images. The answer's
     text, or raise."""
+    # #297: never while serve holds VRAM on loan -- it parks every chat
+    # request until the return, so this one would wait out the TTL. The
+    # render's own `finally` already returned it; this pins the order.
+    _render_vram_return()
     if not spot.get("remote"):
         blind = refuse_images(spot["base_url"])
         if blind:

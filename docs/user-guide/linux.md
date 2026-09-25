@@ -285,7 +285,7 @@ user manager answers, two tools start their children in a transient user scope a
 | bounds | `MemoryHigh=5G`, `MemoryMax=6G`, `MemorySwapMax=0` | `MemoryHigh=7G`, `MemoryMax=8G`, `MemorySwapMax=0`, `OOMPolicy=kill` |
 | move the bound | `CROW_RENDER_MEMORY_MAX=<size>` (`none` keeps only the swap cap) | `CROW_COMMAND_MEMORY_MAX=<size>` (`none` keeps only the swap cap) |
 | switch off | `CROW_RENDER_SCOPE=0` | `CROW_COMMAND_SCOPE=0` |
-| GPU only (#293) | default: the GPU when at least 512 MiB of VRAM are free, otherwise an ENVIRONMENT error and no image; `CROW_RENDER_GL=angle` skips that gate (`swiftshader` is refused); `CROW_RENDER_ANGLE=vulkan\|default` pins the ANGLE backend (default: vulkan, then default) | — |
+| GPU only (#293) | default: the GPU when at least 512 MiB of VRAM are free; below that a local crow-nest serve is asked to lend the shortfall for the capture (#297, crow-nest#117), otherwise an ENVIRONMENT error and no image; `CROW_RENDER_GL=angle` skips that gate (`swiftshader` is refused); `CROW_RENDER_ANGLE=vulkan\|default` pins the ANGLE backend (default: vulkan, then default) | — |
 
 Why: on 2026-09-21 a software-WebGL render of a 2 MB three.js page grew its headless Chromium to
 54 GiB, froze the desktop, and the kernel's OOM killer shot the engine instead; on 2026-09-22 the
