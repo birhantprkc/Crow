@@ -12123,6 +12123,10 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
     turns that into seconds.
     """
     path = _rooted(path)                            # #177
+    # A directory answers the same on every OS: Windows opens a directory with
+    # PermissionError, not IsADirectoryError (CI, v2.7.0 release PR #306).
+    if os.path.isdir(path):
+        return f"error: {path} is a directory -- use list_dir"
     try:                                            # #301: sniff before reading
         with open(path, "rb") as fh:
             head = fh.read(_SNIFF_BYTES)
