@@ -128,7 +128,9 @@ all pass, 2 on a setup error.
 
 Options: `--photo-t` (2), `--wait-ms` (20000), `--frame-ms` (500), `--size` (1024),
 `--reference DIR` (writes `<photo>-vs-reference.png` and prints mean luma/saturation per image),
-`--crow-cli DIR` (default: the `cli/` beside the kit, then `~/.local/share/crow/cli`).
+`--crow-cli DIR` (default: the `cli/` beside the kit, then `~/.local/share/crow/cli`),
+`--serve URL` (the local crow-nest serve render_page borrows VRAM from, as inside a Crow turn (#297, #304);
+default `$CROW_SERVE_URL`, else `http://127.0.0.1:8099/v1`; `none` = never borrow).
 
 ## Numbers
 

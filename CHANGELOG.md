@@ -119,6 +119,12 @@ The reasoning is in the commit and on the issue.
   the model gets #224's notice, and the memory head is rebuilt only if it named the other folder. Without `--root`,
   nothing changes. The terminal already let `--root` win. Covered by 4 window tests, 2 of them red without the fix;
   not verified live.
+- **`check_diorama.py` borrows VRAM from serve like a Crow turn does** (#304, 2026-09-25). The checker runs as its
+  own process, outside any Crow turn, so #297's lending had no endpoint and never asked serve. It now names the local
+  serve before the first capture: `--serve` (default `http://127.0.0.1:8099/v1`, env `CROW_SERVE_URL`, `none` = never
+  borrow). Before: on 2026-09-25 ~15:35 the lighthouse goal's `check.sh` failed all 10 checks with the ENVIRONMENT
+  error at 280 MiB free while serve held the card, and `crow.log` had no `render:` line for it; render_page inside the
+  same turn had borrowed 582 MiB twice minutes earlier. Covered by 3 tests, red without the fix; not verified live.
 
 ## 2.6.0 — 2026-09-24
 
