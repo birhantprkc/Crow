@@ -5445,7 +5445,10 @@ class TheSkillSheetTests(unittest.TestCase):
         terminal whose prompt silently carried no skills while the window's did.
         A surface-by-surface check is the only kind that sees it.
         """
-        self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
+        # 4 since #303: `_head_follows_stated_root` re-pins a restored head
+        # that names another working area than the typed `--root` -- the same
+        # event `_bind_root` re-pins for, reached from the launch.
+        self.assertEqual(self.source.count("crow_core.prompt_head()"), 4)
         terminal = (HERE / "crow.py").read_text(encoding="utf-8")
         self.assertEqual(terminal.count("crow_core.prompt_head()"), 2)
         for name, text in (("crow_gui.py", self.source), ("crow.py", terminal)):
@@ -5478,7 +5481,8 @@ class TheMemoryPinWiringTests(unittest.TestCase):
         already put the template up and there is no chat to correct it with.
         """
         self.assertGreater(self.source.rindex("self._pin_memory(SESSION_FILE)"),
-                           self.source.index("self._adopt_chat_root(SESSION_FILE)"))
+                           self.source.index(
+                               "self._adopt_chat_root(SESSION_FILE, stated="))
         self.assertTrue(self._after("self._adopt_chat_root(path)",
                                     "self._pin_memory(path)"))
         self.assertEqual(self.source.count("self._pin_memory("), 5,
@@ -8445,7 +8449,7 @@ class TheServerSwitchAndKeyFieldTests(unittest.TestCase):
         body = body[:body.index(chr(10) + "    def ", 10)]
         self.assertNotIn("prompt_head", body)
         self.assertNotIn("repin_memory", body)
-        self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
+        self.assertEqual(self.source.count("crow_core.prompt_head()"), 4)  # #303
 
 
 class TheMemoryNoteLookTests(unittest.TestCase):
@@ -13210,6 +13214,106 @@ class ARestoreNeverMeetsARunningChatTests(ApiCase):
         # ... and not a note about a late session: nothing arrived late.
         self.assertFalse([m for m in after if m.get("k") == "note"
                           and "kept the running" in m.get("t", "")])
+
+
+class AStatedRootWinsOverTheRestoredChatTests(ApiCase):
+    """#303. Live 2026-09-25 15:19 CEST: robin started the window
+    with `--root .../lighthouse-test`; `ready()` bound it, then `_probe`
+    restored the last chat ("Voxel", 101 messages, no `crow_root` in
+    session.json) and `_adopt_chat_root` fell through to `restore_root()` --
+    roots.json `active` still named diorama-test from a 09:45 pick. The chip
+    showed diorama-test, the goal bar (lighthouse-test/.crow/goal.json) was
+    gone, and the next line ran in the wrong working area.
+
+    THE RULE: a `--root` typed for THIS window is a person's choice made at
+    this start, the newest one there is. It wins over the template and over
+    the restored chat's own record, and becomes the next start's `active` --
+    the flag's help already says "the same as picking a folder in the
+    window". A chat's own root still wins when nothing was stated (#101)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._roots = crow_core.ROOTS_FILE
+        crow_core.ROOTS_FILE = os.path.join(self.dir, "roots.json")
+        self.addCleanup(setattr, crow_core, "ROOTS_FILE", self._roots)
+        self.addCleanup(crow_core.set_root, None)
+        crow_core.set_root(None)
+        self.template = os.path.join(self.dir, "diorama-test")
+        self.stated = os.path.join(self.dir, "lighthouse-test")
+        self.own = os.path.join(self.dir, "own-choice")
+        for path in (self.template, self.stated, self.own):
+            os.makedirs(path)
+            crow_core.write_root_mode(path, "auto")
+        crow_core.set_active_root(self.template)   # the 09:45 pick
+
+    def _saved_chat(self, own=None, chosen=False):
+        """session.json the way the window writes it; with `chosen`, the chat
+        carries `own` as its own root, pinned head included."""
+        old = self.api()
+        crow_core.set_root(own)
+        old._pin_memory(None)
+        old._root_chosen = chosen
+        self.a_chat(old, "continue", "working on it")
+        old._persist_live()
+        crow_core.set_root(None)
+        with open(self.session, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual("crow_root" in data, chosen)
+
+    def _start(self, *argv):
+        api = self.api(*argv)
+        api._mic_probe = lambda: None
+        api.git_refresh = lambda: None
+        with mock.patch.object(crow_gui, "check_endpoint", return_value="ok"), \
+             mock.patch.object(crow_gui, "fetch_model_name", return_value="m"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000), \
+             mock.patch.object(crow_gui.threading, "Thread", _RunsNow):
+            api.ready()
+        self.assertIn("continue", [m.get("content")
+                                   for m in api._conversation.payload()])
+        return api
+
+    def _is(self, got, want):
+        self.assertEqual(os.path.normcase(got or ""),
+                         os.path.normcase(os.path.realpath(want)))
+
+    def test_the_stated_root_survives_the_restore_of_a_chat_that_never_chose(self):
+        """THE LIVE CASE. Before the fix: diorama-test, from roots.json."""
+        self._saved_chat(own=self.stated)          # head names lighthouse-test
+        api = self._start("--root", self.stated)
+        self._is(crow_core.get_root(), self.stated)
+        roots = [m for m in self.drained(api) if m.get("k") == "root"]
+        self._is(roots[-1]["path"], self.stated)
+        with open(crow_core.ROOTS_FILE, encoding="utf-8") as fh:
+            self._is(json.load(fh)["active"], self.stated)
+
+    def test_the_stated_root_wins_over_the_chats_own_and_the_model_is_told(self):
+        """A chat that recorded another folder is re-bound to the typed one,
+        the #224 notice is queued, and the head no longer names the old one."""
+        self._saved_chat(own=self.own, chosen=True)
+        api = self._start("--root", self.stated)
+        self._is(crow_core.get_root(), self.stated)
+        self.assertTrue(api._root_chosen)
+        notice = api._conversation.pending_notice or ""
+        self.assertIn(os.path.realpath(self.stated), notice)
+        head = api._conversation.memory or ""
+        self.assertIn(crow_core.working_area_line(os.path.realpath(self.stated)),
+                      head)
+        self.assertNotIn(crow_core.working_area_line(os.path.realpath(self.own)),
+                         head)
+
+    def test_without_a_stated_root_the_chats_own_still_wins(self):
+        """#101 unchanged: no flag, the restored chat brings its own folder."""
+        self._saved_chat(own=self.own, chosen=True)
+        api = self._start()
+        self._is(crow_core.get_root(), self.own)
+        self.assertIsNone(api._conversation.pending_notice)
+
+    def test_without_a_stated_root_a_chat_that_never_chose_takes_the_template(self):
+        """#101 unchanged: no flag, no own choice -> roots.json `active`."""
+        self._saved_chat()
+        self._start()
+        self._is(crow_core.get_root(), self.template)
 
 
 class AStreamWithoutARoundTests(unittest.TestCase):

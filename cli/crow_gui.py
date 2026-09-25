@@ -10879,6 +10879,10 @@ class Api:
         # been chosen, because from then on it would outrank the real opening
         # line forever". A borrowed root is that same guess.
         self._root_chosen: bool = False
+        # #303. THE ROOT TYPED FOR THIS WINDOW (`--root`), once `ready()` has
+        # bound it; None when nothing was stated. `_probe` hands it to the
+        # restore, where it outranks the template AND the chat's own record.
+        self._root_stated: "str | None" = None
         # #249. DER TELEFON-SPIEGEL. `_remote` ist der laufende
         # `crow_remote.Remote` oder None; alles andere hier ist, was ein
         # zweiter Bildschirm braucht, um denselben Stand zu sehen.
@@ -11285,17 +11289,26 @@ class Api:
         # for the same reason the level is -- a boundary nobody can see is one
         # nobody can trust, and its ABSENCE is the state that has to be visible.
         #
-        # BOUND HERE, NOT ONLY DRAWN. The window has no `--root` and its cwd is
-        # whatever the shortcut handed it, so without this call it started
-        # unbounded every single time and the folder picked yesterday was gone.
-        # `adopt_root` is the same rule the terminal uses; the window simply has
-        # nothing to state, so it takes the remembered one.
+        # BOUND HERE, NOT ONLY DRAWN. A window's cwd is whatever the shortcut
+        # handed it, so without this call it started unbounded every single
+        # time and the folder picked yesterday was gone. `adopt_root` is the
+        # same rule the terminal uses: a stated `--root` is bound, and a window
+        # with nothing stated takes the remembered one.
         _, mode, problem = crow_core.adopt_root(
             getattr(self._args, "root", None),
             self._args.mode if self._mode_stated else None,
             walk_up=False)
         if problem:
             self.push({"k": "fail", "t": problem})
+        # #303: A ROOT TYPED FOR THIS WINDOW IS A PICK, made at this start --
+        # the flag's help has always said "the same as picking a folder in the
+        # window", and a pick writes `active`. Live 2026-09-25 15:19 it did
+        # not: `active` still named a 09:45 pick, and the restore below bound
+        # that over the typed folder. Written HERE, not in `adopt_root`: a
+        # terminal `--root` must not move where the window opens (#92).
+        elif getattr(self._args, "root", None):
+            self._root_stated = crow_core.get_root()
+            crow_core.set_active_root(self._root_stated)
         self._args.mode = mode
         self.push({"k": "mode", "name": mode, "modes": self.mode_menu()})
         self.push_root()
@@ -11521,7 +11534,8 @@ class Api:
         if chat:
             self._conversation.mark_reviewed(crow_core.session_reviewed(chat))
 
-    def _adopt_chat_root(self, chat: str | None, fresh: bool = False) -> None:
+    def _adopt_chat_root(self, chat: str | None, fresh: bool = False,
+                         stated: "str | None" = None) -> None:
         """Bind the boundary THIS chat chose, and take the level that goes with it.
 
         #101. One place, because three events needed the same answer: opening
@@ -11544,13 +11558,24 @@ class Api:
         statement about the project, so two chats in one folder share it. Put it
         in the chat and the same directory has different rights depending on
         which conversation is open.
+
+        #303: `stated` IS THE ROOT TYPED FOR THIS WINDOW, and only the restore
+        at launch passes it. It outranks both sources above: the template is a
+        fallback, and the chat's own record is an older choice than the one
+        typed for this start. It becomes the chat's own (`chosen`), as a pick
+        does; a different own root is announced to the model (#224).
         """
         root, chosen = self._stored_root(chat) if chat else (None, False)
+        if stated:
+            if chosen and not (root and os.path.normcase(root)
+                               == os.path.normcase(stated)):
+                self._conversation.note_root_change(root, stated)
+            root, chosen = stated, True
         # UNBOUND, AND NOT CHOSEN TO BE. `chosen` stays False so `_stamp` writes
         # no `crow_root` at all: absent means nobody ever picked for this chat,
         # which is what a chat one second old is. An explicit null would be the
         # user's "no folder" and would survive being opened again.
-        if not chosen and not fresh:
+        elif not chosen and not fresh:
             root, _ = crow_core.restore_root()
         # BORROWED, AND IT STAYS BORROWED. The template may be shown and worked
         # in; it is not written into the chat until a person picks for this chat.
@@ -12175,13 +12200,36 @@ class Api:
         # The line this replaces claimed `load_session` "may have bound the root
         # the restored chat was working in". It never did -- nothing outside
         # `adopt_root` and the picker has ever called `set_root`.
-        self._adopt_chat_root(SESSION_FILE)
+        #
+        # #303: A ROOT TYPED FOR THIS WINDOW WINS HERE, over the template and
+        # over the chat's own record -- see `_adopt_chat_root`.
+        self._adopt_chat_root(SESSION_FILE, stated=self._root_stated)
         # #121. AFTER THE BOUNDARY, NEVER BEFORE IT. A chat with no pin yet is
         # pinned from the folder it stands in, and the line above is where that
         # folder stops being the template and becomes the chat's own.
         self._pin_memory(SESSION_FILE)
+        if self._root_stated:
+            self._head_follows_stated_root()
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
+
+    def _head_follows_stated_root(self) -> None:
+        """#303: the restored head must name the root typed for this window.
+
+        A file's pin wins over the folder (#121) so its cache still fits --
+        but a pin that names ANOTHER working area tells the model "use this
+        exact path" for a folder the tools no longer write to. Only then is
+        the head re-pinned, with `_bind_root`'s cost line before it; a pin
+        that already names the stated root (robin's live case) stays, cache
+        and all. The chat's own file is stamped now, as `_bind_root` does,
+        so the rail reads the same boundary the window holds (#119).
+        """
+        line = crow_core.working_area_line(self._root_stated)
+        if line not in (self._conversation.memory or ""):
+            self.push({"k": "note", "t": crow_core.MEMORY_COST_NOTE})
+            self._conversation.repin_memory(crow_core.prompt_head())
+        if self._current_path:
+            self._stamp(self._current_path)
 
     def _late_session(self) -> None:
         """#209: session.json met a conversation that is no longer fresh.

@@ -111,6 +111,14 @@ The reasoning is in the commit and on the issue.
   UTF-8 text reads as before, including a multi-byte character at the 8,000-byte edge. `read_image` on a missing
   `-crop.png` whose frame exists now says a crop is written only under 50 % coverage and names the frame. Before: a
   bare `no such image`, twice in the same run. Not measured live.
+- **A window started with `--root` keeps that folder when it restores the last chat** (#303, 2026-09-25).
+  `crow --root DIR` now binds DIR for the restored chat and saves DIR as the folder the next start opens (`active` in
+  `roots.json`), the same as a pick in the chip. Before: on 2026-09-25 15:19, `--root …/lighthouse-test` restored the
+  chat "Voxel" (no folder of its own) into `diorama-test`, the last folder picked in the chip (09:45). The goal bar
+  disappeared, and the next line ran in the wrong folder. A restored chat that recorded another folder is moved to DIR:
+  the model gets #224's notice, and the memory head is rebuilt only if it named the other folder. Without `--root`,
+  nothing changes. The terminal already let `--root` win. Covered by 4 window tests, 2 of them red without the fix;
+  not verified live.
 
 ## 2.6.0 — 2026-09-24
 
