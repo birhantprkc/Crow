@@ -17,7 +17,7 @@ registry and a diorama checker, opt-in with `install.sh --pathtracer` / `install
 #304). Also: `read_file` refuses binary files and names `read_image` (#301), `--root` survives the restored chat
 (#303), and scrollbars show only while used (#305).
 
-Everything on local `main` since 2.6.0 (21d7505): 21 commits, 12 tickets (#293–#299, #301–#305), 2026-09-25.
+Everything on local `main` since 2.6.0 (21d7505): 23 commits, 12 tickets (#293–#299, #301–#305), 2026-09-25.
 Most numbers come from the 2026-09-24/25 diorama and lighthouse goal runs. #300 (image generation beside a live
 session) is not in this release. Tickets are released pending robin's live check.
 
