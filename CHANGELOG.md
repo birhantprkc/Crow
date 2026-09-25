@@ -7,6 +7,15 @@ The reasoning is in the commit and on the issue.
 
 ### Added
 
+- **Voxel kit: path-traced voxel dioramas as one offline page** (#298, 2026-09-25).
+  - `kits/pathtracer/` ships in every install. It holds three 0.186.1 + three-mesh-bvh 0.9.15 + three-gpu-pathtracer 0.0.24 as one esbuild-minified ES module (958,266 bytes; sha256, npm integrity and licence hashes in `kit.json`; the MIT texts beside it; a NOTICE entry). Next to it: `voxel-kit.js`, a scaffold, and the skill `voxel-diorama`.
+  - The kit provides a voxel grid; culled-face meshing with one `MeshStandardMaterial` per palette colour; a telephoto near-isometric camera with slight depth of field; a dome, a ground plane and a soft key light; lamps with the spot light below a solid shade; emission capped at 1; a despeckle pass; context-loss recovery; and `window.__SCENE__` / `__PT__` probes.
+  - `build_bundle` resolves `crow-voxel-kit` and `crow-pathtracer` to the installed kit, so the library never passes through the model.
+  - `install.sh --pathtracer` / `install.ps1 -PathTracer` verify the bundle, switch the skill on and name the esbuild. A kit skill is seeded once, switched off, through a `skills/.seeded` ledger: 0 prompt tokens until someone switches it on.
+  - Measured on 2026-09-25, headless Chromium 152, ANGLE/Vulkan, RTX 5090, 1024×1024: the scaffold room (26,627 voxels, 46,168 triangles) ran at 13.0 samples/s at 10 s and 14.3 at 40 s, and lost and restored the context once. The rules come from the pt-proof runs: vertex colours rendered black in 1 of 3 starts, and a spot inside a hollow shade gave 30.6 dB where one below a solid shade gave 38.6 dB (PSNR 60 s vs 180 s).
+  - Before: the 2026-09-24/25 goal run hand-wrote a WebGL2 ray tracer for ~16 h (#293–#295).
+  - The model's use of the kit in a live goal run is not measured.
+
 - **render_page captures frames at controlled page time** (#293, 2026-09-25). `frames` (1–4) and `frame_ms`
   (16–5000, default 500): with more than one frame the page's clock is frozen from its first script
   (`Date`, `performance.now`, timers, `requestAnimationFrame`, a seeded `Math.random`), and each capture follows

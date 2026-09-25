@@ -12,6 +12,9 @@
 | `install.ps1` · `install.sh` | the two installers, one contract |
 | `tools/start-server.py` | model picker, becomes the inference server |
 | `tools/build-llama-server.sh` | builds the CUDA engine on Linux, where there is no release asset |
+| `kits/pathtracer/` | the voxel kit (#298): vendored three + three-mesh-bvh + three-gpu-pathtracer (`crow-pathtracer.js`, `kit.json`, `LICENSE.*`), `voxel-kit.js`, `scaffold/`, `SKILL.md` |
+| `tools/build-pathtracer-kit.sh` | rebuilds the bundle from the exact npm pins (`just pathtracer-kit`) |
+| `tools/check_pathtracer_kit.py` | holds bundle, licence texts and NOTICE against `kits/pathtracer/kit.json` |
 | `manifests/operating-point.json` | source of truth for every server command line |
 | `manifests/shared-core.json` | what may exist only once, and where |
 | `tools/check_operating_point.py` | holds every written copy against that manifest |

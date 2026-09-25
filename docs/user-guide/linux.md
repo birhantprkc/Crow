@@ -33,6 +33,7 @@ bash install.sh --models ~/Projects/models/qwen3.8-flash-next
 | `--models DIR` | where the GGUFs live. Makes `$CROW_HOME/models` a link to it |
 | `--voice` | also `faster-whisper` and `sounddevice` for the composer's microphone |
 | `--tailscale` | also print what is still missing for the phone over HTTPS — see [Phone over Tailscale](#phone-over-tailscale) |
+| `--pathtracer` | also switch on the `voxel-diorama` skill — see [Voxel kit](voxel-kit.md) |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
 | `--no-engine` | do not look for the engine at all |

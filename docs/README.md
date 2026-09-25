@@ -9,11 +9,12 @@ is here.
 
 | | |
 |---|---|
-| [Install](user-guide/install.md) | requirements, both installers, the model download, updating, where everything lands; optional `--voice`, `--tailscale` / `-Tailscale` |
+| [Install](user-guide/install.md) | requirements, both installers, the model download, updating, where everything lands; optional `--voice`, `--tailscale` / `-Tailscale`, `--pathtracer` / `-PathTracer` |
 | [Window](user-guide/window.md) | the client, panel by panel: pinned cards, selection and links, layout |
 | [Linux](user-guide/linux.md) | install, the paths table, the engine build, memory scopes for server, render and command, optional helpers, the window on Wayland, troubleshooting |
 | [Memory](user-guide/memory.md) | what is written, by whom, and the gate |
 | [Skills](user-guide/skills.md) | using and writing one |
+| [Voxel kit](user-guide/voxel-kit.md) | path-traced voxel dioramas as one offline page: the vendored three-gpu-pathtracer, the voxel API, the measured rules, `--pathtracer` / `-PathTracer` |
 | [Goals and subagents](user-guide/goals-and-subagents.md) | the plan a model writes for itself, what `done` has to prove, and the tasks it hands out |
 | [Browser panel](user-guide/browser.md) | the in-window panel on Linux, tabs, the address bar, `render_page`, what is unverified on Windows |
 | [Session search](user-guide/session-search.md) | the index over every archived conversation |

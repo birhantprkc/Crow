@@ -33,6 +33,21 @@ enabled: true
 Crow ships with `skill-creator` and reads it before it writes. Seeded once, on the first run that
 has no skills directory; deleted, it stays deleted.
 
+## Kit skills
+
+A kit under `<install>/kits/` brings its own skill: `voxel-diorama` from
+[kits/pathtracer](voxel-kit.md) (#298). The skills directory already exists on an upgraded install,
+so a ledger decides instead: `skills/.seeded`, one sha256 per skill name.
+
+| | |
+|---|---|
+| First start with the kit | the skill is written **off**. Off costs the prompt nothing |
+| Switched on by | `install.sh --pathtracer`, `install.ps1 -PathTracer`, or Settings → Skills |
+| Deleted | stays deleted: the ledger remembers it was written |
+| Edited by you | kept as you left it, whatever a newer kit says |
+| Untouched, newer kit | follows the new text and keeps its on/off switch |
+| `@CROW_KITS@` in the body | filled in with `<install>/kits` when the model reads the skill; the file keeps the placeholder |
+
 ```
 Read your skill "skill-creator" first and follow it.
 Then save, as a skill, how to <do the thing>: <steps, flags verbatim, the trap>.
