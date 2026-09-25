@@ -1241,36 +1241,53 @@ TOOLS = [
     _fn("goal_step",
         "Move one step of the plan. Call it with 'running' before you start a "
         "step and with 'done' once you have VERIFIED it -- not when you think "
-        "it should work. Use 'failed' with a reason when it cannot be finished; "
-        "a failed step comes back once, and a second 'failed' skips it and "
-        "moves the goal on. Costs nothing and does not "
-        "move the prompt head.",
+        "it should work. Use 'failed' with a reason when it cannot be "
+        "finished. A step is never skipped by failing: it comes back with a "
+        "reflection, then in a fresh context, then split into 2-3 sub-steps "
+        "('split' with substeps), and after that the goal pauses and asks the "
+        "user. On a visual step, pass checklist once with 'running': 3-6 "
+        "yes/no statements the judge checks on the capture; it is frozen "
+        "after that. Costs nothing and does not move the prompt head.",
         {"step": {"type": "integer",
                   "description": "1-based number of the step, as listed by "
                                  "goal_set."},
-         "status": dict(_STR, description="running, done or failed."),
+         "status": dict(_STR, description="running, done, failed, or split."),
          "note": dict(_STR, description="For done: what proves it -- on "
                                         "visual work the path of the "
                                         "render_page capture. For failed: "
-                                        "why.")},
+                                        "why. For running after a failed "
+                                        "attempt: your reflection."),
+         "checklist": {"type": "array", "items": _STR,
+                       "description": "With running, once per step: yes/no "
+                                      "statements a reviewer can check on the "
+                                      "capture. Prefix 'optional:' for a "
+                                      "nice-to-have."},
+         "substeps": {"type": "array", "items": _STR,
+                      "description": "With split: 2-3 smaller sub-steps, each "
+                                     "verifiable on its own."},
+         "sub": {"type": "integer",
+                 "description": "Report sub-step k of a split step (with "
+                                "done or failed)."}},
         ["step", "status"]),
     # #266. THE MAKER IS NOT THE CHECKER, for pictures too.
     _fn("judge",
-        "Have a separate model with fresh eyes score a capture of visual "
-        "work. It sees only the image(s) and the rubric -- never this "
-        "conversation -- and returns JSON: a 1-10 score per criterion, the "
-        "lowest, and the three weakest points, stored on the goal step. Call "
-        "it after render_page on every visual step, before goal_step 'done': "
-        "a lowest score under the bar (default 8) refuses 'done'. Default "
-        "image: the newest render_page capture and its crop. The rubric is "
-        "the user's accept lines, else PLAN.md's criteria, else criteria.",
+        "Have a separate model with fresh eyes check a capture of visual "
+        "work against the step's frozen checklist. It sees only the image(s) "
+        "-- the render's clock-stepped frames or contact sheet when there are "
+        "any -- and never this conversation, and answers yes, no or unknown "
+        "per item, stored on the goal step. A capture that is software-"
+        "rendered on a GPU step, blank, black, or frozen on a step that needs "
+        "motion is not judged: that is the environment failing. Call it after "
+        "render_page on every visual step, before goal_step 'done': 'done' "
+        "needs every must-item 'yes'. Default image: the newest render_page "
+        "capture.",
         {"images": dict(_STR, description="Image paths, comma-separated. "
                                           "Default: the newest capture."),
-         "criteria": dict(_STR, description="Comma-separated criteria, used "
-                                            "only when neither the user nor "
-                                            "PLAN.md wrote any."),
+         "criteria": dict(_STR, description="Comma-separated items, used only "
+                                            "when the step has no checklist "
+                                            "yet; they are frozen then."),
          "step": {"type": "integer",
-                  "description": "1-based goal step the score belongs to. "
+                  "description": "1-based goal step the verdict belongs to. "
                                  "Default: the running step."}},
         []),
 ]
@@ -18221,6 +18238,13 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
                         "or `title | step | step`.", goal_load(), False)
     # #289: `/goal skip <n> [reason]` -- ONE LINE, a number after the word.
     # "skip the intro | a | b" stays a goal title.
+    redo = _GOAL_REDO.match(text)                              # #296
+    if redo:
+        n = int(redo.group(1))
+        goal, why = goal_step_redo(n - 1)
+        if goal is None:
+            return (why or "nothing reopened.", goal_load(), False)
+        return ("step %d is open again." % n, goal, True)
     skip = _GOAL_SKIP.match(text)
     if skip:
         n, reason = int(skip.group(1)), (skip.group(2) or "").strip()
@@ -18238,6 +18262,7 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
         goal_write(None)
         goal_check_set(None)                                   # #250
         goal_accept_set(None)                                  # #266
+        goal_references_set(None)                              # #295
         return ("goal cleared.", None, True)
     lines = [p.strip() for p in text.splitlines() if p.strip()]
     if len(lines) == 1:
@@ -18251,6 +18276,21 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
                if ln.lower().startswith(GOAL_ACCEPT_PREFIX)]
     accepts = [a for a in accepts if a]
     lines = [ln for ln in lines if not ln.lower().startswith(GOAL_ACCEPT_PREFIX)]
+    # #295: `reference: <image> -- <criterion>` is a reference image for
+    # the judge, not a step. A missing file refuses the whole line: a goal
+    # whose reference silently vanished would be judged on less than asked.
+    refs, ref_bad = [], []
+    for ln in lines:
+        if ln.lower().startswith(GOAL_REFERENCE_PREFIX):
+            ref, bad = goal_reference_parse(ln[len(GOAL_REFERENCE_PREFIX):])
+            if ref is not None:
+                refs.append(ref)
+            else:
+                ref_bad.append(bad)
+    if ref_bad:
+        return ("not set: %s." % "; ".join(ref_bad), goal_load(), False)
+    lines = [ln for ln in lines
+             if not ln.lower().startswith(GOAL_REFERENCE_PREFIX)]
     if len(lines) < 2:
         return ("a goal needs steps: `/goal <title>` then one step per line, "
                 "or `title | step | step`.", goal_load(), False)
@@ -18260,19 +18300,25 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
     check = next((c for c in reversed(checks) if c), None)
     goal_check_set(check)
     goal_accept_set(accepts)                                   # #266
+    goal_references_set(refs)                                  # #295
     # DIE KOSTEN STEHEN VOR DER TAT, wie bei jeder Kopfaenderung: das Ziel geht
     # in den gepinnten Block, also zahlt der naechste Zug einen vollen Prefill.
-    return ("goal: %s -- %d steps%s%s.\n%s"
+    return ("goal: %s -- %d steps%s%s%s.\n%s"
             % (goal["title"], len(goal["steps"]),
                ", acceptance check: %s" % check if check else "",
                ", %d accept line%s for the judge"
                % (len(accepts), "" if len(accepts) == 1 else "s")
                if accepts else "",
+               ", %d reference image%s (advisory)"
+               % (len(refs[:GOAL_REFERENCE_MAX]),
+                  "" if len(refs) == 1 else "s") if refs else "",
                GOAL_COST_NOTE), goal, True)
 
 
 # #289: `/goal skip 4 not verifiable here`.
 _GOAL_SKIP = re.compile(r"(?i)^skip[ \t]+(\d+)(?:[ \t]+([^\n]*))?$")
+# #296: `/goal redo 4` -- robin takes his skip back.
+_GOAL_REDO = re.compile(r"(?i)^redo[ \t]+(\d+)[ \t]*$")
 
 
 # #240: who wrote a plan -- the user through `/goal`, or the model through
@@ -18362,6 +18408,11 @@ def _goal_step_norm(text: str) -> str:
 _GOAL_CARRIED_FIELDS = ("status", "note", "started", "started_tokens",
                         "seconds", "tokens", "delegated",
                         "failures", "skipped_by")             # #289
+# #294/#295: what every matched step keeps, whatever its status.
+_GOAL_LADDER_FIELDS = ("checklist", "checklist_from", "checklist_at", "passed",
+                       "judge", "failures", "env_failures", "unknowns",
+                       "pending", "env_seen", "fail_log", "reflections", "subs",
+                       "capture", "budget_base")
 # ... and what the goal keeps: its clock and its bill, in pairs.
 _GOAL_CARRIED_TOTALS = ("spent", "last_spent", "delegated", "created",
                         "started", "last_at")
@@ -18403,6 +18454,16 @@ def _carry_goal_marks(old: "dict | None", new: "dict") -> "dict | None":
     des neuen Plans -- er ist das, was das Modell gerade geschrieben hat.
     """
     steps_old = (old or {}).get("steps") or []
+    # #294/#295: THE CONTRACT AND THE LADDER RIDE WITH ANY MATCHED STEP, also
+    # a running one -- a replan must not be the way out of a frozen
+    # checklist or a failure count.
+    ladder = {_goal_step_norm(s.get("text")): s for s in steps_old}
+    for step in new.get("steps") or []:
+        found = ladder.get(_goal_step_norm(step.get("text")))
+        if found is not None:
+            for field in _GOAL_LADDER_FIELDS:
+                if field in found:
+                    step[field] = found[field]
     marks = {_goal_step_norm(s.get("text")): s
              for s in steps_old
              if s.get("status") in (GOAL_DONE, GOAL_FAILED, GOAL_SKIPPED)}
@@ -18452,13 +18513,19 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     # #210. DER ALTE PLAN VOR DEM NEUEN GELESEN -- `goal_start` ueberschreibt
     # goal.json, und was dann noch in ihm stand, steht nur noch hier.
     before = goal_load()
+    # #294: A PAUSED GOAL IS ROBIN'S TO RESUME. A fresh plan written over it
+    # would clear the pause without him -- the silent move-on again.
+    if goal_paused(before) is not None:
+        return json.dumps({"ok": False, "error": (
+            "the goal is PAUSED and waits for the user's line; a new plan "
+            "cannot replace it now. Write your report and stop.")})
     goal = goal_start(str(title or "").strip() or "the task", clean,
                       by=GOAL_BY_MODEL)
     if goal is None:
         return json.dumps({"ok": False, "error": "could not write the plan"})
     carried = _carry_goal_marks(before, goal)
-    if carried:
-        goal_write(goal)
+    # #294/#295: written also when only the ladder fields rode along.
+    goal_write(goal)
     # #210. `next` NENNT DEN ERSTEN OFFENEN SCHRITT, nicht blind den ersten:
     # ein getragener Haken vorn im Plan waere eine Anweisung, Fertigtes noch
     # einmal zu tun -- genau die Schleife, die das Panel zeigen wuerde.
@@ -18475,7 +18542,8 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     return json.dumps(out)
 
 
-def tool_goal_step(step: int, status: str, note: str = "") -> str:
+def tool_goal_step(step: int, status: str, note: str = "", checklist=None,
+                   substeps=None, sub=None) -> str:
     """#165. Einen Schritt bewegen. Gibt JSON mit dem naechsten offenen zurueck.
 
     DIE ANTWORT NENNT DEN NAECHSTEN SCHRITT, und das ist der Motor selbst: das
@@ -18484,13 +18552,73 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
 
     EINS-BASIERT NACH AUSSEN, weil der Plan so aufgezaehlt wird, wie ein Mensch
     ihn liest -- und weil das Modell die Nummer aus genau dieser Liste abliest.
+
+    #294: `failed` has a class and a ladder (`goal_fail`), never a skip;
+    `split` writes the sub-steps of the ADaPT rung, `sub` reports one.
+    #295: `checklist` on `running` is the step's contract, written once.
     """
     try:
         index = int(step) - 1
     except (TypeError, ValueError):
         return json.dumps({"ok": False, "error": "step must be a number"})
     state = str(status or "").strip().lower()
+    current = goal_load()
+    steps = (current or {}).get("steps") or []
+    if 0 <= index < len(steps):
+        # #294: A PAUSED GOAL WAITS FOR ROBIN. The report turn says "no
+        # tools"; a model that moves a step anyway would move it past him.
+        pause = goal_paused(current)
+        if pause is not None:
+            return json.dumps({"ok": False, "error": (
+                "the goal is PAUSED at step %s and waits for robin's line (%s). "
+                "Call no tools: write your report for him and stop."
+                % (pause.get("step"), _clip(pause.get("why") or "", 200)))})
+        # #296: ROBIN'S SKIP IS HIS WORD. The model may not turn it into
+        # `done` (2026-09-24: step 4 "skipped by robin" stored as done) nor
+        # take it up again; `/goal redo n` is the way back, and it is his.
+        mine = steps[index]
+        if (mine.get("status") == GOAL_SKIPPED
+                and mine.get("skipped_by") == GOAL_BY_USER):
+            return json.dumps({"ok": False, "error": (
+                "step %d was skipped by the user (\"%s\"); only the user can "
+                "take it back with `/goal redo %d`. Continue with the next "
+                "step." % (index + 1, _clip(mine.get("note") or "", 160),
+                           index + 1))})
+    if sub is not None and str(sub).strip() != "":
+        try:
+            k = int(sub) - 1
+        except (TypeError, ValueError):
+            return json.dumps({"ok": False, "error": "sub must be a number"})
+        if state not in (GOAL_DONE, GOAL_FAILED):
+            return json.dumps({"ok": False, "error": "a sub-step is reported "
+                                                     "done or failed"})
+        goal, bad = goal_sub_end(index, k, state == GOAL_DONE, note)
+        if goal is None:
+            return json.dumps({"ok": False, "error": bad})
+        own = goal["steps"][index]
+        out = {"ok": True, "step": index + 1, "sub": "%d.%d" % (index + 1, k + 1),
+               "status": state}
+        if goal_paused(goal):
+            out["paused"] = goal_fail_said(index, {"action": "pause"})
+        else:
+            nxt = goal_sub_next(own)
+            out["next"] = ("sub-step %d.%d: %s" % (index + 1, nxt + 1,
+                                                  own["subs"][nxt]["text"])
+                           if nxt is not None else
+                           "all sub-steps are done -- now verify step %d "
+                           "itself and report it done" % (index + 1))
+        return json.dumps(out)
+    if state == "split":
+        goal, bad = goal_step_split(index, substeps)
+        if goal is None:
+            return json.dumps({"ok": False, "error": bad})
+        subs = goal["steps"][index]["subs"]
+        return json.dumps({"ok": True, "step": index + 1, "split": len(subs),
+                           "next": "sub-step %d.1: %s" % (index + 1,
+                                                          subs[0]["text"])})
+    reflected = False
     if state == GOAL_RUNNING:
+        reflected = goal_reflect(index, note)                   # #294
         goal = goal_step_begin(index, note=note)                # #275
     elif state in (GOAL_DONE, GOAL_FAILED):
         passed = None
@@ -18501,11 +18629,25 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
         goal = goal_step_end(index, ok=(state == GOAL_DONE), note=note)
     else:
         return json.dumps({"ok": False,
-                           "error": "status must be running, done or failed"})
+                           "error": "status must be running, done, failed or "
+                                    "split"})
     if goal is None:
         return json.dumps({"ok": False,
                            "error": "no such step, or it is already done, or "
                                     "another step is still running"})
+    verdict = None
+    if state == GOAL_FAILED:
+        # #294: THE CLASS COMES FROM THE EVIDENCE, NOT FROM THE NOTE. A
+        # model's own account of why it failed is what ToolMaze warns
+        # about; the step's last capture says whether the instrument worked.
+        cap = goal["steps"][index].get("capture") or {}
+        env = capture_precheck([cap["capture"]] if cap.get("capture") else [],
+                               cap, goal, index) if cap else None
+        verdict = goal_fail(index, GOAL_ENV if env else GOAL_CAP,
+                            "%s%s" % (note, (" [capture: %s]" % env) if env
+                                      else ""),
+                            capture=cap.get("capture") if env else None)
+        goal = goal_load() or goal
     done, total = goal_counts(goal)
     nxt = goal_next_open(goal)
     out = {"ok": True, "done": done, "total": total,
@@ -18514,17 +18656,19 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
            "next": None if nxt is None else goal["steps"][nxt]["text"]}
     if state == GOAL_DONE and passed:
         out["acceptance_check"] = "passed: %s" % passed
-    # #289: WHAT THE `failed` DID, said in the answer -- the model reads
-    # `next_step` from here, and a retry or a skip it is not told about is
-    # the same step again or a step it thinks is still open.
-    moved = goal["steps"][index].get("status")
-    if state == GOAL_FAILED and moved == GOAL_FAILED:
-        out["retry"] = ("step %d failed once; it comes back once more -- try "
-                        "a different approach. A second 'failed' skips it."
-                        % (index + 1))
-    elif state == GOAL_FAILED and moved == GOAL_SKIPPED:
-        out["skipped"] = ("step %d failed twice and is skipped; the goal "
-                          "moves on." % (index + 1))
+    if verdict is not None:
+        out["failure"] = {"class": verdict["class"],
+                          "counted": verdict["counted"],
+                          "action": verdict["action"]}
+        out["then"] = goal_fail_said(index, verdict)
+    if reflected:
+        out["reflection"] = "kept; attempt 2 may start"
+    if state == GOAL_RUNNING and checklist is not None:        # #295
+        items, bad = goal_checklist_write(index, checklist)
+        if bad:
+            out["checklist_error"] = bad
+        out["checklist"] = [("" if c.get("must") else "optional: ") + c["item"]
+                            for c in items]
     if goal.get("status") == GOAL_PARTIAL:
         out["ended"] = "complete with %d skipped" % len(goal_skipped(goal))
     return json.dumps(out)
@@ -18612,6 +18756,14 @@ def goal_done_refusal(index: int, note: str = "",
         return ("refused: step %d was last reported failed (\"%s\"). A 'done' "
                 "after that needs a note saying what proves it works now."
                 % (index + 1, str(step.get("note") or "")[:160])), None
+    # #294: A SPLIT STEP IS DONE AFTER ITS SUB-STEPS, not instead of them.
+    open_sub = goal_sub_next(step) if step.get("subs") else None
+    if open_sub is not None:
+        return ("refused: step %d is split and sub-step %d.%d is not done: %s. "
+                "Report it with goal_step(step=%d, sub=%d, ...) first."
+                % (index + 1, index + 1, open_sub + 1,
+                   step["subs"][open_sub]["text"], index + 1,
+                   open_sub + 1)), None
     evidence = goal_evidence_refusal(goal, index, said)        # #267
     if evidence:
         return evidence, None
@@ -18782,6 +18934,25 @@ def goal_evidence_refusal(goal: "dict | None", index: int,
                 "or checking something visible.)"
                 % (index + 1, where.replace(os.sep, "/")))
     verdict = goal["steps"][index].get("judge")
+    # #295: THE FROZEN CHECKLIST IS THE BAR. Every must-item "yes" in the
+    # judge's last verdict, and a step with a checklist is not done
+    # without one. The min-score rule below only reads verdicts stored
+    # before the checklist (goal.json files from v2.6.0).
+    if isinstance(verdict, dict) and "pass" in verdict:
+        if verdict.get("pass"):
+            return None
+        open_items = ["%s: %s" % (k, v) for k, v in
+                      (verdict.get("checklist") or {}).items()
+                      if v != "yes" and k in (verdict.get("must") or [])]
+        return ("refused: the judge (%s) did not pass step %d -- every "
+                "must-item of its frozen checklist needs 'yes'. Open: %s. "
+                "Fix those, render again, call judge again."
+                % (verdict.get("model") or "?", index + 1,
+                   "; ".join(open_items[:6]) or "?"))
+    if goal_checklist(goal, index):
+        return ("refused: step %d has a frozen checklist and no judge verdict "
+                "on it. Call judge on the capture, then report done."
+                % (index + 1))
     low = verdict.get("min") if isinstance(verdict, dict) else None
     if isinstance(low, (int, float)) and low < JUDGE_THRESHOLD:
         scores = verdict.get("scores") or {}
@@ -18885,10 +19056,965 @@ def goal_retry_nudge(goal: dict, index: int, note: str) -> str:
     return ("[Goal mode. Step %d failed: \"%s\"\nTry it ONCE more with a "
             "different approach -- not the one that failed. Step %d: %s\n"
             "If it fails again, call goal_step with 'failed' and say why: the "
-            "step is then skipped and the goal moves on.%s]"
+            "step is never skipped -- it gets a fresh context, then a split, "
+            "then it pauses for robin (#294).%s]"
             % (index + 1, _clip(note, 600), index + 1,
                goal["steps"][index]["text"],
                goal_nudge_evidence(goal, index)))
+
+
+# ------------------------------------------- #294, the failure ladder ------
+#
+# NO SILENT SKIP. robin's decision of 2026-09-25, after the diorama goal ended
+# "complete with 4 skipped": steps 5-8 were skipped by #289 on their second
+# `failed`, every one of them judged on a software-GL capture, and nobody was
+# asked. A failure now has a class, and each class a ladder:
+#
+#   environment  the instrument failed, not the model: the capture is
+#                `render_mode` unavailable, or software on a GPU step; the
+#                precheck finds it uniform, blank or near-black; the frames
+#                are identical on a step that needs motion; no judge answered.
+#                -> retry at most GOAL_ENV_RETRIES times, GOAL_ENV_DELAY apart,
+#                then PAUSE. The same capture counts once.
+#   capability   a valid capture, and the judge says the checklist is not met
+#                (or the model reports `failed` on valid evidence).
+#                -> attempt 2 after a written reflection on the judge's
+#                feedback (Reflexion), attempt 3 in a fresh context (Claude
+#                Code: "after two failed corrections, /clear"), then the step
+#                is DECOMPOSED into 2-3 sub-steps (ADaPT); a failed sub-step,
+#                or a miss after all of them are done, PAUSES.
+#   unknown      the judge could not tell on a must-item: twice -> PAUSE.
+#
+# A RUNG IS CLIMBED ONLY ONCE THE ONE BEFORE WAS TAKEN (`pending`): a model
+# that calls judge three times in one turn has had one attempt, not three.
+# Every PAUSE ends in a report the model writes for robin and a question;
+# goal mode then waits for a typed line (the window's `_goal_nudge`).
+
+GOAL_LADDER_REFLECT = "reflect"
+GOAL_LADDER_FRESH = "fresh"
+GOAL_LADDER_SPLIT = "decompose"
+GOAL_LADDER_SUBS = "subs"
+GOAL_LADDER_RETRY = "retry"
+GOAL_SUBSTEPS_MIN, GOAL_SUBSTEPS_MAX = 2, 3
+GOAL_REFLECTIONS_KEEP = 3
+
+
+def goal_limits_set(minutes=None, turns=None) -> None:
+    """#294: the settings.json values (None or nonsense: the default)."""
+    global GOAL_STEP_MINUTES, GOAL_NO_PROGRESS_TURNS
+
+    def num(value, default):
+        try:
+            return default if value is None else max(0, int(value))
+        except (TypeError, ValueError):
+            return default
+    GOAL_STEP_MINUTES = num(minutes, GOAL_STEP_MINUTES_DEFAULT)
+    GOAL_NO_PROGRESS_TURNS = num(turns, GOAL_NO_PROGRESS_DEFAULT)
+
+
+def _goal_env_int(name: str, fallback: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return max(0, int(raw)) if raw else fallback
+    except ValueError:
+        return fallback
+
+
+def goal_step_minutes() -> int:
+    """#294: the per-step budget in minutes; the environment wins."""
+    return _goal_env_int("CROW_GOAL_STEP_MINUTES", GOAL_STEP_MINUTES)
+
+
+def goal_no_progress_turns() -> int:
+    """#294: nudges without a newly passed checklist item before a pause."""
+    return _goal_env_int("CROW_GOAL_NO_PROGRESS_TURNS", GOAL_NO_PROGRESS_TURNS)
+
+
+def goal_step_active(step: dict, now: "float | None" = None) -> float:
+    """Seconds this step has run: billed windows plus the open one."""
+    at = float(now if now is not None else time.time())
+    began = step.get("started")
+    open_window = max(0.0, at - float(began)) if began is not None else 0.0
+    return float(step.get("seconds") or 0.0) + open_window
+
+
+def goal_budget_due(goal: "dict | None", index: int,
+                    now: "float | None" = None) -> "str | None":
+    """#294: why step `index` is over its budget, or None. Counted from the
+    last resume (`budget_base`), so a typed line gives the step a new hour."""
+    minutes = goal_step_minutes()
+    steps = (goal or {}).get("steps") or []
+    if minutes <= 0 or not 0 <= index < len(steps):
+        return None
+    step = steps[index]
+    used = goal_step_active(step, now) - float(step.get("budget_base") or 0.0)
+    if used < minutes * 60:
+        return None
+    return ("step %d has run %d min, over its budget of %d min"
+            % (index + 1, int(used // 60), minutes))
+
+
+def goal_paused(goal: "dict | None" = None) -> "dict | None":
+    """#294: the pause record when the goal waits for robin, else None."""
+    goal = goal if goal is not None else goal_load()
+    if not goal or goal.get("status") != GOAL_PAUSED:
+        return None
+    pause = goal.get("pause")
+    return pause if isinstance(pause, dict) else {"step": None, "why": "?"}
+
+
+def _goal_pause_in(goal: dict, index: int, cls: str, why: str,
+                   at: float) -> None:
+    """Pause a loaded goal (the caller holds the lock and writes it). The
+    running step's clock is billed and stopped: a night on a paused step
+    is not work (step 5 of 2026-09-24/25 carried 8 idle hours)."""
+    steps = goal.get("steps") or []
+    if 0 <= index < len(steps):
+        step = steps[index]
+        if step.get("started") is not None:
+            spent = int(goal.get("spent") or 0)
+            _goal_close_window(goal, step, at, spent)
+            goal["last_at"], goal["last_spent"] = at, spent
+    goal["status"] = GOAL_PAUSED
+    goal["pause"] = {"step": index + 1 if 0 <= index < len(steps) else None,
+                     "class": cls, "why": str(why or "")[:600], "at": at,
+                     "asked": False, "report": ""}
+
+
+def goal_pause(index: int, cls: str, why: str,
+               now: "float | None" = None) -> "dict | None":
+    """#294: pause the goal at step `index` (0-based). The goal after."""
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None:
+            return None
+        if goal.get("status") != GOAL_PAUSED:
+            _goal_pause_in(goal, index, cls, why,
+                           float(now if now is not None else time.time()))
+            goal_write(goal)
+        return goal
+
+
+def goal_pause_asked() -> "dict | None":
+    """#294: mark that the report turn went out. The pause after, or None."""
+    with _GOAL_LOCK:
+        goal = goal_load()
+        pause = goal_paused(goal)
+        if pause is None:
+            return None
+        pause["asked"] = True
+        goal["pause"] = pause
+        goal_write(goal)
+        return pause
+
+
+def goal_pause_report(text: str) -> None:
+    """#294: keep the model's report for robin on the pause record."""
+    with _GOAL_LOCK:
+        goal = goal_load()
+        pause = goal_paused(goal)
+        if pause is None:
+            return
+        pause["report"] = str(text or "").strip()[:4000]
+        goal["pause"] = pause
+        goal_write(goal)
+
+
+def goal_resume(now: "float | None" = None) -> "dict | None":
+    """#294: robin typed a line -- the pause is over. The step's counters
+    start again and so does its budget; the pause is kept as `last_pause`
+    for the record. None when nothing was paused."""
+    with _GOAL_LOCK:
+        goal = goal_load()
+        pause = goal_paused(goal)
+        if pause is None:
+            return None
+        at = float(now if now is not None else time.time())
+        index = int(pause.get("step") or 0) - 1
+        steps = goal.get("steps") or []
+        if 0 <= index < len(steps):
+            step = steps[index]
+            for key in ("env_failures", "unknowns", "failures", "pending",
+                        "env_seen"):
+                step.pop(key, None)
+            step["budget_base"] = float(step.get("seconds") or 0.0)
+            for sub in step.get("subs") or []:
+                if sub.get("status") == GOAL_FAILED:
+                    sub["status"] = GOAL_OPEN
+            if step.get("subs") and not all(
+                    s.get("status") == GOAL_DONE for s in step["subs"]):
+                step["pending"] = GOAL_LADDER_SUBS
+        goal["last_pause"] = dict(pause, resumed=at)
+        goal.pop("pause", None)
+        goal["status"] = GOAL_OPEN
+        _goal_settle(goal)
+        goal_write(goal)
+        return goal
+
+
+def goal_pending(goal: "dict | None", index: int) -> "str | None":
+    """#294: the rung the engine owes step `index`, or None."""
+    steps = (goal or {}).get("steps") or []
+    if not 0 <= index < len(steps):
+        return None
+    return steps[index].get("pending") or None
+
+
+def goal_pending_clear(index: int, rung: str) -> None:
+    """#294: the engine took rung `rung` (the retry went out, the roll is
+    arranged) -- it is not owed any more."""
+    with _GOAL_LOCK:
+        goal = goal_load()
+        steps = (goal or {}).get("steps") or []
+        if 0 <= index < len(steps) and steps[index].get("pending") == rung:
+            steps[index].pop("pending", None)
+            goal_write(goal)
+
+
+def goal_fail(index: int, cls: str, why: str, capture: "str | None" = None,
+              source: str = "model", now: "float | None" = None) -> dict:
+    """#294. Count one failure of class `cls` on step `index` and decide the
+    next rung. Returns {"counted", "action", "class", "count"}; `action` is
+    one of retry/reflect/fresh/decompose/subs/unknown/pause, or "paused"
+    when the goal already waits for robin."""
+    at = float(now if now is not None else time.time())
+    with _GOAL_LOCK:
+        goal = goal_load()
+        steps = (goal or {}).get("steps") or []
+        if not 0 <= index < len(steps):
+            return {"counted": False, "action": None, "class": cls, "count": 0}
+        if goal.get("status") == GOAL_PAUSED:
+            return {"counted": False, "action": "paused", "class": cls,
+                    "count": 0}
+        step = steps[index]
+        why = str(why or "").strip() or "(no reason given)"
+        counted, action, count, pause_why = True, None, 0, None
+        if cls == GOAL_ENV:
+            # ONE PER RETRY: the same capture again, or another failure
+            # before the engine's retry (with its wait) went out, is the
+            # same attempt -- three render calls in one turn are not three
+            # retries.
+            if (capture and capture == step.get("env_seen")) or \
+                    step.get("pending") == GOAL_LADDER_RETRY:
+                counted, action = False, GOAL_LADDER_RETRY
+                count = int(step.get("env_failures") or 0)
+            else:
+                count = int(step.get("env_failures") or 0) + 1
+                step["env_failures"] = count
+                if capture:
+                    step["env_seen"] = capture
+                if count > GOAL_ENV_RETRIES:
+                    pause_why = ("the environment failed %d times: %s"
+                                 % (count, why))
+                else:
+                    action = step["pending"] = GOAL_LADDER_RETRY
+        elif cls == GOAL_UNKNOWN:
+            count = int(step.get("unknowns") or 0) + 1
+            step["unknowns"] = count
+            if count >= GOAL_UNKNOWN_PAUSE:
+                pause_why = ("the judge answered 'unknown' %d times on this "
+                             "step: %s" % (count, why))
+            else:
+                action = GOAL_UNKNOWN
+        else:
+            cls = GOAL_CAP
+            owed = step.get("pending")
+            if owed in (GOAL_LADDER_REFLECT, GOAL_LADDER_FRESH,
+                        GOAL_LADDER_SPLIT, GOAL_LADDER_SUBS):
+                # The rung before is not taken yet: same attempt.
+                counted, action = False, owed
+                count = int(step.get("failures") or 0)
+            else:
+                count = int(step.get("failures") or 0) + 1
+                step["failures"] = count
+                if step.get("subs"):
+                    pause_why = ("step %d still fails after it was split into "
+                                 "sub-steps: %s" % (index + 1, why))
+                elif count == 1:
+                    action = step["pending"] = GOAL_LADDER_REFLECT
+                elif count == 2:
+                    action = step["pending"] = GOAL_LADDER_FRESH
+                else:
+                    action = step["pending"] = GOAL_LADDER_SPLIT
+        if counted:
+            fails = step.get("fail_log") or []
+            fails.append({"class": cls, "why": why[:400], "at": at,
+                          "source": source, "capture": capture})
+            step["fail_log"] = fails[-8:]
+        if pause_why is not None:
+            step.pop("pending", None)
+            _goal_pause_in(goal, index, cls, pause_why, at)
+            action = "pause"
+        goal_write(goal)
+        return {"counted": counted, "action": action, "class": cls,
+                "count": count}
+
+
+def goal_fail_said(index: int, verdict: dict) -> str:
+    """#294: what a `goal_fail` result means, for the tool answer."""
+    n, action = index + 1, verdict.get("action")
+    if action in ("pause", "paused"):
+        return ("goal PAUSED at step %d: this goes to robin now. Stop working, "
+                "call no more tools, and wait -- the next turn asks you for "
+                "a report." % n)
+    if action == GOAL_LADDER_RETRY:
+        return ("environment failure %d of %d allowed on step %d -- not your "
+                "work. Render again later; the goal pauses after %d."
+                % (verdict.get("count", 0), GOAL_ENV_RETRIES, n,
+                   GOAL_ENV_RETRIES))
+    if action == GOAL_LADDER_REFLECT:
+        return ("attempt 1 of step %d failed. Before changing anything, write "
+                "a reflection on the judge's feedback: goal_step(step=%d, "
+                "status='running', note='reflection: what the judge saw, why, "
+                "what you will do differently'). Then attempt 2." % (n, n))
+    if action == GOAL_LADDER_FRESH:
+        return ("attempt 2 of step %d failed. End this turn: attempt 3 starts "
+                "in a fresh context that carries the judge's feedback and your "
+                "reflections." % n)
+    if action == GOAL_LADDER_SPLIT:
+        return ("attempt 3 of step %d failed. Split the step into %d-%d smaller "
+                "sub-steps, the hardest part first: goal_step(step=%d, "
+                "status='split', substeps=[...])."
+                % (n, GOAL_SUBSTEPS_MIN, GOAL_SUBSTEPS_MAX, n))
+    if action == GOAL_LADDER_SUBS:
+        return ("step %d is split: finish its sub-steps first, reporting each "
+                "with goal_step(step=%d, sub=k, status=...)." % (n, n))
+    if action == GOAL_UNKNOWN:
+        return ("the judge could not tell on a must-item. Make the capture "
+                "show it (frames, framing, a closer view) and judge again -- "
+                "a second 'unknown' pauses the goal.")
+    return ""
+
+
+def goal_reflect(index: int, note: str) -> bool:
+    """#294: a `running` note while a reflection is owed IS the reflection."""
+    text = str(note or "").strip()
+    if not text:
+        return False
+    with _GOAL_LOCK:
+        goal = goal_load()
+        steps = (goal or {}).get("steps") or []
+        if not 0 <= index < len(steps):
+            return False
+        step = steps[index]
+        if step.get("pending") != GOAL_LADDER_REFLECT:
+            return False
+        kept = step.get("reflections") or []
+        kept.append(text[:800])
+        step["reflections"] = kept[-GOAL_REFLECTIONS_KEEP:]
+        step.pop("pending", None)
+        goal_write(goal)
+        return True
+
+
+def goal_step_split(index: int, substeps) -> "tuple[dict | None, str | None]":
+    """#294, ADaPT: the failed step becomes 2-3 sub-steps under it. The
+    step keeps its number, its checklist and its gate; the sub-steps are the
+    road to it. (goal, None) or (None, why not)."""
+    items, bad = goal_steps_from(substeps)
+    if bad is not None:
+        return None, bad.replace("steps must", "substeps must")
+    items = [str(x).strip() for x in items or [] if str(x).strip()]
+    if not GOAL_SUBSTEPS_MIN <= len(items) <= GOAL_SUBSTEPS_MAX:
+        return None, ("a split needs %d to %d sub-steps, got %d"
+                      % (GOAL_SUBSTEPS_MIN, GOAL_SUBSTEPS_MAX, len(items)))
+    with _GOAL_LOCK:
+        goal = goal_load()
+        steps = (goal or {}).get("steps") or []
+        if not 0 <= index < len(steps):
+            return None, "no such step"
+        step = steps[index]
+        if step.get("subs"):
+            return None, ("step %d is already split; a failed sub-step pauses "
+                          "the goal for robin" % (index + 1))
+        if step.get("pending") != GOAL_LADDER_SPLIT:
+            return None, ("step %d is not due for a split -- that comes after "
+                          "three failed attempts" % (index + 1))
+        step["subs"] = [{"text": t[:300], "status": GOAL_OPEN, "note": ""}
+                        for t in items]
+        step["pending"] = GOAL_LADDER_SUBS
+        goal_write(goal)
+        return goal, None
+
+
+def goal_sub_next(step: dict) -> "int | None":
+    """The first sub-step not done, 0-based, or None."""
+    for n, sub in enumerate(step.get("subs") or []):
+        if sub.get("status") != GOAL_DONE:
+            return n
+    return None
+
+
+def goal_sub_end(index: int, sub: int, ok: bool, note: str,
+                 now: "float | None" = None) -> "tuple[dict | None, str | None]":
+    """#294: sub-step `sub` (0-based) of step `index` done or failed. A
+    failed sub-step pauses the goal: the decomposition was the last rung."""
+    at = float(now if now is not None else time.time())
+    with _GOAL_LOCK:
+        goal = goal_load()
+        steps = (goal or {}).get("steps") or []
+        if not 0 <= index < len(steps):
+            return None, "no such step"
+        step = steps[index]
+        subs = step.get("subs") or []
+        if not 0 <= sub < len(subs):
+            return None, ("step %d has no sub-step %d" % (index + 1, sub + 1)
+                          if subs else "step %d is not split" % (index + 1))
+        said = str(note or "").strip()
+        if ok and not said:
+            return None, "a sub-step's 'done' needs a note saying what proves it"
+        if ok:
+            hit = _GOAL_NOT_DONE.search(said)
+            if hit:
+                return None, ("refused: the note says this sub-step is not done "
+                              "(\"%s\")" % hit.group(0))
+        subs[sub]["status"] = GOAL_DONE if ok else GOAL_FAILED
+        subs[sub]["note"] = said[:400]
+        if ok and goal_sub_next(step) is None:
+            step.pop("pending", None)
+        if not ok:
+            step.pop("pending", None)
+            _goal_pause_in(goal, index, GOAL_CAP,
+                           "sub-step %d.%d failed after the split: %s"
+                           % (index + 1, sub + 1, said or "(no reason given)"),
+                           at)
+        goal_write(goal)
+        return goal, None
+
+
+# ------------------------------------------- #295, the frozen checklist ----
+#
+# THE STEP'S CONTRACT, fixed when the step starts and never rewritten by the
+# model: the user's `accept:` lines when there are any (`accept: 5: ...`
+# binds to step 5, a line without a number to every visual step), else the
+# list the model writes ONCE with goal_step(n, 'running', checklist=[...]),
+# else -- at the first judge call -- the step's own text and "not blank".
+# The judge answers each item yes/no/unknown; the step passes when every
+# must-item is "yes". Anthropic's sprint contract (harness design, 2026)
+# fixes the done-criteria before the work; ArtifactsBench judges rendered
+# artifacts against a per-task checklist.
+
+GOAL_CHECK_OPTIONAL = re.compile(r"(?i)^\s*(?:optional|nice)\s*:\s*")
+_GOAL_ACCEPT_STEP = re.compile(r"^\s*(\d+)\s*:\s*(.+)$", re.S)
+GOAL_CHECK_DEFAULT_FRAME = ("the frame shows the scene itself -- not a blank, "
+                            "black or placeholder frame")
+
+
+def _checklist_entry(text: str, must: bool = True) -> "dict | None":
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if GOAL_CHECK_OPTIONAL.match(text):
+        text, must = GOAL_CHECK_OPTIONAL.sub("", text).strip(), False
+    return {"item": text[:200], "must": must} if text else None
+
+
+def goal_accept_for(index: int) -> "list[str]":
+    """#295: the user's accept items that bind step `index` (0-based)."""
+    out: "list[str]" = []
+    for line in goal_accept_get():
+        hit = _GOAL_ACCEPT_STEP.match(line)
+        if hit:
+            if int(hit.group(1)) - 1 != index:
+                continue
+            line = hit.group(2)
+        for item in _rubric_split(line):
+            if item not in out:
+                out.append(item)
+    return out
+
+
+def _checklist_refs(goal: "dict | None") -> "list[dict]":
+    """#295: the pairwise reference items -- advisory, see `goal_references`."""
+    out = []
+    for ref in goal_references():
+        what = ref.get("criterion") or "overall look"
+        out.append({"item": "as good as the reference image %s on: %s"
+                            % (os.path.basename(ref["path"]), what),
+                    "must": False, "reference": ref["path"]})
+    return out
+
+
+def _checklist_build(goal: dict, index: int, items, source: str) -> list:
+    step_text = re.sub(r"\s+", " ", str(goal["steps"][index].get("text")
+                                        or "")).strip()
+    entries = [e for e in (_checklist_entry(x) for x in items or []) if e]
+    if source != GOAL_CHECK_FROM_USER and step_text:
+        own = "delivers: " + step_text[:160]
+        entries = [{"item": own, "must": True}] + [
+            e for e in entries if e["item"] != own]
+    return (entries[:JUDGE_MAX_CRITERIA]
+            + (_checklist_refs(goal) if goal_step_needs_render(goal, index)
+               else []))
+
+
+GOAL_CHECK_FROM_USER = "the user's accept lines"
+GOAL_CHECK_FROM_MODEL = "the model, at step start"
+GOAL_CHECK_FROM_JUDGE = "the first judge call"
+
+
+def _checklist_freeze_in(goal: dict, index: int, items, source: str,
+                         at: float) -> bool:
+    step = goal["steps"][index]
+    if step.get("checklist"):
+        return False
+    built = _checklist_build(goal, index, items, source)
+    if not built:
+        return False
+    step["checklist"] = built
+    step["checklist_from"] = source
+    step["checklist_at"] = at
+    return True
+
+
+def goal_checklist(goal: "dict | None", index: int) -> "list[dict]":
+    steps = (goal or {}).get("steps") or []
+    if not 0 <= index < len(steps):
+        return []
+    found = steps[index].get("checklist")
+    return [c for c in found if isinstance(c, dict) and c.get("item")] \
+        if isinstance(found, list) else []
+
+
+def goal_checklist_write(index: int, items,
+                         now: "float | None" = None) -> "tuple[list, str | None]":
+    """#295: the model's one checklist for step `index`. (checklist, error)."""
+    items, bad = goal_steps_from(items)
+    if bad is not None:
+        return [], bad.replace("steps must", "checklist must")
+    with _GOAL_LOCK:
+        goal = goal_load()
+        steps = (goal or {}).get("steps") or []
+        if not 0 <= index < len(steps):
+            return [], "no such step"
+        frozen = goal_checklist(goal, index)
+        if frozen:
+            return frozen, ("step %d's checklist is frozen (from %s) and was "
+                            "not changed -- it is the contract the judge "
+                            "checks: %s" % (index + 1,
+                                            steps[index].get("checklist_from")
+                                            or "?",
+                                            "; ".join(c["item"] for c in frozen)))
+        at = float(now if now is not None else time.time())
+        if not _checklist_freeze_in(goal, index, items, GOAL_CHECK_FROM_MODEL,
+                                    at):
+            return [], "an empty checklist was not stored"
+        goal_write(goal)
+        return goal_checklist(goal, index), None
+
+
+def goal_progress(goal: "dict | None", index: int) -> "int | None":
+    """#294: how many checklist items of step `index` have ever passed, or
+    None when the step has no checklist (then only the budget watches it)."""
+    if not goal_checklist(goal, index) or \
+            not goal_step_needs_render(goal, index):
+        return None
+    return len(goal["steps"][index].get("passed") or [])
+
+
+# ------------------------------------------- #295, the render contract -----
+#
+# WHAT render_page SAYS ABOUT ITS CAPTURE. The render ticket adds
+# `render_mode` (gpu | software | unavailable), `renderer`, `frames` (clock-
+# stepped captures), `contact_sheet` and `precheck` {uniform,
+# distinct_colours, dark_pct, identical_frames, max_frame_diff}. Read from
+# the result text as a JSON object on a line, or as `key: value` lines; the
+# #213 line ("gpu (angle)" / "software (swiftshader)") is the fallback. Every
+# field is optional: a result without them is judged as before.
+
+_CONTRACT_KEYS = ("render_mode", "renderer", "frames", "contact_sheet",
+                  "precheck")
+_CONTRACT_KV = re.compile(r"(?im)^\s*(render_mode|renderer|contact_sheet|"
+                          r"frames|precheck)\s*[:=]\s*(.+?)\s*$")
+_CONTRACT_LEGACY = re.compile(r"\b(gpu|software) \((angle|swiftshader)\)")
+_RENDER_CONTRACTS: "dict[str, dict]" = {}
+_RENDER_CONTRACTS_KEEP = 64
+
+
+def render_contract(text: str) -> "dict | None":
+    """The render facts of one render_page result, or None."""
+    text = text if isinstance(text, str) else ""
+    if not text:
+        return None
+    found: dict = {}
+    for line in text.splitlines():
+        start = line.find("{")
+        if start < 0:
+            continue
+        try:
+            doc = json.loads(line[start:])
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and any(k in doc for k in _CONTRACT_KEYS):
+            found.update({k: doc[k] for k in _CONTRACT_KEYS if k in doc})
+            if isinstance(doc.get("capture"), str):
+                found["capture"] = doc["capture"]
+    for key, value in _CONTRACT_KV.findall(text):
+        key = key.lower()
+        if key in found:
+            continue
+        if key == "precheck":
+            try:
+                doc = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(doc, dict):
+                found[key] = doc
+        elif key == "frames":
+            found[key] = [p.strip() for p in re.split(r"[,\s]+", value)
+                          if p.strip().lower().endswith((".png", ".jpg",
+                                                         ".jpeg", ".webp"))]
+        else:
+            found[key] = value.strip().strip("`'\"")
+    legacy = _CONTRACT_LEGACY.search(text)
+    if legacy:
+        found.setdefault("render_mode", legacy.group(1))
+        found.setdefault("renderer", legacy.group(2))
+    shot = _RENDER_SHOT.search(text)
+    if shot and "capture" not in found:
+        found["capture"] = shot.group(1)
+    if not found:
+        return None
+    mode = str(found.get("render_mode") or "").strip().lower() or None
+    found["render_mode"] = mode
+    if not isinstance(found.get("frames"), list):
+        found.pop("frames", None)
+    if not isinstance(found.get("precheck"), dict):
+        found.pop("precheck", None)
+    return found
+
+
+def render_contract_of(path: "str | None",
+                       goal: "dict | None" = None) -> "dict | None":
+    """The contract recorded for capture `path` (this process, else the
+    goal step that saw it)."""
+    if not path:
+        return None
+    hit = _RENDER_CONTRACTS.get(os.path.abspath(path))
+    if hit is not None:
+        return hit
+    for step in (goal or {}).get("steps") or []:
+        cap = step.get("capture")
+        if isinstance(cap, dict) and cap.get("capture") and \
+                os.path.abspath(cap["capture"]) == os.path.abspath(path):
+            return cap
+    return None
+
+
+def goal_capture_seen(result: str, target: str = "") -> "dict | None":
+    """#295: run_tool hands every render_page result here. The contract is
+    kept by capture path and on the running goal step (`capture`), so the
+    judge and the failure class read the render's own facts."""
+    contract = render_contract(result)
+    if contract and contract.get("render_mode") == "unavailable" \
+            and not contract.get("capture"):
+        # #293's contract: "unavailable" comes as `error: ENVIRONMENT -- ...`
+        # with no image at all. That is an environment failure of the
+        # running step as it stands -- no judge call will ever see it.
+        goal = goal_load()
+        running = next((n for n, st in enumerate((goal or {}).get("steps")
+                                                 or [])
+                        if st.get("status") == GOAL_RUNNING), None)
+        if running is not None:
+            first = str(result or "").strip().splitlines()[0][:300]
+            goal_fail(running, GOAL_ENV, "render_page: %s" % first,
+                      source="render_page")
+        return contract
+    if not contract or not contract.get("capture"):
+        return None
+    contract = dict(contract, target=str(target or ""), at=round(time.time(), 1))
+    key = os.path.abspath(contract["capture"])
+    _RENDER_CONTRACTS[key] = contract
+    while len(_RENDER_CONTRACTS) > _RENDER_CONTRACTS_KEEP:
+        _RENDER_CONTRACTS.pop(next(iter(_RENDER_CONTRACTS)))
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None:
+            return contract
+        for step in goal.get("steps") or []:
+            if step.get("status") == GOAL_RUNNING:
+                step["capture"] = contract
+                goal_write(goal)
+                break
+    return contract
+
+
+# A STEP THAT NEEDS THE GPU: software GL is the environment failing, not the
+# model (R14: 4/4 visible step 5-8 captures software, judged 2/2/3/4). A CSS
+# page renders fine in software, so only these words make a step a GPU step.
+# `"gpu": true|false` in goal.json overrides the guess.
+_GOAL_GPU = re.compile(r"(?i)\b(?:webgl2?|webgpu|shaders?|glsl|gpu|3d|voxels?|"
+                       r"ray[- ]?(?:trac\w*|march\w*|lit|lighting)|"
+                       r"g-?buffer|diorama|three(?:\.js)?)\b")
+# A STEP THAT NEEDS MOTION: identical frames cannot show it.
+_GOAL_MOTION = re.compile(r"(?i)\b(?:animat\w*|motion|moving|moves|rain\w*|"
+                          r"splash\w*|steam|weather|flicker\w*|particles?|"
+                          r"ripples?|waves?|day[- ]night)\b")
+
+
+def goal_step_gpu(goal: "dict | None", index: int) -> bool:
+    if not goal:
+        return False
+    flag = goal.get("gpu")
+    if isinstance(flag, bool):
+        return flag
+    steps = goal.get("steps") or []
+    text = " ".join([str(goal.get("title") or "")]
+                    + ([str(steps[index].get("text") or "")]
+                       if 0 <= index < len(steps) else []))
+    return _GOAL_GPU.search(text) is not None
+
+
+def goal_step_motion(goal: "dict | None", index: int) -> bool:
+    steps = (goal or {}).get("steps") or []
+    if not 0 <= index < len(steps):
+        return False
+    text = " ".join([str(steps[index].get("text") or "")]
+                    + [c["item"] for c in goal_checklist(goal, index)])
+    return _GOAL_MOTION.search(text) is not None
+
+
+def _num(value) -> "float | None":
+    try:
+        return None if value is None or isinstance(value, bool) \
+            else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def capture_precheck(paths: "list[str]", contract: "dict | None",
+                     goal: "dict | None", index: "int | None") -> "str | None":
+    """#295: the cheap check before the judge model. Why the capture is an
+    ENVIRONMENT failure, or None when it may be judged."""
+    contract = contract or {}
+    mode = contract.get("render_mode")
+    renderer = contract.get("renderer") or "?"
+    idx = -1 if index is None else index
+    if mode == "unavailable":
+        return "render_mode is unavailable (renderer %s): no capture" % renderer
+    if mode == "software" and goal_step_gpu(goal, idx):
+        return ("the capture is software-rendered (renderer %s) on a step "
+                "that needs the GPU" % renderer)
+    pre = contract.get("precheck") or {}
+    if pre.get("uniform") is True:
+        return "the render's precheck says the frame is uniform"
+    colours = _num(pre.get("distinct_colours"))
+    if colours is not None and colours < _WARN_COLOURS:
+        return "the render's precheck counts only %d distinct colours" % colours
+    dark = _num(pre.get("dark_pct"))
+    if dark is not None:
+        dark = dark * 100 if dark <= 1.0 else dark
+        if dark >= 100 * _RENDER_NEAR_BLANK:
+            return "the render's precheck says %.1f %% of the frame is dark" % dark
+    if pre.get("identical_frames") is True and goal_step_motion(goal, idx):
+        return ("the frames are identical, and this step needs motion "
+                "(max frame diff %s)" % pre.get("max_frame_diff", "0"))
+    for path in paths[:1]:
+        if not str(path).lower().endswith(".png"):
+            continue
+        try:
+            with open(path, "rb") as fh:
+                img = _png_pixels(fh.read(_PNG_DECODE_BUDGET))
+        except OSError:
+            img = None
+        if img is None:
+            continue
+        stats = _pixel_stats(img)
+        name = os.path.basename(path)
+        if stats["share"] is not None and stats["share"] >= _RENDER_NEAR_BLANK:
+            return "%s is %.1f %% one colour" % (name, 100 * stats["share"])
+        if stats["luma"] <= _RENDER_DARK_LUMA:
+            return "%s is near-black (luma mean %d/255)" % (
+                name, int(round(stats["luma"])))
+        if stats["colours"] < _WARN_COLOURS:
+            return "%s has only %d distinct colours" % (name, stats["colours"])
+    return None
+
+
+# ------------------------------------------- #295, reference images --------
+#
+# ROBIN'S PICTURES OF WHAT GOOD LOOKS LIKE. `reference: <path> -- <criterion>`
+# in `/goal`: the judge gets the image after the capture and answers "is the
+# capture as good as the reference on <criterion>" (MLLM-as-a-Judge: pairwise
+# is where MLLM judges agree with humans; GPTEval3D, Prometheus-Vision). The
+# user's word, so it lives beside the accept lines in SESSION_DIR, keyed by
+# the goal's path -- never a path written into the code. ADVISORY for now
+# (`must: false`): a local model against robin's reference would never pass,
+# and a gate that cannot pass is a pause generator until it is calibrated.
+GOAL_REFERENCE_PREFIX = "reference:"
+GOAL_REFERENCE_FILE = "goal-references.json"
+GOAL_REFERENCE_MAX = 2
+
+
+def _goal_reference_path() -> str:
+    return os.path.join(SESSION_DIR, GOAL_REFERENCE_FILE)
+
+
+def goal_references() -> "list[dict]":
+    """[{path, criterion}] for the goal in this working area."""
+    try:
+        with open(_goal_reference_path(), encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    refs = found.get(os.path.abspath(goal_path())) if isinstance(found, dict) \
+        else None
+    return [r for r in refs if isinstance(r, dict) and r.get("path")] \
+        if isinstance(refs, list) else []
+
+
+def goal_references_set(refs: "list[dict] | None") -> None:
+    try:
+        with open(_goal_reference_path(), encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        found = {}
+    if not isinstance(found, dict):
+        found = {}
+    key = os.path.abspath(goal_path())
+    if refs:
+        found[key] = list(refs)[:GOAL_REFERENCE_MAX]
+    elif found.pop(key, None) is None:
+        return
+    try:
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        tmp = _goal_reference_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(found, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, _goal_reference_path())
+    except OSError:
+        pass
+
+
+def goal_reference_parse(line: str) -> "tuple[dict | None, str | None]":
+    """`<path> -- <criterion>` -> ({path, criterion}, None) or (None, why)."""
+    raw = str(line or "").strip()
+    path, _sep, criterion = raw.partition(" -- ")
+    path = os.path.expanduser(path.strip().strip("'\""))
+    if not path:
+        return None, "a reference line needs a path"
+    if not os.path.isabs(path) and get_root():
+        path = os.path.join(get_root(), path)
+    path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        return None, "no such reference image: %s" % path
+    if os.path.splitext(path)[1].lower() not in IMAGE_TYPES:
+        return None, "not an image: %s" % path
+    return {"path": path, "criterion": criterion.strip()[:160]}, None
+
+
+# ------------------------------------------- #294, what the engine says -----
+
+def goal_pause_nudge(goal: dict) -> str:
+    """#294 B: the one turn a pause gets -- the model prepares it for robin."""
+    pause = goal_paused(goal) or {}
+    n = pause.get("step")
+    steps = goal.get("steps") or []
+    step = steps[n - 1] if isinstance(n, int) and 0 < n <= len(steps) else {}
+    fails = step.get("fail_log") or []
+    last = "\n".join("- %s: %s" % (f.get("class"), _clip(f.get("why") or "", 240))
+                     for f in fails[-4:])
+    return ("%s PAUSED at step %s (%s): %s\n%s"
+            "Do not call any tools now. Write a short report for robin, in this "
+            "order:\n1. What you identified -- the facts, with the captures, "
+            "judge answers and log lines that show them.\n2. Why you cannot "
+            "proceed on your own.\n3. Two or three concrete proposals, each with "
+            "what robin would do or decide.\n4. Ask robin whether he has "
+            "further input. Then stop: goal mode continues only after his "
+            "reply.]"
+            % (GOAL_NUDGE_MARK, n if n is not None else "?",
+               pause.get("class") or "?", pause.get("why") or "?",
+               ("What failed on this step:\n%s\n" % last) if last else ""))
+
+
+def _goal_feedback(step: dict) -> str:
+    """The judge's last word on a step, as a few lines for a nudge."""
+    verdict = step.get("judge") if isinstance(step.get("judge"), dict) else {}
+    lines = []
+    for item, answer in (verdict.get("checklist") or {}).items():
+        if answer != "yes":
+            why = (verdict.get("evidence") or {}).get(item) or ""
+            lines.append("- %s: %s%s" % (item, answer,
+                                         (" -- " + _clip(why, 200)) if why else ""))
+    for weak in (verdict.get("weakest") or [])[:3]:
+        lines.append("- weakest: %s" % _clip(str(weak), 200))
+    return "\n".join(lines[:8])
+
+
+def goal_ladder_nudge(goal: dict, index: int, rung: str) -> str:
+    """#294: the nudge for rung `rung` of step `index`."""
+    step = goal["steps"][index]
+    n, text = index + 1, step["text"]
+    fails = step.get("fail_log") or []
+    last = fails[-1] if fails else {}
+    why = _clip(str(last.get("why") or step.get("note") or "?"), 600)
+    feedback = _goal_feedback(step)
+    evidence = goal_nudge_evidence(goal, index)
+    if rung == GOAL_LADDER_RETRY:
+        return ("%s. Step %d: the ENVIRONMENT failed, not your work: %s\n"
+                "Retry %d of %d: render again with render_page and read its "
+                "render_mode and precheck before you judge. If this machine "
+                "cannot produce a valid capture now, say so plainly -- after "
+                "the %s retry the goal pauses for robin. Step %d: %s]"
+                % (GOAL_NUDGE_MARK, n, why,
+                   int(step.get("env_failures") or 1), GOAL_ENV_RETRIES,
+                   "second" if GOAL_ENV_RETRIES == 2 else "last", n, text))
+    if rung == GOAL_LADDER_REFLECT:
+        return ("%s. Step %d, attempt 1 failed: \"%s\"\n%s"
+                "Before you change anything, reflect: what did the judge see, "
+                "why did your approach produce that, and what will you do "
+                "differently? Write it with goal_step(step=%d, "
+                "status='running', note='reflection: ...'). Then attempt 2 "
+                "with a different approach -- not the one that failed. "
+                "Step %d: %s%s]"
+                % (GOAL_NUDGE_MARK, n, why,
+                   ("The judge's feedback:\n%s\n" % feedback) if feedback else "",
+                   n, n, text, evidence))
+    if rung == GOAL_LADDER_FRESH:
+        tried = "\n".join("- attempt %d (%s): %s" % (k, f.get("class"),
+                                                    _clip(f.get("why") or "", 300))
+                          for k, f in enumerate(fails[-3:], 1))
+        thoughts = "\n".join("- " + _clip(r, 400)
+                             for r in step.get("reflections") or [])
+        return ("%s. Step %d, attempt 3, in a FRESH context: the conversation "
+                "before was cut so the failed approaches do not steer you.\n"
+                "What failed:\n%s\n%s%s"
+                "Start step %d again with an approach that avoids all of "
+                "that: %s%s]"
+                % (GOAL_NUDGE_MARK, n, tried or "- " + why,
+                   ("Your reflections:\n%s\n" % thoughts) if thoughts else "",
+                   ("The judge's last feedback:\n%s\n" % feedback)
+                   if feedback else "", n, text, evidence))
+    if rung == GOAL_LADDER_SPLIT:
+        return ("%s. Step %d failed three attempts: \"%s\"\n%s"
+                "Decompose it: split step %d into %d-%d smaller sub-steps, "
+                "each verifiable on its own, the hardest part isolated first. "
+                "Call goal_step(step=%d, status='split', substeps=[...]), then "
+                "work sub-step %d.1. Step %d: %s]"
+                % (GOAL_NUDGE_MARK, n, why,
+                   ("The judge's feedback:\n%s\n" % feedback) if feedback else "",
+                   n, GOAL_SUBSTEPS_MIN, GOAL_SUBSTEPS_MAX, n, n, n, text))
+    subs = step.get("subs") or []
+    k = goal_sub_next(step)
+    if k is None:
+        return ("%s. All sub-steps of step %d are done. Now verify step %d "
+                "itself: %s%s]" % (GOAL_NUDGE_MARK, n, n, text, evidence))
+    return ("%s. Step %d is split. Sub-step %d.%d of %d: %s\nReport it with "
+            "goal_step(step=%d, sub=%d, status='done' and what proves it, or "
+            "'failed' and why). A failed sub-step pauses the goal for robin. "
+            "(Step %d: %s)]"
+            % (GOAL_NUDGE_MARK, n, n, k + 1, len(subs), subs[k]["text"], n,
+               k + 1, n, text))
+
+
+def goal_checklist_ask(goal: "dict | None", index: int) -> str:
+    """#295: the sentence the first nudge of a visual step adds when the
+    step has no checklist yet."""
+    if not goal_step_needs_render(goal, index) or goal_checklist(goal, index):
+        return ""
+    return (" Before you build, write this step's checklist ONCE: "
+            "goal_step(step=%d, status='running', checklist=[3-6 yes/no "
+            "statements a reviewer can check on the capture; prefix "
+            "'optional:' for nice-to-haves]). It is frozen after that, and the "
+            "judge answers each item yes, no or unknown." % (index + 1))
 
 
 # ---------------------------------------------------- #202, die Notbremse ----
@@ -20935,6 +22061,13 @@ def run_tool(name: str, arguments: str) -> str:
         return f"error: wrong arguments for {name}: {exc}"
     except Exception as exc:  # a tool must never take the turn down with it
         return f"error: {name} failed: {exc!r}"
+    if name == "render_page":
+        # #295: the render's own facts (render_mode, frames, precheck) for
+        # the judge and the failure class -- read here, beside the tool.
+        try:
+            goal_capture_seen(out, str(args.get("path") or ""))
+        except Exception as exc:        # noqa: BLE001 -- never the turn
+            log_note("goal: render contract not read: %r" % exc, "goal")
     # DIE NOTE STEHT VOR DEM ERGEBNIS, in derselben Klammerform, in der
     # `run_tool_cached` einen Wiederholer meldet: eine Zeile, die sagt, dass an
     # den Argumenten etwas geradegezogen wurde, damit es niemanden ueberrascht.
@@ -24618,17 +25751,25 @@ JUDGE_DEFAULT_RUBRIC = (
     "looks finished, not a placeholder",
 )
 
+# #295: THE CHECKLIST PROMPT. yes/no/unknown per item, one line of evidence
+# each, the 1-10 only as a secondary signal. "unknown" is the judge's way
+# out (Anthropic, "Demystifying evals for AI agents": give the grader a way
+# to say it cannot tell) -- twice on a step pauses it instead of guessing.
 JUDGE_PROMPT = (
     "You are a strict visual reviewer. You did not make this work and you "
     "have not seen how it was made; judge only what the image(s) show.\n\n"
-    "Task: %(task)s\n\n"
-    "Score each criterion from 1 to 10. 10: a professional would ship it. "
-    "5: visibly unfinished. 1-2: the criterion is absent -- a blank, black "
-    "or mostly empty frame scores 1-2 on every criterion it cannot show. "
-    "Give no credit for anything the image does not show.%(crop)s\n\n"
-    "Criteria:\n%(criteria)s\n\n"
+    "Task: %(task)s\n%(images)s\n"
+    "Answer every checklist item with yes, no or unknown. yes: the image(s) "
+    "clearly show it. no: they clearly show it is missing or wrong -- a "
+    "blank, black or mostly empty frame is 'no' on every item it cannot "
+    "show. unknown: the image(s) do not show enough to tell; say what is "
+    "missing. Give one short line of evidence per item. Give no credit for "
+    "anything the image(s) do not show.\n\n"
+    "Checklist:\n%(criteria)s\n\n"
     "Answer with JSON only, nothing around it:\n"
-    '{"scores": {"<criterion exactly as written>": <1-10>, ...}, '
+    '{"checklist": {"<item exactly as written>": {"answer": "yes|no|unknown", '
+    '"evidence": "<what in the image shows it>"}, ...}, '
+    '"overall": <1-10>, '
     '"weakest": ["<weakest point>", "<second>", "<third>"], '
     '"verdict": "<one sentence>"}')
 
@@ -24740,10 +25881,16 @@ def judge_rubric(criteria=None, step_text=None) -> "tuple[list[str], str]":
     return rubric[:JUDGE_MAX_CRITERIA], source
 
 
-def judge_images(images=None) -> "tuple[list[str], str | None]":
+def judge_images(images=None, goal: "dict | None" = None,
+                 room: int = JUDGE_MAX_IMAGES,
+                 found: "dict | None" = None) -> "tuple[list[str], str | None]":
     """The files to judge, or an error. Default: the newest render_page
     capture. A capture's `-crop.png` (the content, enlarged -- #265)
-    rides along when it exists."""
+    rides along when it exists.
+
+    #295: when the render recorded clock-stepped `frames` for the capture,
+    those go instead (up to `room`), else its `contact_sheet` with the
+    capture -- a single frame cannot show rain falling."""
     picked: "list[str]" = []
     if images:
         items = images if isinstance(images, (list, tuple)) \
@@ -24772,7 +25919,19 @@ def judge_images(images=None) -> "tuple[list[str], str | None]":
             os.path.join(folder, n)))
         picked.append(os.path.join(folder, newest))
     out: "list[str]" = []
-    for path in picked:
+    contract = render_contract_of(picked[0], goal) if len(picked) == 1 else None
+    if found is not None:
+        # The capture and its render facts, for the caller's precheck.
+        found.update(capture=picked[0], contract=contract)
+    frames = [_rooted(str(f)) for f in (contract or {}).get("frames") or []]
+    frames = [f for f in frames if os.path.isfile(f)]
+    sheet = (contract or {}).get("contact_sheet")
+    sheet = _rooted(str(sheet)) if sheet else None
+    if len(frames) >= 2:
+        out = frames[:max(1, room)]
+    elif sheet and os.path.isfile(sheet):
+        out = [picked[0], sheet]
+    for path in picked if not out else []:
         if path not in out:
             out.append(path)
         crop = os.path.splitext(path)[0] + "-crop.png"
@@ -24783,7 +25942,7 @@ def judge_images(images=None) -> "tuple[list[str], str | None]":
         if os.path.getsize(path) > IMAGE_MAX_BYTES:
             return [], "error: image is over %d MiB: %s" % (
                 IMAGE_MAX_BYTES >> 20, path)
-    return out[:JUDGE_MAX_IMAGES], None
+    return out[:max(1, room)], None
 
 
 def _catalogue_vision(provider: str, model: str,
@@ -24950,79 +26109,274 @@ def _judge_step(goal: "dict | None", step) -> "int | None":
 
 
 def judge_store(index: int, verdict: dict) -> bool:
-    """Write the verdict onto step `index` of the goal on disk."""
+    """Write the verdict onto step `index` of the goal on disk. #294: the
+    items it answered "yes" join the step's `passed` -- the no-progress
+    timer watches that list grow."""
     with _GOAL_LOCK:
         goal = goal_load()
         if not goal or not 0 <= index < len(goal["steps"]):
             return False
-        goal["steps"][index]["judge"] = verdict
+        step = goal["steps"][index]
+        step["judge"] = verdict
+        passed = list(step.get("passed") or [])
+        for item, answer in (verdict.get("checklist") or {}).items():
+            if answer == "yes" and item not in passed:
+                passed.append(item)
+        if passed:
+            step["passed"] = passed
         goal_write(goal)
         return True
 
 
+_JUDGE_YES = ("yes", "y", "true", "pass", "passed", "met")
+_JUDGE_NO = ("no", "n", "false", "fail", "failed", "not met")
+
+
+def _judge_answer(value) -> "tuple[str | None, str]":
+    """(yes|no|unknown, evidence) from one checklist value, or (None, "")."""
+    evidence = ""
+    if isinstance(value, dict):
+        evidence = str(value.get("evidence") or value.get("why") or "")
+        value = value.get("answer", value.get("verdict"))
+    if isinstance(value, bool):
+        return ("yes" if value else "no"), evidence
+    if value is None:
+        return None, evidence
+    word = str(value).strip().lower().rstrip(".")
+    if word in _JUDGE_YES:
+        return "yes", evidence
+    if word in _JUDGE_NO:
+        return "no", evidence
+    return "unknown", evidence
+
+
+def judge_parse_checklist(text: str, items: "list[dict]"
+                          ) -> "tuple[dict | None, str | None]":
+    """#295. The judge's JSON as {checklist, evidence, must, pass, no,
+    unknown, overall, weakest, verdict, missing}, or an error. An item the
+    judge left out is "unknown"; more than half left out is no verdict. A
+    judge that answered in the old 1-10 form is read with the threshold."""
+    raw = str(text or "")
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return None, "the judge answered without JSON: %r" % raw[:160]
+    try:
+        doc = json.loads(raw[start:end + 1])
+    except ValueError as exc:
+        return None, "the judge's JSON does not parse (%s): %r" % (exc, raw[:160])
+    if not isinstance(doc, dict):
+        return None, "the judge's JSON is not an object"
+    given = doc.get("checklist")
+    if isinstance(given, list):
+        given = {str(x.get("item") or ""): x for x in given
+                 if isinstance(x, dict)}
+    if not isinstance(given, dict):
+        scores = doc.get("scores")
+        if not isinstance(scores, dict):
+            return None, "the judge's JSON has no checklist object"
+        given = {k: ("yes" if _num(v) is not None and _num(v) >= JUDGE_THRESHOLD
+                     else "no") for k, v in scores.items()}
+    by_key = {_judge_key(k): v for k, v in given.items()}
+    answers, evidence, missing = {}, {}, []
+    for entry in items:
+        name = entry["item"]
+        key = _judge_key(name)
+        value = by_key.get(key)
+        if value is None:
+            value = next((v for k, v in by_key.items()
+                          if k and (k.startswith(key) or key.startswith(k))),
+                         None)
+        answer, why = _judge_answer(value)
+        if answer is None:
+            missing.append(name)
+            answer = "unknown"
+        answers[name] = answer
+        if why:
+            evidence[name] = why[:240]
+    if len(missing) * 2 > len(items):
+        return None, "the judge answered %d of %d checklist items" % (
+            len(items) - len(missing), len(items))
+    must = [e["item"] for e in items if e.get("must", True)]
+    no = [m for m in must if answers[m] == "no"]
+    unknown = [m for m in must if answers[m] == "unknown"]
+    overall = _num(doc.get("overall"))
+    weakest = doc.get("weakest")
+    weakest = [str(w)[:240] for w in weakest if str(w).strip()][:3] \
+        if isinstance(weakest, list) else []
+    return ({"checklist": answers, "evidence": evidence, "must": must,
+             "pass": bool(must) and not no and not unknown,
+             "no": no, "unknown": unknown,
+             "overall": None if overall is None
+             else max(1, min(10, int(round(overall)))),
+             "weakest": weakest or no[:3] or unknown[:3],
+             "verdict": str(doc.get("verdict") or "")[:400],
+             "missing": missing}, None)
+
+
 def tool_judge(images=None, criteria=None, step=None, **_) -> str:
-    """#266. Score a capture with fresh eyes against the rubric. JSON."""
-    paths, bad = judge_images(images)
-    if bad:
-        return json.dumps({"ok": False, "error": bad})
+    """#266. Judge a capture with fresh eyes. JSON.
+
+    #295: against the step's FROZEN checklist, yes/no/unknown per item, on
+    the render's frames or contact sheet; a capture that fails the cheap
+    precheck (software GL on a GPU step, uniform, black, identical frames on
+    a motion step) never reaches the judge model -- it is an ENVIRONMENT
+    failure. #294: every miss goes through `goal_fail`, and the answer says
+    which rung comes next."""
     goal = goal_load()
     index = _judge_step(goal, step)
-    rubric, source = judge_rubric(
-        criteria, goal["steps"][index]["text"] if index is not None else None)
+    pause = goal_paused(goal)
+    if pause is not None:
+        return json.dumps({"ok": False, "error": (
+            "the goal is PAUSED at step %s and waits for the user's line. "
+            "Call no tools: write your report and stop." % pause.get("step"))})
+    at = time.time()
+    room = max(2, JUDGE_MAX_IMAGES - min(len(goal_references()),
+                                         GOAL_REFERENCE_MAX))
+    picked: dict = {}
+    paths, bad = judge_images(images, goal, room=room, found=picked)
+    if bad:
+        return json.dumps({"ok": False, "error": bad})
+    root = get_root()
+    shown = [os.path.relpath(p, root) if root and p.startswith(root) else p
+             for p in paths]
+    capture = picked.get("capture") or paths[0]
+    contract = picked.get("contract")
+    # THE PRECHECK, before any model is asked and before a checklist is
+    # frozen on a frame that shows nothing (#295).
+    env = capture_precheck(paths, contract, goal, index)
+    if env:
+        out = {"ok": False, "class": GOAL_ENV, "judge_called": False,
+               "precheck": env, "images": shown,
+               "render_mode": (contract or {}).get("render_mode")}
+        if index is not None:
+            verdict = goal_fail(index, GOAL_ENV, env, capture=capture,
+                                source="precheck")
+            out.update(step=index + 1, action=verdict["action"],
+                       then=goal_fail_said(index, verdict))
+        out["error"] = ("environment: %s -- the judge was not asked. %s"
+                        % (env, out.get("then") or ""))
+        return json.dumps(out, ensure_ascii=False)
+    # THE CHECKLIST: frozen at step start, or here at the latest.
+    if index is not None:
+        if not goal_checklist(goal, index):
+            with _GOAL_LOCK:
+                fresh = goal_load() or goal
+                given = ([str(c) for c in criteria] if isinstance(
+                    criteria, (list, tuple)) else _rubric_split(criteria or ""))
+                accept = goal_accept_for(index)
+                if accept:
+                    _checklist_freeze_in(fresh, index, accept,
+                                         GOAL_CHECK_FROM_USER, at)
+                else:
+                    _checklist_freeze_in(fresh, index,
+                                         given or [GOAL_CHECK_DEFAULT_FRAME],
+                                         GOAL_CHECK_FROM_JUDGE, at)
+                goal_write(fresh)
+            goal = goal_load() or goal
+        items = goal_checklist(goal, index)
+        source = goal["steps"][index].get("checklist_from") or "?"
+    else:
+        rubric, source = judge_rubric(criteria, None)
+        items = [{"item": c, "must": True} for c in rubric]
+    refs = [c["reference"] for c in items
+            if c.get("reference") and os.path.isfile(c["reference"])]
+    refs = refs[:GOAL_REFERENCE_MAX]
     task = "a visual deliverable"
     if goal:
         task = goal.get("title") or task
         if index is not None:
             task += " -- current step: %s" % goal["steps"][index]["text"]
+    kinds = contract or {}
+    framed = [_rooted(str(f)) for f in kinds.get("frames") or []]
+    sheet = _rooted(str(kinds["contact_sheet"])) \
+        if kinds.get("contact_sheet") else None
+    if len(paths) >= 2 and paths[0] in framed:
+        said_images = ("The %d images are clock-stepped frames of the same "
+                       "page, in time order; judge motion across them."
+                       % len(paths))
+    elif sheet and sheet in paths:
+        said_images = ("The second image is a contact sheet of clock-stepped "
+                       "frames of the same page; judge motion across it.")
+    elif any(p.endswith("-crop.png") for p in paths[1:]):
+        said_images = ("The second image is an enlarged crop of the first "
+                       "image's content.")
+    else:
+        said_images = ""
+    if refs:
+        said_images += (" The last %d image%s %s REFERENCE image%s the user "
+                        "supplied: for each item that names a reference, "
+                        "compare the capture with it (pairwise)."
+                        % (len(refs), "" if len(refs) == 1 else "s",
+                           "is a" if len(refs) == 1 else "are",
+                           "" if len(refs) == 1 else "s"))
     prompt = JUDGE_PROMPT % {
-        "task": task, "criteria": "\n".join("- " + c for c in rubric),
-        "crop": (" The second image is an enlarged crop of the first "
-                 "image's content." if any(p.endswith("-crop.png")
-                                            for p in paths[1:]) else "")}
-    root = get_root()
-    shown = [os.path.relpath(p, root) if root and p.startswith(root) else p
-             for p in paths]
+        "task": task, "images": said_images,
+        "criteria": "\n".join("- %s%s" % (c["item"],
+                                          "" if c.get("must", True)
+                                          else " (optional)") for c in items)}
     failures = []
     for spot in judge_spots():
         name = "%s/%s" % (spot.get("provider") or "?", spot.get("model") or "?")
         try:
-            text = _judge_ask(spot, prompt, paths)
+            text = _judge_ask(spot, prompt, paths + refs)
         except Exception as exc:            # noqa: BLE001 - next spot
             failures.append("%s: %s" % (name, str(exc)[:200]))
             continue
-        verdict, why = judge_parse(text, rubric)
+        verdict, why = judge_parse_checklist(text, items)
         if verdict is None:
             failures.append("%s: %s" % (name, why))
             continue
         verdict.update({"model": name, "how": spot.get("how"),
-                        "images": shown, "rubric_from": source,
-                        "rubric_source": source, "criteria": rubric,
-                        "at": round(time.time(), 1)})
+                        "images": shown, "references": refs,
+                        "checklist_from": source,
+                        "rubric_source": source,
+                        "criteria": [c["item"] for c in items],
+                        "at": round(at, 1)})
         stored = index is not None and judge_store(index, verdict)
         out = {"ok": True, "judge": name, "chosen_as": spot.get("how"),
-               "fresh_context": True, "scores": verdict["scores"],
-               "min": verdict["min"], "threshold": JUDGE_THRESHOLD,
-               "passes": verdict["min"] >= JUDGE_THRESHOLD,
-               "weakest": verdict["weakest"], "verdict": verdict["verdict"],
-               "rubric_from": source, "images": shown,
-               "step": index + 1 if stored else None}
+               "fresh_context": True, "checklist": verdict["checklist"],
+               "evidence": verdict["evidence"], "passes": verdict["pass"],
+               "overall": verdict["overall"], "weakest": verdict["weakest"],
+               "verdict": verdict["verdict"], "checklist_from": source,
+               "images": shown, "step": index + 1 if stored else None}
         if verdict["missing"]:
-            out["unscored"] = verdict["missing"]
+            out["unanswered"] = verdict["missing"]
         if failures:
             out["tried_first"] = failures
         if not spot.get("remote"):
+            # Self-preference (Panickssery et al., NeurIPS 2024): the actor's
+            # own weights judged -- fresh context, but the same model.
+            out["fresh_context_only"] = True
             out["note"] = ("judged by this conversation's own model in a "
                            "fresh request; the next turn re-reads the "
                            "conversation cold")
-        if not out["passes"]:
-            out["next"] = ("fix the weakest points, render again, and call "
-                           "judge again -- 'done' on this step waits for %d"
-                           % JUDGE_THRESHOLD)
+        if not verdict["pass"] and index is not None:
+            if verdict["no"]:
+                miss = goal_fail(index, GOAL_CAP, "the judge says no on: %s"
+                                 % "; ".join(verdict["no"][:4]),
+                                 capture=capture, source="judge")
+            else:
+                miss = goal_fail(index, GOAL_UNKNOWN, "the judge cannot tell "
+                                 "on: %s" % "; ".join(verdict["unknown"][:4]),
+                                 capture=capture, source="judge")
+            out["failure"] = {"class": miss["class"], "action": miss["action"],
+                              "counted": miss["counted"]}
+            out["next"] = goal_fail_said(index, miss)
+        elif not verdict["pass"]:
+            out["next"] = ("fix what the judge said no or unknown to, render "
+                           "again, and call judge again")
         return json.dumps(out, ensure_ascii=False)
-    return json.dumps({"ok": False, "error": (
-        "no judge answered: %s. Pin a vision model as `judge` "
-        "({\"provider\": ..., \"model\": ...}) in providers.json, or run the "
-        "local server with its projector." % "; ".join(failures))})
+    out = {"ok": False, "class": GOAL_ENV, "judge_called": True,
+           "error": ("no judge answered: %s. Pin a vision model as `judge` "
+                     "({\"provider\": ..., \"model\": ...}) in providers.json, "
+                     "or run the local server with its projector."
+                     % "; ".join(failures))}
+    if index is not None:
+        miss = goal_fail(index, GOAL_ENV, "no judge answered",
+                         capture="judge:" + capture, source="judge")
+        out.update(step=index + 1, action=miss["action"],
+                   then=goal_fail_said(index, miss))
+    return json.dumps(out, ensure_ascii=False)
 
 
 def tool_delegate(task: str = "", context: str = "", **_) -> str:
@@ -25271,9 +26625,32 @@ GOAL_STEP_STATES = (GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED,
 # one is skipped -- "complete with N skipped", never `done`: a skipped step
 # is work that did not happen, and `done` would say it did.
 GOAL_PARTIAL = "partial"
-# #289: HOW OFTEN A STEP MAY FAIL before it is skipped. The first `failed`
-# sends it back once, with its own note in the nudge; the second one ends it.
-GOAL_STEP_TRIES = 2
+# #294: NO STEP IS SKIPPED BY THE ENGINE. #289 skipped a step on its second
+# `failed`; on 2026-09-24/25 that skipped steps 5-8 of the diorama goal on
+# software-GL captures, and nobody was asked (goal.json `failures` 3/2/2/2,
+# session.json msg 176/269/313/347). Only robin skips (`/goal skip n`). A
+# failure now has a CLASS and a ladder, and the end of every ladder is a
+# PAUSE that reports and asks -- see `goal_fail`.
+GOAL_PAUSED = "paused"
+GOAL_ENV = "environment"      # the instrument failed: no GPU, blank, judge gone
+GOAL_CAP = "capability"       # a valid capture, and the judge says: not met
+GOAL_UNKNOWN = "unknown"      # the judge cannot tell from the capture
+# #294: ENVIRONMENT -- retry at most this often, a short wait apart, then
+# pause (Claude Code /goal: "After three automatic retries, the goal pauses
+# instead"; the Azure retry pattern: bounded count, delay between).
+GOAL_ENV_RETRIES = 2
+GOAL_ENV_DELAY = 15.0
+# #295: "unknown" on a must-item this often on one step pauses it.
+GOAL_UNKNOWN_PAUSE = 2
+# #294: THE STEP'S BUDGET. Active wall clock per step (the clock stops while
+# the goal is paused), and the no-progress timer: this many nudges on one
+# step with no checklist item newly passed. `goal_step_minutes` /
+# `goal_no_progress_turns` in settings.json, CROW_GOAL_STEP_MINUTES /
+# CROW_GOAL_NO_PROGRESS_TURNS over both. 0 switches one off.
+GOAL_STEP_MINUTES_DEFAULT = 60
+GOAL_NO_PROGRESS_DEFAULT = 10
+GOAL_STEP_MINUTES = GOAL_STEP_MINUTES_DEFAULT
+GOAL_NO_PROGRESS_TURNS = GOAL_NO_PROGRESS_DEFAULT
 
 
 # WIEVIEL KONTEXT GERADE STEHT. Gemeldet von der Runde, die ihn gerade gelesen
@@ -25460,7 +26837,29 @@ def goal_load() -> "dict | None":
     goal = (raw or {}).get("goal")
     if not isinstance(goal, dict) or not goal.get("steps"):
         return None
+    _goal_repair_skips(goal)                                   # #296
     return goal
+
+
+# #296: A `done` WHOSE NOTE BEGINS "skipped" WAS NEVER DONE. 2026-09-24 ~22:00,
+# before `/goal skip` existed, step 4 of the diorama goal was set `done` by
+# hand with the note "skipped by robin (2026-09-24 ~22:00): ray lighting is
+# not verifiable ..." -- and `goal_counts` counted it, 5/9. Narrow on
+# purpose: only a note that STARTS with the word.
+_GOAL_SKIP_NOTE = re.compile(r"(?i)^\s*skipped\b")
+
+
+def _goal_repair_skips(goal: dict) -> None:
+    for step in goal.get("steps") or []:
+        if (isinstance(step, dict) and step.get("status") == GOAL_DONE
+                and _GOAL_SKIP_NOTE.match(str(step.get("note") or ""))):
+            step["status"] = GOAL_SKIPPED
+            step.setdefault("skipped_by", GOAL_BY_USER)
+    states = [s.get("status") for s in goal.get("steps") or []
+              if isinstance(s, dict)]
+    if (goal.get("status") == GOAL_DONE and GOAL_SKIPPED in states
+            and all(x in (GOAL_DONE, GOAL_SKIPPED) for x in states)):
+        goal["status"] = GOAL_PARTIAL
 
 
 def goal_broken() -> bool:
@@ -25626,6 +27025,13 @@ def goal_step_begin(index: int, now: "float | None" = None,
         # the tool answered ok); `done`/`failed` replace it with theirs.
         if str(note or "").strip():
             step["note"] = str(note)[:400]
+        # #295: THE USER'S ACCEPT LINES FREEZE THE CHECKLIST WHEN THE STEP
+        # STARTS -- before any capture exists, so no capture can shape it.
+        if not step.get("checklist") and goal_step_needs_render(goal, index):
+            accept = goal_accept_for(index)
+            if accept:
+                _checklist_freeze_in(goal, index, accept,
+                                     GOAL_CHECK_FROM_USER, at)
         goal_write(goal)
         return goal
 
@@ -25683,14 +27089,14 @@ def goal_step_end(index: int, ok: bool = True, tokens: int = 0,
         goal["last_at"], goal["last_spent"] = end, spent
         if ok:
             step["status"] = GOAL_DONE
+            # #294: a finished step owes nothing any more.
+            for key in ("pending", "env_seen"):
+                step.pop(key, None)
         else:
-            # #289: ONE RETRY, THEN THE GOAL MOVES ON. The count lives on the
-            # step, because the engine sets a failed step `running` again
-            # before the retry and the status alone forgets it ever failed.
-            step["failures"] = int(step.get("failures") or 0) + 1
-            step["status"] = (GOAL_SKIPPED
-                              if step["failures"] >= GOAL_STEP_TRIES
-                              else GOAL_FAILED)
+            # #294: `failed` IS A STATUS, NOT A VERDICT ON THE PLAN. #289
+            # skipped the step here on its second failure; the count and
+            # what follows now belong to `goal_fail`, which the caller runs.
+            step["status"] = GOAL_FAILED
         step["note"] = str(note or "")[:400]
         _goal_settle(goal)
         goal_write(goal)
@@ -25711,8 +27117,10 @@ def _goal_settle(goal: dict) -> None:
     states = [s.get("status") for s in goal.get("steps") or []]
     if states and all(x == GOAL_DONE for x in states):
         goal["status"] = GOAL_DONE
+        goal.pop("pause", None)                                # #294
     elif states and all(x in (GOAL_DONE, GOAL_SKIPPED) for x in states):
         goal["status"] = GOAL_PARTIAL
+        goal.pop("pause", None)                                # #294
     elif goal.get("status") in (GOAL_DONE, GOAL_PARTIAL):
         goal["status"] = GOAL_OPEN
 
@@ -25758,6 +27166,31 @@ def goal_step_skip(index: int, note: str = "",
         return goal, None
 
 
+def goal_step_redo(index: int) -> "tuple[dict | None, str | None]":
+    """#296. `/goal redo <n>`: robin takes his own skip back. The step is
+    open again; its failure record stays, its skip mark goes."""
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None:
+            return None, "no goal."
+        steps = goal.get("steps") or []
+        if not 0 <= index < len(steps):
+            return None, "no step %d -- the goal has %d." % (index + 1,
+                                                            len(steps))
+        step = steps[index]
+        if step.get("status") != GOAL_SKIPPED:
+            return None, "step %d is %s, not skipped." % (
+                index + 1, step.get("status") or "open")
+        step["status"] = GOAL_OPEN
+        step.pop("skipped_by", None)
+        step["note"] = ""
+        if goal.get("status") in (GOAL_DONE, GOAL_PARTIAL):
+            goal["status"] = GOAL_OPEN
+        _goal_settle(goal)
+        goal_write(goal)
+        return goal, None
+
+
 def goal_shape(goal: "dict | None") -> str:
     """#289. What a goal display draws apart from its running numbers: the
     title, the goal's state, and each step's text, state and note. It moves
@@ -25766,7 +27199,10 @@ def goal_shape(goal: "dict | None") -> str:
     if not goal:
         return ""
     return json.dumps([goal.get("title"), goal.get("status"),
-                       [[s.get("text"), s.get("status"), s.get("note")]
+                       goal.get("pause"),                      # #294
+                       [[s.get("text"), s.get("status"), s.get("note"),
+                         [x.get("status") for x in s.get("subs") or []],
+                         len(s.get("passed") or [])]
                         for s in goal.get("steps") or []]])
 
 
@@ -25880,10 +27316,15 @@ def goal_summary(goal: "dict | None" = None,
         return None
     done, total = goal_counts(goal)
     skipped = goal_skipped(goal)                               # #289
+    pause = goal_paused(goal)                                  # #294
     if goal.get("status") == GOAL_DONE:
         state = "complete"
     elif goal.get("status") == GOAL_PARTIAL:
         state = "complete with %d skipped" % len(skipped)
+    elif pause is not None:
+        state = "PAUSED at step %s (%s): %s -- your next line resumes it" % (
+            pause.get("step"), pause.get("class") or "?",
+            _clip(pause.get("why") or "?", 200))
     else:
         state = "%d min so far" % int(goal_seconds(goal, now) // 60)
     return "goal: %s -- %d/%d, %s%s" % (

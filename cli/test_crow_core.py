@@ -16035,12 +16035,13 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
         self.assertEqual(crow_core.rollover_note_split("frage"), (None, ""))
 
 
-class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
+class AFailedStepIsRetriedNotSkippedTests(unittest.TestCase):
     """#289. 2026-09-24, diorama run: step 4 went `failed` with an honest
     note (session.json msg 324), the answer named step 4 as `next_step`
     again (msg 325), and the run sat on it for ~2 h 20 min until robin
-    edited goal.json by hand. One retry with the note in the nudge, then
-    `skipped`, and the goal moves on."""
+    edited goal.json by hand. #294 (2026-09-25): a failed step is retried
+    with its note, and it is never skipped by the engine -- only robin
+    skips (`/goal skip`)."""
 
     def setUp(self):
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goalskip-"))
@@ -16060,24 +16061,25 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
     def status(self, n):
         return crow_core.goal_load()["steps"][n - 1]["status"]
 
-    def test_two_failures_skip_the_step_and_the_goal_moves_on(self):
-        """The ticket's unit: `goal_step(4, "failed")` twice -> step 4 is
-        `skipped` and `next_step` is 5."""
+    def test_two_failures_never_skip_the_step(self):
+        """#294 (replaces #289's skip): `goal_step(4, "failed")` twice keeps
+        step 4 the next step -- `failed`, never `skipped`. 2026-09-25: steps
+        5-8 were skipped this way (session.json msg 176/269/313/347)."""
         for n in (1, 2, 3):
             self.assertTrue(self.step(n, "done", "ok, checked")["ok"])
         first = self.step(4, "failed", "no GPU here to trace on")
         self.assertEqual(first["next_step"], 4, "one retry, not none")
-        self.assertIn("retry", first)
         self.assertEqual(self.status(4), "failed")
-        # The engine sets the step running before the retry, as it does live.
         crow_core.goal_step_begin(3)
+        self.step(4, "running", "reflection: the tracer needs a GPU path")
         second = self.step(4, "failed", "still no GPU")
-        self.assertEqual(self.status(4), "skipped")
-        self.assertEqual(second["next_step"], 5)
-        self.assertIn("skipped", second)
-        self.assertEqual(crow_core.goal_next_open(), 4)
-        self.assertEqual(crow_core.goal_counts(), (3, 5),
-                         "a skipped step counted as done")
+        self.assertEqual(self.status(4), "failed", "the second failure skipped")
+        self.assertEqual(second["next_step"], 4)
+        self.assertEqual(first["failure"]["action"], "reflect")
+        self.assertEqual(second["failure"]["action"], "fresh")
+        self.assertNotIn("skipped", second)
+        self.assertEqual(crow_core.goal_next_open(), 3)
+        self.assertEqual(crow_core.goal_skipped(), [])
 
     def test_the_retry_nudge_quotes_the_failure_note(self):
         self.step(1, "failed", "the parser grammar is ambiguous at line 12")
@@ -16094,8 +16096,7 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
     def test_a_goal_with_a_skipped_step_ends_partial_not_done(self):
         for n in (1, 2, 3):
             self.step(n, "done", "ok, checked")
-        self.step(4, "failed", "no GPU")
-        self.step(4, "failed", "no GPU")
+        crow_core.goal_command("skip 4 no GPU")
         out = self.step(5, "done", "ok, checked")
         goal = crow_core.goal_load()
         self.assertEqual(goal["status"], crow_core.GOAL_PARTIAL)
@@ -16103,8 +16104,9 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
         self.assertIsNone(out["next_step"])
         self.assertEqual(out["ended"], "complete with 1 skipped")
         self.assertIn("complete with 1 skipped", crow_core.goal_summary(goal))
-        # Taking a skipped step up again reopens the goal.
-        crow_core.goal_step_begin(3)
+        # robin takes his skip back: the goal reopens (#296).
+        said, goal, changed = crow_core.goal_command("redo 4")
+        self.assertTrue(changed, said)
         self.assertEqual(crow_core.goal_load()["status"], crow_core.GOAL_OPEN)
 
     def test_goal_skip_sets_skipped_with_the_users_note(self):
@@ -16152,6 +16154,449 @@ class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
         block = crow_core.goal_block(include_status=True)
         self.assertIn("4. [skipped] trace it", block)
         self.assertIn("Next: step 5. ship it", block)
+
+
+def _write_png(path, size=16, colour=None):
+    """A real PNG: a gradient with size*size distinct colours, or one
+    `colour` everywhere (a blank frame)."""
+    import zlib
+    rows = []
+    for y in range(size):
+        row = b"\x00"
+        for x in range(size):
+            px = colour if colour is not None else (
+                (x * 15) % 256, (y * 15) % 256, 128)
+            row += bytes(px)
+        rows.append(row)
+
+    def chunk(kind, body):
+        return (len(body).to_bytes(4, "big") + kind + body
+                + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+    head = size.to_bytes(4, "big") * 2 + bytes([8, 2, 0, 0, 0])
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                 + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+                 + chunk(b"IEND", b""))
+    return path
+
+
+def _checklist_reply(answers, overall=6):
+    return {"choices": [{"message": {"content": json.dumps({
+        "checklist": {k: {"answer": v, "evidence": "seen: %s" % v}
+                      for k, v in answers.items()},
+        "overall": overall, "weakest": ["dark"], "verdict": "ok"})}}]}
+
+
+class _GoalCase(unittest.TestCase):
+    """A goal in a temp working area, with the judge's HTTP mocked out."""
+
+    GOAL = ("Neon voxel diorama | plan it | build the scene | "
+            "animate the rain and steam")
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-ladder-"))
+        self.state = tempfile.mkdtemp(prefix="crow-ladder-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        # getattr: the red run against the code without #294/#295 must
+        # fail on behaviour, not on a missing name in setUp.
+        contracts = getattr(crow_core, "_RENDER_CONTRACTS", {})
+        self.addCleanup(contracts.clear)
+        contracts.clear()
+        limits = getattr(crow_core, "goal_limits_set", None)
+        if limits is not None:
+            self.addCleanup(limits, None, None)
+        crow_core.goal_command(self.GOAL)
+        self.seq = 0
+
+    def step(self, n, status, note="", **kw):
+        return json.loads(crow_core.tool_goal_step(n, status, note, **kw))
+
+    def capture(self, mode="gpu", colour=None, extra=""):
+        """A render_page result through run_tool's hook, as live."""
+        self.seq += 1
+        path = _write_png(os.path.join(crow_core._render_dir(),
+                                       "render-20260925-1000%02d.png" % self.seq),
+                          colour=colour)
+        gl = "gpu (angle)" if mode == "gpu" else "software (swiftshader)"
+        result = ("%s -- 800 bytes, 1280x720, done, %s\n%sread_image it to "
+                  "look at the page." % (path, gl, extra))
+        seen = getattr(crow_core, "goal_capture_seen", None)
+        if seen is not None:
+            seen(result, "index.html")
+        return path
+
+    def judge(self, answers=None, **kw):
+        sent = []
+
+        def urlopen(request, timeout=None):
+            sent.append(json.loads(request.data))
+            return _JudgeAnswer(_checklist_reply(answers or {}))
+        spot = {"provider": "openrouter", "model": "v/eyes", "remote": True,
+                "base_url": "https://example.invalid/v1", "api_key": "k",
+                "headers": {}, "transport": crow_core.TRANSPORT_CHAT,
+                "how": "the delegate spot"}
+        with mock.patch.object(crow_core, "judge_spots", return_value=[spot]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
+            out = json.loads(crow_core.tool_judge(**kw))
+        return out, sent
+
+    def goal(self):
+        return crow_core.goal_load()
+
+
+class AFailureHasAClassAndALadderTests(_GoalCase):
+    """#294. 2026-09-24/25 diorama run: steps 5-8 auto-skipped after two
+    `failed` each (goal.json `failures` 3/2/2/2, session.json msg 176/269/
+    313/347), judged on software-GL frames (msg 305/331/341/355). No step is
+    skipped by the engine now: environment failures retry twice and pause,
+    capability failures reflect, roll, split, then pause -- and every pause
+    asks robin."""
+
+    def test_software_captures_on_a_gpu_step_retry_twice_then_pause(self):
+        """The N4 case: a GPU step whose captures are software pauses on the
+        third environment failure, never reaches the judge model, never
+        skips."""
+        self.step(1, "done", "PLAN.md written")
+        self.step(2, "running")
+        actions = []
+        for _ in range(3):
+            self.capture(mode="software")
+            out, sent = self.judge()
+            self.assertEqual(sent, [], "the judge model was asked about a "
+                                       "software frame")
+            self.assertEqual(out["class"], "environment")
+            actions.append(out["action"])
+            # A second software frame before the engine's retry is the same
+            # attempt; the engine clears the rung when the retry goes out.
+            if out["action"] == "retry":
+                self.capture(mode="software")
+                self.assertEqual(self.judge()[0]["action"], "retry")
+                crow_core.goal_pending_clear(1, "retry")
+        self.assertEqual(actions, ["retry", "retry", "pause"])
+        goal = self.goal()
+        self.assertEqual(goal["status"], "paused")
+        self.assertEqual(goal["pause"]["step"], 2)
+        self.assertEqual(goal["pause"]["class"], "environment")
+        self.assertIn("software-rendered", goal["pause"]["why"])
+        self.assertEqual(crow_core.goal_skipped(goal), [])
+        self.assertEqual(goal["steps"][1]["status"], "running")
+
+    def test_render_mode_unavailable_is_an_environment_failure(self):
+        """#293's contract: no image, `error: ENVIRONMENT -- ...` and a
+        `render:` line. No judge can see it, so the render itself counts."""
+        self.step(2, "running")
+        crow_core.goal_capture_seen(
+            "error: ENVIRONMENT -- 186 MiB free on the GPU, 512 needed\n"
+            'render: {"render_mode": "unavailable", "renderer": null, '
+            '"frames": [], "contact_sheet": null, "precheck": null}',
+            "index.html")
+        step = self.goal()["steps"][1]
+        self.assertEqual(step["env_failures"], 1)
+        self.assertEqual(step["pending"], "retry")
+        self.assertIn("186 MiB free", step["fail_log"][-1]["why"])
+
+    def test_the_same_capture_counts_once(self):
+        self.step(2, "running")
+        self.capture(mode="software")
+        first, _ = self.judge()
+        again, _ = self.judge()
+        self.assertTrue(first["action"] == again["action"] == "retry")
+        self.assertEqual(self.goal()["steps"][1]["env_failures"], 1)
+
+    def test_a_blank_frame_is_the_environment_without_any_contract(self):
+        self.step(2, "running")
+        path = _write_png(os.path.join(crow_core._render_dir(),
+                                       "render-20260925-110000.png"),
+                          colour=(0, 0, 0))
+        out, sent = self.judge(images=path)
+        self.assertEqual(sent, [])
+        self.assertEqual(out["class"], "environment")
+        self.assertIn("one colour", out["precheck"])
+
+    def test_capability_goes_reflect_fresh_split_then_pause(self):
+        """Attempt 2 after a written reflection, attempt 3 in a fresh
+        context, then ADaPT's split, and a failed sub-step pauses. The
+        ladder is climbed once per attempt, not once per judge call."""
+        self.step(2, "running", checklist=["neon signs glow"])
+        self.capture()
+        no = {"delivers: build the scene": "yes", "neon signs glow": "no"}
+        out, sent = self.judge(no)
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(out["passes"])
+        self.assertEqual(out["failure"]["action"], "reflect")
+        # A second judge call in the same attempt does not climb.
+        self.capture()
+        out, _ = self.judge(no)
+        self.assertEqual(out["failure"], {"class": "capability",
+                                          "action": "reflect",
+                                          "counted": False})
+        self.assertTrue(self.step(2, "running",
+                                  "reflection: the emissive pass is never "
+                                  "added")["reflection"])
+        self.capture()
+        out, _ = self.judge(no)
+        self.assertEqual(out["failure"]["action"], "fresh")
+        crow_core.goal_pending_clear(1, "fresh")          # the engine rolled
+        self.capture()
+        out, _ = self.judge(no)
+        self.assertEqual(out["failure"]["action"], "decompose")
+        nudge = crow_core.goal_ladder_nudge(self.goal(), 1, "decompose")
+        self.assertIn("status='split'", nudge)
+        bad = self.step(2, "split", substeps=["one"])
+        self.assertFalse(bad["ok"])
+        split = self.step(2, "split", substeps=["emissive pass alone",
+                                                "bloom on top"])
+        self.assertTrue(split["ok"], split)
+        self.assertEqual(self.goal()["steps"][1]["pending"], "subs")
+        refused = self.step(2, "done", "render-20260925-100004.png")
+        self.assertIn("sub-step 2.1", refused["error"])
+        self.assertTrue(self.step(2, "done", "emissive pass renders", sub=1)["ok"])
+        out = self.step(2, "failed", "bloom kills the frame", sub=2)
+        self.assertIn("PAUSED", out["paused"])
+        goal = self.goal()
+        self.assertEqual(goal["status"], "paused")
+        self.assertIn("sub-step 2.2 failed", goal["pause"]["why"])
+        self.assertEqual(crow_core.goal_skipped(goal), [])
+
+    def test_the_models_failed_on_a_software_capture_is_environment(self):
+        self.step(2, "running")
+        self.capture(mode="software")
+        out = self.step(2, "failed", "ray lighting cannot be seen here")
+        self.assertEqual(out["failure"]["class"], "environment")
+        self.assertEqual(out["failure"]["action"], "retry")
+        # GEGENPROBE: on a GPU capture the same note is capability.
+        crow_core.goal_step_begin(1)
+        self.capture(mode="gpu")
+        out = self.step(2, "failed", "ray lighting cannot be seen here")
+        self.assertEqual(out["failure"]["class"], "capability")
+
+    def test_a_css_page_in_software_is_no_environment_failure(self):
+        """Software GL is only the environment failing on a GPU step."""
+        crow_core.goal_command("Landing page | write the page | style it")
+        self.step(1, "running")
+        self.capture(mode="software")
+        out, sent = self.judge({"delivers: write the page": "yes",
+                                crow_core.GOAL_CHECK_DEFAULT_FRAME: "yes"})
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(out["passes"], out)
+
+    def test_a_pause_reports_and_asks_and_only_a_line_resumes(self):
+        self.step(2, "running")
+        crow_core.goal_pause(1, "budget", "step 2 has run 61 min")
+        goal = self.goal()
+        nudge = crow_core.goal_pause_nudge(goal)
+        for part in ("PAUSED at step 2 (budget)", "Do not call any tools",
+                     "What you identified", "Why you cannot proceed",
+                     "Two or three concrete proposals",
+                     "Ask robin whether he has further input"):
+            self.assertIn(part, nudge)
+        self.assertIsNone(goal["steps"][1]["started"], "the clock runs on")
+        self.assertIn("PAUSED at step 2", crow_core.goal_summary(goal))
+        # Paused: the model can move nothing, nor replace the plan.
+        self.assertFalse(self.step(2, "done", "x.png")["ok"])
+        self.assertFalse(json.loads(crow_core.tool_goal_set(
+            "other", ["a", "b"]))["ok"])
+        self.assertIn("PAUSED", self.judge()[0]["error"])
+        crow_core.goal_pause_report("1. found X 2. cannot 3. A/B 4. input?")
+        self.assertIn("found X", self.goal()["pause"]["report"])
+        resumed = crow_core.goal_resume()
+        self.assertEqual(resumed["status"], "open")
+        self.assertNotIn("pause", resumed)
+        self.assertEqual(resumed["last_pause"]["class"], "budget")
+        self.assertIsNone(crow_core.goal_resume(), "resumed twice")
+
+    def test_the_step_budget_is_wall_clock_since_the_last_resume(self):
+        self.step(2, "running")
+        goal = self.goal()
+        step = goal["steps"][1]
+        at = step["started"]
+        self.assertIsNone(crow_core.goal_budget_due(goal, 1, now=at + 59 * 60))
+        self.assertIn("over its budget of 60 min",
+                      crow_core.goal_budget_due(goal, 1, now=at + 61 * 60))
+        crow_core.goal_limits_set(90, None)
+        self.assertIsNone(crow_core.goal_budget_due(goal, 1, now=at + 61 * 60))
+        with mock.patch.dict(os.environ, {"CROW_GOAL_STEP_MINUTES": "0"}):
+            self.assertIsNone(crow_core.goal_budget_due(goal, 1,
+                                                        now=at + 9e5))
+        with mock.patch.dict(os.environ, {"CROW_GOAL_NO_PROGRESS_TURNS": "4"}):
+            self.assertEqual(crow_core.goal_no_progress_turns(), 4)
+        crow_core.goal_limits_set(None, None)
+        crow_core.goal_pause(1, "budget", "over", now=at + 61 * 60)
+        resumed = crow_core.goal_resume()
+        self.assertEqual(resumed["steps"][1]["budget_base"],
+                         resumed["steps"][1]["seconds"])
+        self.assertIsNone(crow_core.goal_budget_due(
+            resumed, 1, now=at + 70 * 60))
+
+
+class TheJudgeChecksAFrozenChecklistTests(_GoalCase):
+    """#295. 2026-09-25, steps 5-8: every judge call carried criteria the
+    model wrote at judge time (session.json msg 202-345), scored 1-10 on one
+    frame, with no way to say "cannot tell". The checklist is frozen when the
+    step starts; the judge answers yes/no/unknown on the render's frames."""
+
+    def test_accept_lines_freeze_the_checklist_at_step_start(self):
+        crow_core.goal_command(self.GOAL + " | accept: 2: neon signs glow, "
+                                           "wet ground | accept: no black frame")
+        self.step(2, "running")
+        items = [c["item"] for c in crow_core.goal_checklist(self.goal(), 1)]
+        self.assertEqual(items, ["neon signs glow", "wet ground",
+                                 "no black frame"])
+        self.assertEqual(self.goal()["steps"][1]["checklist_from"],
+                         "the user's accept lines")
+        out = self.step(2, "running", checklist=["looks nice"])
+        self.assertIn("frozen", out["checklist_error"])
+        self.step(3, "running")
+        self.assertEqual([c["item"] for c in crow_core.goal_checklist(
+            self.goal(), 2)], ["no black frame"])
+        # A replan by the model keeps the frozen contract.
+        crow_core.tool_goal_set("again", ["plan it", "build the scene", "x"])
+        self.assertEqual(len(crow_core.goal_checklist(self.goal(), 1)), 3)
+
+    def test_the_model_writes_its_checklist_once_behind_the_step(self):
+        out = self.step(2, "running", checklist=["neon signs glow",
+                                                 "optional: fog"])
+        self.assertEqual(out["checklist"], ["delivers: build the scene",
+                                            "neon signs glow", "optional: fog"])
+        again = self.step(2, "running", checklist=["anything"])
+        self.assertIn("frozen", again["checklist_error"])
+
+    def test_pass_needs_every_must_item_yes_and_done_reads_it(self):
+        self.step(2, "running", checklist=["neon signs glow", "optional: fog"])
+        cap = self.capture()
+        refused = self.step(2, "done", cap)
+        self.assertIn("no judge verdict", refused["error"])
+        out, sent = self.judge({"delivers: build the scene": "yes",
+                                "neon signs glow": "yes", "fog": "no"})
+        prompt = sent[0]["messages"][0]["content"][0]["text"]
+        self.assertIn("- neon signs glow", prompt)
+        self.assertIn("- fog (optional)", prompt)
+        self.assertIn("yes, no or unknown", prompt)
+        self.assertTrue(out["passes"], out)
+        self.assertEqual(out["checklist"]["fog"], "no")
+        self.assertTrue(self.step(2, "done", cap)["ok"])
+
+    def test_a_no_refuses_done_and_unknown_twice_pauses(self):
+        self.step(2, "running", checklist=["neon signs glow"])
+        cap = self.capture()
+        self.judge({"delivers: build the scene": "yes",
+                    "neon signs glow": "no"})
+        self.assertIn("neon signs glow: no", self.step(2, "done", cap)["error"])
+        crow_core.goal_resume()
+        unknown = {"delivers: build the scene": "yes",
+                   "neon signs glow": "unknown"}
+        self.step(2, "running", "reflection: x")
+        out, _ = self.judge(unknown)
+        self.assertEqual(out["failure"]["class"], "unknown")
+        self.assertIn("second 'unknown' pauses", out["next"])
+        out, _ = self.judge(unknown)
+        self.assertEqual(out["failure"]["action"], "pause")
+        self.assertEqual(self.goal()["pause"]["class"], "unknown")
+
+    def test_frames_go_to_the_judge_and_frozen_frames_on_motion_are_env(self):
+        self.step(3, "running")
+        frames = [_write_png(os.path.join(crow_core._render_dir(),
+                                          "frame-%d.png" % k))
+                  for k in range(4)]
+        contract = json.dumps({"render_mode": "gpu", "renderer": "angle",
+                               "frames": frames,
+                               "precheck": {"uniform": False,
+                                            "identical_frames": False}})
+        self.capture(extra="render: %s\n" % contract)
+        out, sent = self.judge({"delivers: animate the rain and steam": "yes",
+                                crow_core.GOAL_CHECK_DEFAULT_FRAME: "yes"})
+        parts = sent[0]["messages"][0]["content"]
+        self.assertEqual([p["type"] for p in parts], ["text"] + ["image_url"] * 4)
+        self.assertIn("clock-stepped frames", parts[0]["text"])
+        self.assertTrue(out["passes"])
+        frozen = json.dumps({"render_mode": "gpu", "frames": frames,
+                             "precheck": {"identical_frames": True,
+                                          "max_frame_diff": 0}})
+        self.capture(extra="render: %s\n" % frozen)
+        out, sent = self.judge()
+        self.assertEqual(sent, [])
+        self.assertIn("needs motion", out["precheck"])
+
+    def test_the_contract_reads_json_key_value_and_the_legacy_line(self):
+        c = crow_core.render_contract(
+            "/r/render-1.png -- 9 bytes, 1x1, done, gpu (angle)\n"
+            "render_mode: unavailable\ncontact_sheet: /r/sheet.png\n"
+            'precheck: {"uniform": true, "dark_pct": 99.5}')
+        self.assertEqual(c["render_mode"], "unavailable")
+        self.assertEqual(c["renderer"], "angle")
+        self.assertEqual(c["contact_sheet"], "/r/sheet.png")
+        self.assertTrue(c["precheck"]["uniform"])
+        self.assertEqual(c["capture"], "/r/render-1.png")
+        self.assertEqual(crow_core.render_contract(
+            "/r/x.png -- 9 bytes, done, software (swiftshader)")["render_mode"],
+            "software")
+        self.assertIsNone(crow_core.render_contract("error: timed out"))
+        self.assertIn("unavailable", crow_core.capture_precheck(
+            [], c, self.goal(), 1))
+
+    def test_a_reference_image_is_sent_pairwise_and_advisory(self):
+        ref = _write_png(os.path.join(self.root, "reference.png"))
+        said, _g, changed = crow_core.goal_command(
+            self.GOAL + " | reference: reference.png -- lighting mood")
+        self.assertTrue(changed, said)
+        self.assertIn("1 reference image", said)
+        self.assertEqual(crow_core.goal_references(),
+                         [{"path": ref, "criterion": "lighting mood"}])
+        said, _g, changed = crow_core.goal_command(
+            self.GOAL + " | reference: nope.png")
+        self.assertFalse(changed)
+        self.assertIn("no such reference image", said)
+        self.step(2, "running")
+        self.capture()
+        item = "as good as the reference image reference.png on: lighting mood"
+        out, sent = self.judge({"delivers: build the scene": "yes",
+                                crow_core.GOAL_CHECK_DEFAULT_FRAME: "yes",
+                                item: "no"})
+        self.assertTrue(out["passes"], "an advisory reference item gated")
+        parts = sent[0]["messages"][0]["content"]
+        self.assertIn("REFERENCE image", parts[0]["text"])
+        self.assertIn("- %s (optional)" % item, parts[0]["text"])
+        self.assertEqual(len(parts), 3, "capture + reference")
+        crow_core.goal_command("off")
+        self.assertEqual(crow_core.goal_references(), [])
+
+
+class ASkipIsNeverStoredAsDoneTests(_GoalCase):
+    """#296. goal.json of 2026-09-24/25: step 4 `done` with the note
+    "skipped by robin (2026-09-24 ~22:00): ray lighting is not verifiable"
+    -- a hand edit before `/goal skip` existed, counted 5/9."""
+
+    def test_a_done_step_whose_note_says_skipped_loads_as_skipped(self):
+        goal = self.goal()
+        goal["steps"][1].update(status="done", note=(
+            "skipped by robin (2026-09-24 ~22:00): ray lighting is not "
+            "verifiable on this machine's software GL"))
+        goal["steps"][2].update(status="done", note="built; nothing skipped")
+        crow_core.goal_write(goal)
+        loaded = self.goal()
+        self.assertEqual(loaded["steps"][1]["status"], "skipped")
+        self.assertEqual(loaded["steps"][1]["skipped_by"], "user")
+        self.assertEqual(loaded["steps"][2]["status"], "done")
+        self.assertEqual(crow_core.goal_counts(loaded), (1, 3))
+
+    def test_the_model_cannot_undo_robins_skip_and_redo_can(self):
+        crow_core.goal_command("skip 2 not here")
+        for status in ("done", "running"):
+            out = self.step(2, status, "render-x.png")
+            self.assertFalse(out["ok"])
+            self.assertIn("/goal redo 2", out["error"])
+        said, goal, changed = crow_core.goal_command("redo 2")
+        self.assertTrue(changed)
+        self.assertEqual(goal["steps"][1]["status"], "open")
+        self.assertNotIn("skipped_by", goal["steps"][1])
+        said, _g, changed = crow_core.goal_command("redo 2")
+        self.assertFalse(changed)
+        self.assertIn("not skipped", said)
 
 
 class GoalDoneNeedsEvidenceTests(unittest.TestCase):
@@ -16441,7 +16886,10 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
 
     # -- the whole call ------------------------------------------------------
 
-    def test_the_judge_sees_one_message_and_its_scores_land_on_the_step(self):
+    def test_the_judge_sees_one_message_and_its_answers_land_on_the_step(self):
+        """#295: the verdict is the frozen checklist answered yes/no/unknown;
+        a judge that still answers in 1-10 scores is read against the
+        threshold."""
         crow_core.goal_command("Neon diorama | plan it | build the scene")
         crow_core.tool_goal_step(2, "running")
         self.capture(crop=True)
@@ -16450,18 +16898,18 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
         def urlopen(request, timeout=None):
             sent.append((request.full_url, json.loads(request.data)))
             return _JudgeAnswer(_judge_reply({"delivers: build the scene": 7,
-                                              "x": 2, "y": 3}))
+                                              "x": 2, "y": 9}))
         with mock.patch.object(crow_core, "judge_spots",
                                return_value=[dict(self.spot("v/eyes"),
                                                   how="the delegate spot")]), \
                 mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
             out = json.loads(crow_core.tool_judge(criteria="x, y"))
         self.assertTrue(out["ok"], out)
-        self.assertEqual(out["min"], 2)
         self.assertFalse(out["passes"])
         self.assertEqual(out["step"], 2)
-        self.assertEqual(out["rubric_from"], "the step + the caller")
-        self.assertIn("delivers: build the scene", out["scores"])
+        self.assertEqual(out["checklist_from"], "the first judge call")
+        self.assertEqual(out["checklist"], {"delivers: build the scene": "no",
+                                            "x": "no", "y": "yes"})
         url, body = sent[0]
         self.assertTrue(url.endswith("/chat/completions"))
         self.assertEqual(len(body["messages"]), 1)
@@ -16472,13 +16920,21 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
         self.assertIn("enlarged crop", parts[0]["text"])
         self.assertNotIn("min_p", body)             # remote_body ran
         stored = crow_core.goal_load()["steps"][1]["judge"]
-        self.assertEqual(stored["min"], 2)
+        self.assertFalse(stored["pass"])
         self.assertEqual(stored["model"], "openrouter/v/eyes")
         # #286: the verdict says what was judged, the step's own text first.
         self.assertEqual(stored["criteria"],
                          ["delivers: build the scene", "x", "y"])
-        self.assertEqual(stored["rubric_source"], "the step + the caller")
         self.assertIn("- delivers: build the scene", parts[0]["text"])
+        # #295: the checklist is frozen now -- the next call's criteria
+        # change nothing.
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[dict(self.spot("v/eyes"),
+                                                  how="the delegate spot")]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
+            again = json.loads(crow_core.tool_judge(criteria="z"))
+        self.assertEqual(sorted(again["checklist"]),
+                         ["delivers: build the scene", "x", "y"])
 
     def test_a_dead_spot_falls_through_and_a_blind_local_server_refuses(self):
         self.capture()
