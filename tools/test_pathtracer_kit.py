@@ -431,9 +431,6 @@ class CheckerTests(unittest.TestCase):
         self.assertEqual(checker.main(["x", tmp]), 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class CheckerBorrowsVramTests(unittest.TestCase):
     """#304: the checker runs outside a Crow turn and must name serve for lending."""
@@ -455,3 +452,7 @@ class CheckerBorrowsVramTests(unittest.TestCase):
     def test_main_binds_before_the_first_capture(self):
         src = open(diorama.__file__, encoding="utf-8").read()
         self.assertLess(src.index("bind_lend_spot(core, a.serve)"), src.index('live = capture(core'))
+
+
+if __name__ == "__main__":
+    unittest.main()
