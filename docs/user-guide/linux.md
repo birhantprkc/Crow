@@ -178,6 +178,8 @@ An `sd-cli` or `sd-server` of another commit already in `bin/` is kept as
 `sd-cli-<commit>`, never deleted. The model is separate: Qwen-Image 2.1 is read from
 `$CROW_IMAGE_MODEL_DIR`, else `<models>/qwen-image-2.1`, else `qwen-image-2.1` beside the tree
 `<install>/models` links to. `install.sh --build-image-server` says which one it found.
+The weights come from [`Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1) and are
+not downloaded by Crow. Licence: Qwen Research License Agreement (release date 2026-09-20): research and evaluation only; commercial use needs a separate licence from Qwen (model-business@notice.qwencloud.com), sections 2a/2b of its `LICENSE`.
 
 ---
 
