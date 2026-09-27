@@ -5,6 +5,17 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 2.8.0 — 2026-09-27
+
+**Crow makes and edits images, and the 27B on crow-nest sees them.** `generate_image` and `edit_image` run
+Qwen-Image 2.1 on a resident sd-server beside crow-nest's dense 27B on one 32 GB card: 2752×1536 in about
+2.6 min, an edit in two stages (1 MP edit, full-size redraw) because a 4 MP edit comes out grainy (#300, #308).
+In the chat an animated square in the theme's colours becomes the picture; a lightbox opens it with folder,
+download and info (#311), on the phone mirror too. `install.sh --build-image-server` builds sd-server (#314).
+Images dropped from the file manager reach the model on Linux (#312), the window's X ends the process (#313),
+Stop interrupts a running command (#310), and a command over its memory ceiling dies instead of crawling (#309).
+20 commits since v2.7.0.
+
 ### Added
 
 - **Crow makes and edits images** (#300 phase 3, #308, #311, 2026-09-27). Two tools on a resident `sd-server` (stable-diffusion.cpp 2f88688, Qwen-Image 2.1, BF16 DiT streamed, `--max-vram 7`, text encoder on the CPU), started on first use or warmed at window start, stopped with Crow:
@@ -17,6 +28,11 @@ The reasoning is in the commit and on the issue.
 - **`install.sh --build-image-server`** (#314, 2026-09-27): builds `sd-server` and `sd-cli` (stable-diffusion.cpp 2f88688 with its four submodule pins, CUDA, sm_120) into `bin/` with `tools/build-sd-server.sh`, reusing the llama-server builder's CUDA toolkit; no web UI. Measured on the RTX 5090 box: 3 min 10 s (8 jobs), a rerun 1.4 s with nothing to do, `ldd` resolving CUDA from `<install>/cuda/lib`. An older `sd-cli` is kept as `sd-cli-<commit>`. Windows: `tools/pack-release.ps1 -SdBuildDir` puts `sd-server.exe` and its DLLs into the release zip, recipe in `docs/user-guide/install.md`; not run yet (needs Windows).
 
 - **Crow knows crow-nest's dense Qwen3.8-27B container** (#300, 2026-09-27). New `models.entries.qwen38-27b-cnq` for `Qwen3.8-27B-CNQ4.5.cnq`, the container crow-nest's `serve` opens on port 8099 (not booted from Crow, like `flash-next-cnq45-m`). `model_key_for` pairs it with what the running serve reports (checked live: key `qwen38-27b-cnq`), so a request to it carries the 27B card's rows (thinking 1.0 / 0.95 / 20 / 0.0 / 0.0, non-thinking 0.7 / 0.80 / 20 / 0.0 / 1.5), thinking fixed at `high` (= the template's xhigh) and the 1024 reasoning cap, the same policy as the crow-nest Flash-Next point. Reasoning levels measured on the running 27B serve (#74 method): none / low / medium / high accepted, max / minimal / off / High / empty refused with 400; identical to Flash-Next's, since the 27B's chat template and tokenizer files are byte-identical to Flash-Next's. `docs/operating-points.md` has its row. Not measured: answer quality in Crow on this point.
+
+### Changed
+
+- **The README is a generated image** (#307, 2026-09-25; `4664c3a`, `f1c941d`): one picture per GitHub theme and a one-column variant for phones (`docs/images/readme/`, drawn by `tools/readme_image.py`), then the install lines, the docs links, the licence and Ko-fi; the old text front page lives in `docs/archive/README-v2.7.0.md`. For 2.8.0 the picture shows the image tools and takes the tool count from `crow_core.BUILTIN_TOOLS` (30, was drawn as 28) (`0c08fb1`).
+- **`install.ps1` sees a running `sd-server.exe`** holding `bin\` during an update, as it did llama-server (#314). Not run: no PowerShell on the Linux release machine.
 
 ### Fixed
 
