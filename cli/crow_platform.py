@@ -751,14 +751,14 @@ def session_oom_kills() -> "int | None":
     return None
 
 
-def kill_scope(unit: str) -> None:
+def kill_scope(unit: str, sig: str = "SIGKILL") -> None:
     """SIGKILL whatever is still in the named scope -- the sweep after a kill.
 
     The process-group kill reaches everything the shell started EXCEPT a
     descendant that left the group (setsid, a daemonizer). The scope's cgroup
     it cannot leave. The unit is the one this caller named, never a pattern
-    (#158)."""
-    _systemctl_user("kill", "--signal=SIGKILL", unit + ".scope")
+    (#158). `sig` is SIGTERM for #310's graceful first step on Stop."""
+    _systemctl_user("kill", "--signal=" + sig, unit + ".scope")
 
 
 def devtools_pipe() -> "tuple[list[str], tuple[int, int], int, int] | None":
@@ -844,6 +844,22 @@ def kill_pid(pid) -> bool:
         except OSError:
             return False
     return True
+
+
+def kill_tree(pid) -> bool:
+    """#310, Windows only: `taskkill /PID <pid> /T /F` -- the process AND the
+    children it started. `proc.kill()` on cmd.exe left those running. True
+    when taskkill ran and said so; False elsewhere or on any failure, and the
+    caller falls back to its handle. Not measured on Windows (#247)."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        done = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                              capture_output=True, stdin=subprocess.DEVNULL,
+                              timeout=30)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 def terminate_tree(proc, grace: float = 5.0) -> None:

@@ -5353,6 +5353,57 @@ class TurnStateTests(TurnLoopCase):
         return transport
 
 
+@unittest.skipIf(crow_platform.IS_WINDOWS, "the command is POSIX sh")
+class StopDuringAToolTests(TurnLoopCase):
+    """#310: Stop pressed while a round's tool runs.
+
+    2026-09-27, measured: Stop set INTERRUPT, nothing read it while
+    run_command ran, every remaining call of the round still ran, and the next
+    request still went to serve (engine.log: 535 tokens prefilled, 2 generated,
+    "client gone"). Now the running command ends, the calls after it do not
+    start, and no further request is sent.
+    """
+
+    def setUp(self):
+        super().setUp()
+        crow_core.set_root(self.work)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "log_note", crow_core.log_note)
+        self.notes = []
+        crow_core.log_note = lambda text, kind="note": self.notes.append((kind, text))
+
+    def test_stop_mid_round_ends_the_turn_without_another_request(self):
+        marker = os.path.join(self.work, "second-ran")
+        self.serve([{"content": "two calls"},
+                    _call_delta("run_command", json.dumps(
+                        {"command": "sleep 30", "cwd": self.work}), 0, "c0"),
+                    _call_delta("run_command", json.dumps(
+                        {"command": "touch %s" % marker, "cwd": self.work}), 1, "c1")])
+        self.serve([{"content": "the round after -- must never be asked for"}])
+        timer = threading.Timer(1.0, crow_core.INTERRUPT.set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        talk = self.conversation()
+        began = time.monotonic()
+        result = self.turn(talk, max_tool_rounds=4, approve=lambda n, a: "yes")
+        took = time.monotonic() - began
+        self.assertLessEqual(took, 1.0 + 3.0, "the Stop took %.1f s" % took)
+        self.assertEqual(len(self.bodies), 1, "a request went out after Stop")
+        self.assertTrue(result.stopped)
+        self.assertIn("interrupted", self.events.names)
+        self.assertFalse(crow_core.INTERRUPT.is_set(), "the turn did not consume its flag")
+        tools = [m["content"] for m in talk.payload() if m["role"] == "tool"]
+        self.assertEqual(len(tools), 2, tools)
+        self.assertTrue(tools[0].startswith("error: stopped by the user after "), tools[0])
+        self.assertEqual(tools[1], crow_core.STOPPED + crow_core.STOPPED_NOT_RUN)
+        self.assertFalse(os.path.exists(marker), "the call after the Stop ran")
+        self.assertPrefixIsWhole(talk)
+        self.assertEqual((result.cost.tool_errors, result.cost.tool_declined), (0, 2),
+                         "a Stop was booked as a failure")
+        self.assertTrue(any("stop pressed during run_command" in t for _k, t in self.notes),
+                        self.notes)
+
+
 class TheLoopLeftTheReplTests(unittest.TestCase):
     """The move itself, which no behaviour case can see.
 
@@ -18561,6 +18612,86 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         self.assertEqual(out, "[exit 0]")
         pid = self._pid("bg.pid")
         self.assertFalse(_gone(pid, 0.3), "a finished command's background was killed")
+
+    # ---- #310: Stop
+
+    def _stopped_after(self, command, after=1.0):
+        """`command` through run_command on a thread; Stop (INTERRUPT) after
+        `after` s. Returns (result, seconds from the Stop to the return)."""
+        self.addCleanup(crow_core.INTERRUPT.clear)
+        crow_core.INTERRUPT.clear()
+        box = {}
+
+        def call():
+            box["out"] = crow_core.tool_run_command(command, cwd=self.dir)
+            box["end"] = time.monotonic()
+
+        worker = threading.Thread(target=call, daemon=True)
+        worker.start()
+        time.sleep(after)
+        crow_core.INTERRUPT.set()
+        pressed = time.monotonic()
+        worker.join(60)
+        self.assertFalse(worker.is_alive(), "run_command did not return")
+        return box["out"], box["end"] - pressed
+
+    def test_stop_ends_a_running_command_and_what_it_started(self):
+        """#310: Stop pressed during `sleep 30` ends it within 3 s (the
+        ticket's threshold), the result says the user stopped it and keeps
+        what was printed, and the call's own background dies with it."""
+        out, took = self._stopped_after(
+            "echo started; sleep 300 & echo $! > bg.pid; sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(out.startswith("error: stopped by the user after "), out)
+        self.assertIn("\nstarted", out)
+        self.assertTrue(_gone(self._pid("bg.pid")),
+                        "the stopped call's own background outlived the Stop")
+
+    def test_stop_ends_it_without_a_scope_too(self):
+        """The process group alone, as on a machine without systemd-run."""
+        self._env("CROW_COMMAND_SCOPE", "0")
+        out, took = self._stopped_after("sleep 300 & echo $! > bg.pid; sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(out.startswith("error: stopped by the user after "), out)
+        self.assertTrue(_gone(self._pid("bg.pid")))
+
+    def test_stop_asks_politely_first(self):
+        """SIGTERM before SIGKILL (openai/codex#22729): a command that
+        cleans up on TERM gets to."""
+        out, took = self._stopped_after(
+            "trap 'echo cleaned > term.txt; exit 0' TERM; sleep 30 & wait")
+        self.assertLessEqual(took, 3.0, out)
+        with open(os.path.join(self.dir, "term.txt")) as fh:
+            self.assertEqual(fh.read().strip(), "cleaned")
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_stop_empties_the_calls_scope(self):
+        """#310 expected result 4: the stopped call's unit is gone, and a
+        descendant that left the group by setsid with it."""
+        units = []
+        real = crow_platform.command_scope_prefix
+        self.addCleanup(setattr, crow_platform, "command_scope_prefix", real)
+        crow_platform.command_scope_prefix = lambda unit: units.append(unit) or real(unit)
+        out, took = self._stopped_after(
+            "setsid sleep 300 & echo $! > esc.pid; sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(_gone(self._pid("esc.pid")), "the setsid child outlived Stop")
+        state = subprocess.run(["systemctl", "--user", "is-active", units[0] + ".scope"],
+                               capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(state, "active", self._witnesses())
+
+    def test_stop_leaves_the_background_of_an_earlier_call(self):
+        """#310, the contract above: a job an EARLIER call put in the
+        background was detached on purpose; Stop of a later call ends that
+        call only."""
+        first = crow_core.tool_run_command(
+            "nohup sleep 600 >/dev/null 2>&1 & echo $! > bg.pid", cwd=self.dir)
+        self.assertEqual(first, "[exit 0]")
+        out, took = self._stopped_after("sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(out.startswith("error: stopped by the user after "), out)
+        self.assertFalse(_gone(self._pid("bg.pid"), 0.3),
+                         "Stop killed an earlier call's background job")
 
     # ---- the fallback
 

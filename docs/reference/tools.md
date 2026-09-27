@@ -86,7 +86,7 @@ In goal mode, a run of `render_page` captures of one page that come back blank o
 is counted: after 3 the next nudge says to bisect, and after 6 the context rolls over with a list
 of what was tried (#268, see [goals and subagents](../user-guide/goals-and-subagents.md)).
 
-### `run_command` (#207, #218)
+### `run_command` (#207, #218, #310)
 
 `run_command(command, cwd=<working area>)` — one shell line, bash on Linux, cmd.exe on
 Windows, stdin closed.
@@ -101,9 +101,10 @@ Windows, stdin closed.
 | why 8G | measured 2026-09-22 as each scope's `memory.peak`: diorama three.js esbuild bundle 106 MiB, `npm ls --all` 46 MiB, node importing three 21 MiB, gcc 9 MiB, `test_crow` 60 MiB, `test_crow_core` 109 MiB. 8G stops the 54 GiB software-WebGL runaway a seventh of the way and leaves a node build room up to V8's own ~4 GiB heap |
 | at the ceiling | the kernel kills every process in the scope at once (`OOMPolicy=kill` = `memory.oom.group`); the result reads `error: command exceeded its memory ceiling (MemoryMax=8G, no swap) and was killed, with everything it started: <command>` followed by the output up to the kill. The reason comes from the unit's `Result=oom-kill`, not from the exit code — `kill -9 $$` stays `[exit -9]`. The failed unit is reset |
 | kill | the clock and the capture cap SIGKILL the shell's whole process group (`start_new_session`, `killpg`), then the scope (`systemctl --user kill`), which also takes a descendant that left the group with `setsid`. A command that ends by itself keeps what it put in the background (`server &`); that process stays in its scope and under its ceiling |
+| Stop (#310) | Stop during a running command ends it within ~2 s: SIGTERM to the shell's group and its scope, up to 2 s (`STOP_GRACE`) for a cleanup, then the same SIGKILL sweep as the clock. The result reads `error: stopped by the user after <N>s -- the command and everything it started in this call were ended: <command>` followed by the output up to the Stop, and it is counted like a declined call, not a failed one. Every call of the round after it does not run (`error: stopped by the user -- not run`), and no further request goes to the server. A job an **earlier** call left in the background (`nohup … &`) is not touched. `build_bundle` and the syntax check stop the same way |
 | literal | `--expand-environment=no` on systemd ≥ 254: systemd-run expands `${VAR}` and `$$` in its own command line (measured on 261: `${X}` came out empty) |
 | without systemd | no `systemd-run` or no reachable user manager (container, CI, SSH without a session): no scope, no ceiling; the process-group kill still holds |
-| Windows | no scope and no group: the clock kills `cmd.exe` by its handle, and what it started can outlive it — a Job Object would be the fix, not built |
+| Windows | no scope and no group: the clock, the cap and Stop end `cmd.exe` and its children with `taskkill /T /F` (#310; not measured on Windows). A child whose parent already exited can outlive it — a Job Object would be the fix, not built |
 | headless browser | a browser name and `--headless`/`--screenshot` in the line add `note: render_page takes this screenshot inside the render's own memory ceiling …` to the result. A note, not a refusal: the browser is bounded here too, a headless browser has uses `render_page` does not cover (`--dump-dom`, `--print-to-pdf`), and a refused line comes back as a script file no pattern sees |
 | background output | a process left in the background that still holds stdout keeps its reader: the runner waits 0.25 s (`BOUNDED_RUN_SETTLE`) and returns without what it prints later. Redirect it (`server >log 2>&1 &`) and read the file |
 

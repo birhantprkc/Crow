@@ -12407,6 +12407,8 @@ def _configured_check(path: str, argv: "list[str]") -> str:
             cmd, os.path.dirname(os.path.abspath(path)), deadline)
     except OSError as exc:
         return "\nsyntax check (%s): could not run -- %s" % (what, exc)
+    if stopped == "user":
+        return "\nsyntax check (%s): stopped by the user -- not checked" % what
     if stopped:
         return ("\nsyntax check (%s): not finished within %gs -- not checked"
                 % (what, SYNTAX_CHECK_SECONDS))
@@ -12462,6 +12464,9 @@ def syntax_check(path: str) -> str:
         for argv, stdin_text in jobs[:SYNTAX_CHECK_SCRIPTS]:
             code, _out, err, stopped = _bounded_run(argv, cwd, deadline,
                                                     stdin_text)
+            if stopped == "user":
+                return ("\nsyntax check (%s): stopped by the user -- not "
+                        "checked" % what)
             if stopped:
                 return ("\nsyntax check (%s): not finished within %gs -- not "
                         "checked" % (what, SYNTAX_CHECK_SECONDS))
@@ -13089,6 +13094,10 @@ def _child_env() -> "dict[str, str]":
 # is short and a reader still blocked is left behind as the daemon it is.
 BOUNDED_RUN_SETTLE = 0.25
 
+# #310. How long a Stop gives the running command after its SIGTERM before
+# the SIGKILL sweep -- the "wait briefly for cleanup" of openai/codex#22729.
+STOP_GRACE = 2.0
+
 
 def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
                  stdin_text: str | None = None, *, shell: bool = False,
@@ -13098,8 +13107,10 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
 
     `stopped` is "" when the child ended by itself, "clock" when `deadline`
     (a time.monotonic() value) passed, "cap" when one stream went over
-    COMMAND_CAPTURE_BYTES; the code is None then, and the caller says which
-    in its own words. A child that cannot be started raises OSError.
+    COMMAND_CAPTURE_BYTES, "user" when Stop set INTERRUPT (#310: SIGTERM,
+    STOP_GRACE, then the same SIGKILL sweep; the output so far is kept); the
+    code is None then, and the caller says which in its own words. A child
+    that cannot be started raises OSError.
 
     #212 FOLLOW-UP: ONE RUNNER, NOT TWO. run_command (#207) and build_bundle
     (#212) each carried this reader-thread loop, and the copies had already
@@ -13141,8 +13152,8 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
     itself. Codex had the same hang (openai/codex#4337, "only kills the shell
     wrapper") and the same remedy. A child that exits by itself is left
     alone, and so is whatever it put in the background -- `server &` is a
-    thing a command may mean. Windows keeps `proc.kill()`: cmd.exe's children
-    survive it there, as they always did.
+    thing a command may mean. Windows: `proc.kill()` left cmd.exe's children
+    running; since #310 the kill is `taskkill /T /F` on the tree (kill_tree).
     """
     argv = cmd
     if prefix:
@@ -13160,13 +13171,33 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
     def _kill() -> None:
         try:
             if crow_platform.IS_WINDOWS:
-                proc.kill()
+                # #310: THE TREE, NOT cmd.exe ALONE -- `taskkill /T /F`.
+                if not crow_platform.kill_tree(proc.pid):
+                    proc.kill()
             else:
                 os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             pass                           # the group is already gone
         if unit:
             crow_platform.kill_scope(unit)
+
+    def _term_then_kill(grace: float) -> None:
+        """#310: Stop ends the call GRACEFULLY FIRST -- SIGTERM to the group
+        and the scope, up to `grace` seconds, then the SIGKILL sweep above
+        (openai/codex#22729's sequence). Windows has no SIGTERM for a console
+        child: the tree kill directly."""
+        if not crow_platform.IS_WINDOWS:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            if unit:
+                crow_platform.kill_scope(unit, "SIGTERM")
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+        _kill()
 
     def _drain(which: str) -> None:
         pipe = proc.stdout if which == "out" else proc.stderr
@@ -13202,7 +13233,13 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
         except OSError:
             pass
     timed_out = False
+    user_stop = False
     while proc.poll() is None and not drained["over"]:
+        # #310: STOP IS THE THIRD REASON, beside the clock and the cap. Read,
+        # never cleared here (#143: the flag belongs to the turn).
+        if INTERRUPT.is_set():
+            user_stop = True
+            break
         left = deadline - time.monotonic()
         if left <= 0:
             timed_out = True
@@ -13211,7 +13248,9 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
             proc.wait(timeout=min(left, 0.25))
         except subprocess.TimeoutExpired:
             pass
-    if timed_out or drained["over"]:
+    if user_stop:
+        _term_then_kill(STOP_GRACE)
+    elif timed_out or drained["over"]:
         _kill()
     proc.wait()
     settle = time.monotonic() + BOUNDED_RUN_SETTLE
@@ -13222,7 +13261,11 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
                 pipe.close()
             except OSError:
                 pass
-    stopped = "clock" if timed_out else "cap" if drained["over"] else ""
+    stopped = ("user" if user_stop else "clock" if timed_out
+               else "cap" if drained["over"] else "")
+    if stopped == "user":
+        # What it printed up to the Stop stays: it says how far it got.
+        return None, "".join(drained["out"]), "".join(drained["err"]), stopped
     if stopped:
         return None, "", "", stopped
     return proc.returncode, "".join(drained["out"]), "".join(drained["err"]), ""
@@ -13290,12 +13333,20 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         unit = "crow-cmd-%d-%s" % (os.getpid(), os.urandom(4).hex())
         prefix = crow_platform.command_scope_prefix(unit)
         oom_before = crow_platform.session_oom_kills() if prefix else None
+        began = time.monotonic()
         code, out, err, stopped = _bounded_run(
             command, cwd, time.monotonic() + COMMAND_TIMEOUT, shell=True,
             prefix=prefix, unit=unit if prefix else None)
     except OSError as exc:
         return f"error: could not run: {exc}"
     note = _headless_browser_note(command, bool(prefix))
+    if stopped == "user":
+        # #310: the model hears WHY -- not an unexplained `[exit -15]`.
+        return _clip(
+            "%s after %.0fs -- the command and everything it started in this "
+            "call were ended: %s" % (STOPPED, time.monotonic() - began, command)
+            + (f"\n{out}".rstrip())
+            + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
     if stopped == "clock":
         return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}" + note
     if stopped == "cap":
@@ -13592,6 +13643,8 @@ def _bundle_run(argv: "list[str]", cwd: str, deadline: float,
         code, out, err, stopped = _bounded_run(argv, cwd, deadline, stdin_text)
     except OSError as exc:
         return None, "", f"could not start {argv[0]}: {exc}"
+    if stopped == "user":
+        return None, "", "the build was stopped by the user"
     if stopped == "clock":
         return None, "", f"the build exceeded {BUNDLE_TIMEOUT}s and was killed"
     if stopped == "cap":
@@ -15660,6 +15713,13 @@ DEFAULT_MODE = "auto"
 # broken prefix for every later turn of the session. The model can read this
 # line and try something else; it cannot read a turn that ended.
 DECLINED = "error: declined by the user"
+
+# #310. What a call Stop ended comes back as -- booked like DECLINED (the
+# user's choice, not a failed tool). A call of the round that Stop kept from
+# starting gets STOPPED + STOPPED_NOT_RUN, so every tool_call_id keeps its
+# answer and the prefix stays valid.
+STOPPED = "error: stopped by the user"
+STOPPED_NOT_RUN = " -- not run"
 
 # #203. WHAT A CALL CUT IN HALF BY THE OUTPUT CAP COMES BACK AS -- a tool
 # result for the same three reasons DECLINED is one: the prefix stays valid,
@@ -23574,6 +23634,15 @@ def run_turn(
                                        remote=remote,
                                        forget_reads=owns_turn_state)
     for round_no in range(budget + 3):
+        # #310: A STOP BETWEEN ROUNDS SENDS NOTHING. Without this the next
+        # request went out and only the stream reader dropped it -- 535
+        # tokens prefilled and 2 generated for nobody (engine.log, 00:27:39).
+        if INTERRUPT.is_set():
+            if owns_turn_state:
+                INTERRUPT.clear()
+            events.turn_interrupted()
+            stopped = True
+            break
         seed = None if remote else draw_seed(avoid=seed)
         try:
             reply, reasoning, timings = stream_reply(
@@ -23899,6 +23968,10 @@ def run_turn(
             # was waiting on -- and the previous round's six figures as the last thing visible.
             events.tool_started(call["name"], call["arguments"])
             started = time.monotonic()
+            # #310: A CALL AFTER A STOP DOES NOT RUN and asks nobody; it
+            # still gets its answer, so the prefix stays valid (DECLINED's
+            # reason).
+            halted = INTERRUPT.is_set()
 
             # #203: A CALL THE OUTPUT CAP CUT IN HALF RUNS NOTHING AND ASKS
             # NOBODY. There is nothing to approve -- the arguments are gone or
@@ -23941,7 +24014,7 @@ def run_turn(
             # predicate: `stops_for` keeps git_push on at every level, lets
             # yolo silence the outside-path ask and the git_commit ask, and
             # leaves every other level exactly where #88 put it.
-            if (cut_why is None and cwd_refused is None
+            if (not halted and cut_why is None and cwd_refused is None
                     and (stops_for(call["name"], mode, bool(outside))
                          and not remembered(call["name"], call["arguments"]))):
                 answer = "no"
@@ -23956,7 +24029,7 @@ def run_turn(
                         ("the user %s run_command for %s, outside the working "
                          "area") % ("declined" if answer not in ("yes", "always")
                                     else "released", ", ".join(outside[:2])))
-            elif outside and mode in RELEASES_ALL:
+            elif not halted and outside and mode in RELEASES_ALL:
                 # YOLO WAS NOT ASKED, SO "THE USER RELEASED" WOULD BE A LIE --
                 # and a silent outside run would be worse (#98: the working
                 # area leaving is the one fact the screen must carry). The
@@ -23966,7 +24039,10 @@ def run_turn(
                     "run_command ran unasked for %s, outside the working "
                     "area (yolo)" % ", ".join(outside[:2]))
 
-            if declined:
+            if halted:
+                result, repeated = STOPPED + STOPPED_NOT_RUN, False
+                declined = True
+            elif declined:
                 # A REFUSAL IS A RESULT. Same shape as a failed call: the text
                 # goes back as the tool message, the round continues, and the
                 # prefix stays valid for every later turn. #88 point 1.
@@ -24024,6 +24100,13 @@ def run_turn(
                 # #288: WHERE A TOOL RESULT IS RECORDED, ITS HOSTS ARE NAMED --
                 # a search in this call releases the fetch in the next one.
                 note_known_hosts(result)
+                # #310: A CALL STOP ENDED IS BOOKED LIKE A REFUSAL -- the
+                # user's choice, not a failed tool, no same-failure streak.
+                if result.startswith(STOPPED):
+                    declined = True
+                    log_note("stop pressed during %s after %.0f s"
+                             % (call["name"], time.monotonic() - started),
+                             "turn")
             took = time.monotonic() - started
             # TWO NAMES FOR WHAT WAS ONE LINE, and #95 is the reason. `errored`
             # is what the MODEL sees: the "error: " prefix that makes a result
@@ -24058,7 +24141,9 @@ def run_turn(
             # condition, not `not errored` -- a shell command that failed on its
             # own terms still reached the shell, and that is the fact being
             # reported.
-            if not declined and escaped_the_working_area(call["name"]):
+            # #310: a call Stop ended DID reach the shell, so it still counts.
+            ran = not declined or (not halted and result.startswith(STOPPED))
+            if ran and escaped_the_working_area(call["name"]):
                 # ONCE PER PATH, NOT PER CALL: the mark is a rare-event
                 # report, and repeating it with unchanged content per shell
                 # call trains the reader to skip it. A call that names
@@ -24112,6 +24197,15 @@ def run_turn(
                 continue
             conversation.append("tool", result, tool_call_id=call["id"])
         events.tools_finished()
+        # #310: THE ROUND IS WHOLE (every call answered), so a Stop ends the
+        # turn HERE -- before the rollover's digest request and before the
+        # next round's, neither of which anyone is waiting for.
+        if INTERRUPT.is_set():
+            if owns_turn_state:
+                INTERRUPT.clear()
+            events.turn_interrupted()
+            stopped = True
+            break
 
         # THE CHECK BELONGS HERE TOO, NOT ONLY BETWEEN TURNS. One tool round
         # has been measured adding 5,253 tokens, and up to MAX_TOOL_ROUNDS of
