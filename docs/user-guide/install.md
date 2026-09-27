@@ -75,16 +75,30 @@ the two share `cublas64_13.dll`/`cublasLt64_13.dll`:
 git clone https://github.com/leejet/stable-diffusion.cpp sd.cpp; cd sd.cpp
 git checkout master-920-2f88688      # 2f886889e6e8b78738d6b87f7191f6018557c551
 git submodule update --init ggml thirdparty/libwebp thirdparty/libwebm
-cmake -S . -B build -DSD_CUDA=ON -DSD_SERVER_BUILD_FRONTEND=OFF -DCMAKE_CUDA_ARCHITECTURES=120
+# in a shell that has run VS's vcvars64.bat (the "x64 Native Tools" prompt), same as llama.cpp
+cmake -S . -B build -G "Ninja Multi-Config" -DSD_CUDA=ON -DSD_SERVER_BUILD_FRONTEND=OFF -DCMAKE_CUDA_ARCHITECTURES=120
 cmake --build build --config Release --target sd-server sd-cli
 .\tools\pack-release.ps1 -BuildDir <llama.cpp>\build\bin\Release -SdBuildDir <sd.cpp>\build\bin\Release
 ```
 
+The generator is not optional. Without `-G`, CMake picks the Visual Studio generator, and that
+one needs CUDA's MSBuild integration: without it configure stops at `No CUDA toolset found`
+(measured with VS 18 and CUDA 13.3). Ninja calls `nvcc` directly, as the `llama-server.exe`
+build does; `Ninja Multi-Config` still writes to `build\bin\Release`.
+
+| | |
+|---|---|
+| measured | 2026-09-27, VS 18 Community, CUDA 13.3.73, RTX 5090 (`sm_120`) |
+| build | 398 of 398 steps; `sd-cli.exe` 91.2 MB, `sd-server.exe` 91.4 MB |
+| check | `sd-cli.exe --version` reads `master-920-2f88688, commit 2f88688`, run from the packed `bin\` with only `System32` on `PATH` |
+| pack | 7 runtime libraries added, `msvcp140_codecvt_ids.dll` new with the image server; completeness OK |
+| not yet run | `generate_image` live on Windows |
+
 `pack-release.ps1` takes only `sd-server.exe` and `sd-cli.exe` from that directory and resolves
 their DLLs with `dumpbin` exactly as it does for `llama-server.exe`; a DLL already staged is not
-copied twice. `sd-cli.exe --version` has to read `master-920-2f88688, commit 2f88688`. This
-recipe has not been run on Windows yet. Upstream's `win-cuda12` zip is not used: it brings a
-second CUDA runtime (563 MB) and its `sm_120` support is unverified (#314).
+copied twice. `sd-server.exe` links ggml-cuda statically and imports `cublasLt64_13.dll`
+directly. Upstream's `win-cuda12` zip is not used: it brings a second CUDA runtime (563 MB) and
+its `sm_120` support is unverified (#314).
 
 ---
 
