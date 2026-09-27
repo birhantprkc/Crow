@@ -7,6 +7,14 @@ The reasoning is in the commit and on the issue.
 
 ### Added
 
+- **Crow makes and edits images** (#300 phase 3, #308, #311, 2026-09-27). Two tools on a resident `sd-server` (stable-diffusion.cpp 2f88688, Qwen-Image 2.1, BF16 DiT streamed, `--max-vram 7`, text encoder on the CPU), started on first use or warmed at window start, stopped with Crow:
+  - `generate_image(prompt, aspect_ratio)`: the model card's sizes (16:9 = 2752×1536). Measured beside crow-nest's 27B (8.15 GiB free): 155 s warm, 175 s cold, card peak 31,338 MiB, the 27B's output unchanged.
+  - `edit_image(images, instruction, description)`: two stages in one call, because a 4 MP edit comes out grainy (measured E1/E2). Stage 1 edits at ~1 MP, the reference pipeline's size; stage 2 redraws the result at full size (img2img without references, strength 0.25). Measured 105.7 s + 55.3 s for 2752×1536, clean; chosen by robin from a side-by-side (`crow-nest/decode_out/p3-img/compare-img2img.png`).
+  - Images land in `<working root>/images/`; the model sees its own result (vision).
+  - **In the chat:** a square in the image's aspect ratio with a flow animation in the active theme's colours (static under reduced motion) and the phase line (loading, encoding, sampling i/40 · ETA, decoding, stage 1/2 · 2/2) stands where the image will be; the finished picture replaces it in place. Error: a red tile with the reason. After a restart an unfinished job shows "interrupted".
+  - **Lightbox:** a click on the picture opens it large; top right: Show in folder, Download (Save as…; on the phone a real download), Copy image, Copy path, Open in viewer, Move to trash (two clicks, never a plain delete), "i" with name, W×H, size in MB and bytes, format, created, path, tool, seed; Esc closes. The phone mirror shows previews, the lightbox and the info.
+  - Not measured yet: the live look in the window and on the phone, Windows.
+
 - **Crow knows crow-nest's dense Qwen3.8-27B container** (#300, 2026-09-27). New `models.entries.qwen38-27b-cnq` for `Qwen3.8-27B-CNQ4.5.cnq`, the container crow-nest's `serve` opens on port 8099 (not booted from Crow, like `flash-next-cnq45-m`). `model_key_for` pairs it with what the running serve reports (checked live: key `qwen38-27b-cnq`), so a request to it carries the 27B card's rows (thinking 1.0 / 0.95 / 20 / 0.0 / 0.0, non-thinking 0.7 / 0.80 / 20 / 0.0 / 1.5), thinking fixed at `high` (= the template's xhigh) and the 1024 reasoning cap, the same policy as the crow-nest Flash-Next point. Reasoning levels measured on the running 27B serve (#74 method): none / low / medium / high accepted, max / minimal / off / High / empty refused with 400; identical to Flash-Next's, since the 27B's chat template and tokenizer files are byte-identical to Flash-Next's. `docs/operating-points.md` has its row. Not measured: answer quality in Crow on this point.
 
 ### Fixed

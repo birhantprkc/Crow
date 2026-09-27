@@ -12228,7 +12228,17 @@ def image_model_dir() -> str:
     raw = (os.environ.get(IMAGE_MODEL_DIR_ENV) or "").strip()
     if raw:
         return os.path.expanduser(raw)
-    return os.path.join(crow_platform.models_dir(), IMAGE_MODEL_NAME)
+    root = crow_platform.models_dir()
+    inside = os.path.join(root, IMAGE_MODEL_NAME)
+    # BESIDE THE LINKED TREE, the layout install.sh makes: `<install>/models`
+    # -> ~/Projects/models/qwen3.8-flash-next, the image model at
+    # ~/Projects/models/qwen-image-2.1 (robin's machine, 2026-09-27). Asked
+    # only when the plain place has nothing, so an install that keeps the
+    # image model inside the models root is read exactly as before.
+    beside = os.path.join(os.path.dirname(os.path.realpath(root)), IMAGE_MODEL_NAME)
+    if not os.path.isdir(inside) and os.path.isdir(beside):
+        return beside
+    return inside
 
 
 def _image_model_files(model: str) -> "list[str]":

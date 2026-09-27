@@ -24033,6 +24033,34 @@ const d0 = Date.now(), p0 = performance.now(), r = [Math.random(), Math.random()
         self.assertNotEqual(a["r"][0], a["r"][1])
 
 
+
+class TheImageModelIsFoundBesideTheLinkedTreeTests(unittest.TestCase):
+    """install.sh links <install>/models to ONE model's tree; Qwen-Image lies
+    beside that tree (robin's machine, 2026-09-27). Without the variable the
+    image tools must still find it, and the plain place still wins."""
+
+    def test_beside_the_link_target_and_inside_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = os.path.join(tmp, "models", "text-model")
+            beside = os.path.join(tmp, "models", crow_core.IMAGE_MODEL_NAME)
+            os.makedirs(tree)
+            os.makedirs(beside)
+            link = os.path.join(tmp, "install-models")
+            os.symlink(tree, link)
+            before = (os.environ.pop(crow_core.IMAGE_MODEL_DIR_ENV, None),
+                      crow_core.crow_platform.models_dir)
+            self.addCleanup(lambda: (os.environ.__setitem__(crow_core.IMAGE_MODEL_DIR_ENV, before[0])
+                                     if before[0] is not None else None,
+                                     setattr(crow_core.crow_platform, "models_dir", before[1])))
+            crow_core.crow_platform.models_dir = lambda *a, **k: link
+            self.assertEqual(crow_core.image_model_dir(), beside)
+            inside = os.path.join(tree, crow_core.IMAGE_MODEL_NAME)
+            os.makedirs(inside)
+            self.assertEqual(crow_core.image_model_dir(), os.path.join(link, crow_core.IMAGE_MODEL_NAME))
+            os.environ[crow_core.IMAGE_MODEL_DIR_ENV] = "/elsewhere/q"
+            self.assertEqual(crow_core.image_model_dir(), "/elsewhere/q")
+            del os.environ[crow_core.IMAGE_MODEL_DIR_ENV]
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

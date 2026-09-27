@@ -9134,7 +9134,7 @@ class AnImageIsAnAttachmentTests(ApiCase):
         fn = fn[:fn.index("\n}\n") + 3]
         cases = ["file:///home/r/Projects/models/crownest-16x9.png\r\n",
                  "# c\nfile:///home/x/a%20b.png\nfile://localhost/tmp/c.jpg\nhttps://x.org/y.png\n",
-                 "file:///C:/Users/r/x.png", "", "/home/plain/path.png"]
+                 "file:///C:/Users/r/x.png", "", "/srv/plain/path.png"]
         script = fn + "\nfor (const c of %s) console.log(JSON.stringify(dropUriPaths(c)));" % json.dumps(cases)
         out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)

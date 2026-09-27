@@ -11870,8 +11870,12 @@ class Api:
             if not self._replaying:
                 crow_core.log_note(str(message.get("t")), message.get("k"))
             return
+        # "imgjob" is a session note kind too (the core keeps it for the
+        # restart), but it is ONE mark per job, updated in place below -- the
+        # plain append here would add a second one per progress line.
         if (not self._replaying
-                and message.get("k") in crow_core.SESSION_NOTE_KINDS):
+                and message.get("k") in crow_core.SESSION_NOTE_KINDS
+                and message.get("k") != "imgjob"):
             self._notes.append(dict(message, at=len(self._conversation)))
             del self._notes[:-crow_core.SESSION_NOTES_MAX]
         # #308. DIE KACHEL EINES BILDJOBS STEHT IM BAND, EINMAL PRO JOB: jede
