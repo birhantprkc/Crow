@@ -35,6 +35,7 @@ bash install.sh --models ~/Projects/models/qwen3.8-flash-next
 | `--tailscale` | also print what is still missing for the phone over HTTPS — see [Phone over Tailscale](#phone-over-tailscale) |
 | `--pathtracer` | also switch on the `voxel-diorama` skill — see [Voxel kit](voxel-kit.md) |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
+| `--build-image-server` | build `sd-server` + `sd-cli` for the image tools now — see [Image server](#image-server). `CROW_BUILD_IMAGE_SERVER=1` is the same |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
 | `--no-engine` | do not look for the engine at all |
 | `--to DIR` | install root, same as `CROW_HOME=DIR` |
@@ -149,6 +150,34 @@ abort (upstream #28403, #25060).
 
 `$CROW_HOME/cuda` must stay where it is: the binary reaches its CUDA libraries through a
 `DT_RPATH` into that directory. Deleting it breaks the binary.
+
+---
+
+## Image server
+
+```bash
+bash tools/build-sd-server.sh
+```
+
+`generate_image` and `edit_image` run on `sd-server` (see [tools](../reference/tools.md#generate_image-and-edit_image-300-308-311)).
+It is built like the engine, into `$CROW_HOME/bin`: stable-diffusion.cpp pin `2f88688`
+(tag `master-920-2f88688`, the tree the image tools were measured on), `SD_CUDA=ON`, `sm_120`,
+with the engine's CUDA 13.3 prefix and cmake/ninja. Without that prefix it downloads the same
+~970 MB first. The web UI is left out (`SD_SERVER_BUILD_FRONTEND=OFF`): building it needs
+`pnpm` and the network, and Crow uses only the HTTP API.
+
+| | |
+|---|---|
+| time | 3 min 10 s for the full build (`JOBS=8`, 24 cores), 1.4 s for a re-run that changes nothing |
+| disk | ~1 GB: the build directory ~510 MB, the two binaries 110 MB each; ~0.3 GB more for the source |
+| check | `ldd` resolves `libcudart`, `libcublas`, `libcublasLt` `.so.13` into `$CROW_HOME/cuda/lib`; both binaries report `version master-920-2f88688, commit 2f88688` |
+| `SD_SRC_DIR=<tree>` | build an existing checkout of the pin; it is verified and left untouched |
+| `JOBS=8` / `CLEAN=1` | as for the engine |
+
+An `sd-cli` or `sd-server` of another commit already in `bin/` is kept as
+`sd-cli-<commit>`, never deleted. The model is separate: Qwen-Image 2.1 is read from
+`$CROW_IMAGE_MODEL_DIR`, else `<models>/qwen-image-2.1`, else `qwen-image-2.1` beside the tree
+`<install>/models` links to. `install.sh --build-image-server` says which one it found.
 
 ---
 
@@ -352,6 +381,7 @@ day's session would have carried their error.
 | The window is tiled at a narrow width and the composer is cut off | the float rule is not loaded (it is optional) | add the line from the table above and `hyprctl reload` |
 | `crow: this window needs pywebview` | the venv is not the one the launcher points at | `bash install.sh` again — it reuses the venv and repairs the launcher |
 | `no llama-server to run. Tried: …` | the engine has not been built | `bash tools/build-llama-server.sh` |
+| `error: the image server is not installed: no sd-server in …` | the image server has not been built | `bash tools/build-sd-server.sh` |
 | `model 'flash-next-q2-k-xl' is not on disk. Tried: …` | `<install>/models` points at the wrong tree, or the download is not finished | the message names every path it tried; `ls -l ~/.local/share/crow/models` says where the link goes, and `install.sh --models DIR` re-points it |
 | A generic icon, or a window the launcher cannot name | the icon cache, or a `.desktop` entry from before the app id existed | `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`, then log out and in |
 | `desktop-file-validate` hints about two main categories | `Categories=Development;Utility;` — the entry may appear in two menus | nothing. It is a hint, not an error |
