@@ -265,12 +265,17 @@ delete it.
 |---|---|---|---|
 | `flash-next-q2-k-xl` | `high` | 1.0 / 0.95 / 20 / 0.0 / 0.0 | 1024 |
 | `flash-next-cnq45-m` | `high` | 1.0 / 0.95 / 20 / 0.0 / 0.0 | 1024 |
+| `qwen38-27b-cnq` | `high` | 1.0 / 0.95 / 20 / 0.0 / 0.0 | 1024 |
 
 The rows are the card's Best Practices
 ([Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), re-read 2026-09-22):
 
 - thinking: 1.0 / 0.95 / 20 / 0.0 / 0.0
 - non-thinking: 0.7 / 0.80 / 20 / 0.0 / 1.5
+
+The dense Qwen3.8-27B's card
+([Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), Best Practices, read 2026-09-27) carries the
+same two rows, so `qwen38-27b-cnq` (crow-nest's 27B container, Crow #300) takes them unchanged.
 
 `min_p` is 0.0 in **both** rows. From 2026-09-21 to 2026-09-22 both entries sent 0.01, because
 a note wrongly claimed 0.01 was the card's value. The cap of 1024 stays until it is measured.

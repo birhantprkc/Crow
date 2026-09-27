@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Added
+
+- **Crow knows crow-nest's dense Qwen3.8-27B container** (#300, 2026-09-27). New `models.entries.qwen38-27b-cnq` for `Qwen3.8-27B-CNQ4.5.cnq`, the container crow-nest's `serve` opens on port 8099 (not booted from Crow, like `flash-next-cnq45-m`). `model_key_for` pairs it with what the running serve reports (checked live: key `qwen38-27b-cnq`), so a request to it carries the 27B card's rows (thinking 1.0 / 0.95 / 20 / 0.0 / 0.0, non-thinking 0.7 / 0.80 / 20 / 0.0 / 1.5), thinking fixed at `high` (= the template's xhigh) and the 1024 reasoning cap, the same policy as the crow-nest Flash-Next point. Reasoning levels measured on the running 27B serve (#74 method): none / low / medium / high accepted, max / minimal / off / High / empty refused with 400; identical to Flash-Next's, since the 27B's chat template and tokenizer files are byte-identical to Flash-Next's. `docs/operating-points.md` has its row. Not measured: answer quality in Crow on this point.
+
 ## 2.7.0 — 2026-09-25
 
 **Goal runs stop skipping silently, render_page renders on the GPU only, and voxel dioramas get a path-tracing
