@@ -11,6 +11,12 @@
 curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | bash
 ```
 
+**Image tools, Linux** (optional: builds sd-server, ~3 min)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | bash -s -- --build-image-server
+```
+
 **Windows**
 
 ```powershell

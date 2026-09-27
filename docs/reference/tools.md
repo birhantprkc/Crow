@@ -227,10 +227,11 @@ sd-server 2f88688 with the argv above, 40 steps (crow-nest `decode_out/p3-img`, 
 | edit stage 1 (E3): ref 1376×768, out 1376×768 | 105.7 s | clean, edit applied |
 | stage 2 (B5): E3 to 2752×1536, strength 0.25 | 55.3 s | clean, closest to E3 |
 
-The two-stage edit is therefore about 161 s, close to one warm generation. Neither tool has run
-end to end against the real server yet; the numbers come from the measurement script's requests.
+The two-stage edit is therefore about 161 s, close to one warm generation.
+Both tools ran end to end in the window on 2026-09-27 (robin's live check, #308/#311): generate 162.2 s and 163.6 s, edit 109.4 s + 60.3 s at 2752×1536 (`sd-server-8097.log`); the table's numbers come from the measurement script's requests.
 One difference: B5's init was E3 upscaled beforehand (`E3-up.png`), while the tool lets the
-server stretch it (`image_preprocess`), which has not been measured.
+server stretch it (`image_preprocess`); the live edit on 2026-09-27 came out clean at 2752×1536
+this way (looked at, not measured against B5).
 
 ### Delegation (#143)
 
