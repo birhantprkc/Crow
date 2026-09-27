@@ -5,8 +5,9 @@ crow-mobile-light.svg, one column and larger type for phones (880 px scaled to a
 5-6 px text, robin 2026-09-25). README.md picks one through <picture>: prefers-color-scheme for the
 theme, max-width for the phone.
 
-Every figure in it is copied from docs/ (operating points, features, tools). The version pill
-reads cli/crow.py's VERSION, so a release re-runs this and commits the two files.
+Every figure in it is copied from docs/ (operating points, features, tools, images). The version
+pill reads cli/crow.py's VERSION and the tool count is len(crow_core.BUILTIN_TOOLS), so a release
+re-runs this and commits the four files. TOOLS below must name every built-in tool, or this stops.
 Fonts: GitHub's own stacks, nothing embedded. Usage:  python3 tools/readme_image.py"""
 import os, pathlib, re, subprocess, sys
 from xml.sax.saxutils import escape
@@ -14,6 +15,10 @@ from xml.sax.saxutils import escape
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CLI = ROOT / "cli"
 OUT = ROOT / "docs" / "images" / "readme"
+sys.path.insert(0, str(CLI))
+import crow_core  # noqa: E402  (the tool list; the import has no side effects)
+BUILTIN = [tool["function"]["name"] for tool in crow_core.BUILTIN_TOOLS]
+NTOOLS = str(len(BUILTIN))
 
 C = dict(page="#0b0e17", panel="#0e1220", raised="#131829", line="#1c2438", text="#e8eef8",
          soft="#cfdaea", faint="#9fb0c9", dim="#6d7b95", ok="#4ec98f", gold="#e5c04b",
@@ -48,7 +53,8 @@ def card(x, y, w, h, fill=C["panel"], stroke=C["line"], r=10):
 def section(y, title, acc, sub=""):
     o.append(f'<rect x="{X0}" y="{y}" width="4" height="22" rx="2" fill="{C[acc]}"/>')
     t(56, y + 17, title, 20, C["text"], weight=600)
-    lx = 76 + len(title) * 9.2
+    # rough 20 px semibold advance per glyph: narrow, wide, else; len * 9.2 ran into "Images"
+    lx = 74 + sum(6.5 if c in "iljtfrI ,.'" else 15 if c.isupper() or c in "mw" else 12 for c in title)
     if sub:
         t(lx, y + 16, sub, 12.5, C["dim"])
         lx += len(sub) * 6.0 + 16
@@ -69,7 +75,7 @@ def mark():
 
 
 STATS = [("200k", "context, one slot"), ("45.1", "tok/s decode"), ("771", "tok/s prefill, 16k prompt"),
-         ("512 / 10", "MoE experts, active"), ("28", "tools built in"), ("16", "subagents at once")]
+         ("512 / 10", "MoE experts, active"), (NTOOLS, "tools built in"), ("16", "subagents at once")]
 
 FEATURES = [
  ("Memory", "two plain-text stores, per project and per person", "ok"),
@@ -77,13 +83,15 @@ FEATURES = [
  ("Goals", "a plan in the pinned head, it survives a restart", "sub"),
  ("Subagents", "delegate, subtasks, collect: up to 16 at once", "ok"),
  ("Browser panel", "tabs and an address bar, render_page for the model", "gold"),
- ("Vision", "read_image: a screenshot, a render, a diagram", "sub"),
- ("Session search", "SQLite FTS5 over every archived conversation", "ok"),
- ("MCP", "stdio and Streamable HTTP, OAuth, per-tool classes", "gold"),
- ("Remote models", "OpenRouter, Anthropic, OpenAI. Default: this machine", "sub"),
- ("Phone", "the window on a paired phone, LAN or Tailscale", "ok"),
- ("Voice", "dictation via faster-whisper, nothing written to disk", "gold"),
- ("Secrets", "a file with an ACL, not an inherited env variable", "sub"),
+ ("Vision", "read_image, a drop, a paste; Flash-Next and the 27B", "sub"),
+ ("Images", "generate_image, edit_image: Qwen-Image 2.1, local", "ok"),
+ ("Lightbox", "folder, download, size in MB; on the phone too", "gold"),
+ ("Session search", "SQLite FTS5 over every archived conversation", "sub"),
+ ("MCP", "stdio and Streamable HTTP, OAuth, per-tool classes", "ok"),
+ ("Remote models", "OpenRouter, Anthropic, OpenAI. Default: this machine", "gold"),
+ ("Phone", "the window on a paired phone, LAN or Tailscale", "sub"),
+ ("Voice", "dictation via faster-whisper, nothing written to disk", "ok"),
+ ("Secrets", "a file with an ACL, not an inherited env variable", "gold"),
 ]
 
 MODES = [("manual", C["text"], "asks before writing|and before executing"),
@@ -99,10 +107,26 @@ TOOLS = [
  ("Web", "web_search · fetch_url"),
  ("Browser", "render_page"),
  ("Vision", "read_image · judge"),
+ ("Images", "generate_image · edit_image"),
  ("Memory", "memory · skill · session_search"),
  ("Goals", "goal_set · goal_step"),
  ("Subagents", "delegate · subtasks · collect"),
 ]
+
+_listed = [n.strip() for _, names in TOOLS for n in names.split("·")]
+if sorted(_listed) != sorted(BUILTIN):
+    sys.exit(f"readme_image: TOOLS is out of date; missing {sorted(set(BUILTIN) - set(_listed))}, "
+             f"extra {sorted(set(_listed) - set(BUILTIN))}")
+
+# Measured 2026-09-27 (docs/reference/tools.md, "generate_image and edit_image"): 40 steps.
+IMAGES = [("generate_image, warm", "2752×1536", "155.2 s"),
+          ("generate_image, cold", "2752×1536", "175.3 s"),
+          ("edit_image, 2 stages", "1 MP edit + full-size redraw", "105.7 + 55.3 s")]
+IMAGES_SUB = "Qwen-Image 2.1 beside crow-nest's 27B"
+IMAGES_TEXT = ("In the chat an animated square in the theme's colours stands where the picture will be, "
+               "then turns into it.")
+IMAGES_NOTE = ("One RTX 5090 (32 GB) beside the 27B serve, sd-server, 40 steps, 2026-09-27. "
+               "Source: docs/reference/tools.md")
 
 OPS = [("Default, Windows", "CNQ4.5-M NVFP4 container", "45.1", "crow-nest"),
        ("Default, Linux", "CNQ4.5-M NVFP4 container", "36.8*", "crow-nest"),
@@ -111,6 +135,11 @@ OPS = [("Default, Windows", "CNQ4.5-M NVFP4 container", "45.1", "crow-nest"),
        ("Third", "Qwen3.8-27B UD-Q4_K_XL", "123.05", "llama.cpp")]
 STATS_NOTE = "Decode and prefill: crow-nest v0.3.0, CNQ4.5-M NVFP4, one RTX 5090, Windows, 2026-09-13/14. Conditions: docs/operating-points.md"
 OPS_NOTE = "* at 16k context. crow-nest: Windows 2026-09-13/14, Linux 2026-09-17. llama.cpp: Windows 2026-09-01 (#182), Linux 2026-09-16."
+INTRO_LINES = (
+    f"A local model at 200k context with {NTOOLS} tools and MCP, persistent memory, its own skills,",
+    "a browser panel, eyes, and subagents it can send out while it keeps working.",
+    "It makes and edits images beside crow-nest's 27B, on one 32 GB card.",
+    "Runs on this machine, or on a provider you choose.")
 INSTALL_TEXT = "One line, Windows or Linux. Preflight, download, a per-file sha256 against the release manifest. No root, no elevation. The default engine and its 104.7 GB container come from crow-nest; the steps are printed."
 
 
@@ -133,14 +162,11 @@ def desktop():
 
     # ---------------------------------------------------------------- intro text
     y = 364
-    for i, line in enumerate((
-            "A local model at 200k context with 28 tools and MCP, persistent memory, its own skills,",
-            "a browser panel, eyes, and subagents it can send out while it keeps working.",
-            "Runs on this machine, or on a provider you choose.")):
+    for i, line in enumerate(INTRO_LINES):
         t(W / 2, y + i * 24, line, 15.5, C["soft"], anchor="middle")
 
     # ---------------------------------------------------------------- stats
-    y = 452
+    y = 364 + len(INTRO_LINES) * 24 + 16
     for i, (v, l) in enumerate(STATS):
         sx, sy = X0 + (i % 3) * 270, y + (i // 3) * 86
         card(sx, sy, 260, 76, C["raised"], C["raised"])
@@ -150,14 +176,14 @@ def desktop():
       11, C["dim"], anchor="middle")
 
     # ---------------------------------------------------------------- features
-    y = section(686, "Features", "ok")
+    y = section(y + 234, "Features", "ok")
     for i, (ti, d, acc) in enumerate(FEATURES):
         fx, fy = X0 + (i % 2) * 405, y + (i // 2) * 80
         card(fx, fy, 395, 70)
         o.append(f'<circle cx="{fx+22}" cy="{fy+26}" r="4" fill="{C[acc]}"/>')
         t(fx + 36, fy + 31, ti, 16, C["text"], weight=600)
         t(fx + 36, fy + 53, escape(d), 12.5, C["faint"])
-    y += 6 * 80 + 20
+    y += (len(FEATURES) + 1) // 2 * 80 + 20
 
     # ---------------------------------------------------------------- approvals
     y = section(y, "It asks before it writes, and before it runs.", "gold")
@@ -171,7 +197,7 @@ def desktop():
     y += 200
 
     # ---------------------------------------------------------------- tools
-    y = section(y, "Tools", "sub", "28 built in, every MCP tool joins the same list")
+    y = section(y, "Tools", "sub", NTOOLS + " built in, every MCP tool joins the same list")
     card(X0, y, 800, 24 + len(TOOLS) * 34)
     for i, (g, names) in enumerate(TOOLS):
         ry = y + 20 + i * 34
@@ -180,6 +206,23 @@ def desktop():
         t(X0 + 24, ry + 10, g, 13.5, C["text"], weight=600)
         t(X0 + 140, ry + 10, escape(names), 13, C["sub"], MONO)
     y += 24 + len(TOOLS) * 34 + 40
+
+    # ---------------------------------------------------------------- images
+    y = section(y, "Images", "gold", IMAGES_SUB)
+    card(X0, y, 800, 40 + len(IMAGES) * 44 + 74)
+    for hx, h in ((64, "tool"), (290, "size"), (590, "wall clock")):
+        t(hx, y + 26, h, 11.5, C["dim"], ls=1)
+    for i, (a, m, d) in enumerate(IMAGES):
+        ry = y + 40 + i * 44
+        o.append(f'<line x1="{X0+20}" y1="{ry}" x2="{X1-20}" y2="{ry}" stroke="{C["line"]}"/>')
+        t(64, ry + 28, a, 14, C["text"], MONO)
+        t(290, ry + 28, m, 13, C["soft"])
+        t(590, ry + 28, d, 15, C["gold"], MONO, 600)
+    ny = y + 40 + len(IMAGES) * 44
+    o.append(f'<line x1="{X0+20}" y1="{ny}" x2="{X1-20}" y2="{ny}" stroke="{C["line"]}"/>')
+    t(X0 + 24, ny + 28, escape(IMAGES_TEXT), 13, C["soft"])
+    t(X0 + 24, ny + 54, escape(IMAGES_NOTE), 11.5, C["dim"])
+    y += 40 + len(IMAGES) * 44 + 74 + 40
 
     # ---------------------------------------------------------------- operating points
     y = section(y, "Operating points", "mark")
@@ -248,9 +291,7 @@ def mobile():
     y += 360 + 26
 
     # intro
-    intro = ("A local model at 200k context with 28 tools and MCP, persistent memory, its own skills, a browser "
-             "panel, eyes, and subagents it can send out while it keeps working. Runs on this machine, or on a "
-             "provider you choose.")
+    intro = " ".join(INTRO_LINES)
     for i, line in enumerate(wrap(intro, 46)):
         t(W / 2, y + i * 23, line, 16, C["soft"], anchor="middle")
     y += len(wrap(intro, 46)) * 23 + 14
@@ -292,7 +333,7 @@ def mobile():
 
     # tools
     y = msection(y, "Tools", "sub")
-    t(X0 + 80, y - 21, "28 built in, plus every MCP tool", 13, C["dim"])
+    t(X0 + 80, y - 21, NTOOLS + " built in, plus every MCP tool", 13, C["dim"])
     rows = []
     for g, names in TOOLS:
         parts = [n.strip() for n in names.split("·")]
@@ -322,6 +363,29 @@ def mobile():
         else:
             t(X0 + 18, ly + 17, escape(v), 14, C["sub"], MONO); ly += 24
     y += h + 30
+
+    # images, two lines per row
+    y = msection(y, "Images", "gold")
+    t(X0 + 94, y - 21, escape(IMAGES_SUB), 13, C["dim"])
+    text = wrap(IMAGES_TEXT, 50)
+    note = wrap(IMAGES_NOTE, 60)
+    ih = 14 + len(IMAGES) * 62 + 10 + len(text) * 19 + 10 + len(note) * 16 + 12
+    card(X0, y, CW, ih)
+    for i, (a, m, d) in enumerate(IMAGES):
+        ry = y + 14 + i * 62
+        if i:
+            o.append(f'<line x1="{X0+16}" y1="{ry}" x2="{X1-16}" y2="{ry}" stroke="{C["line"]}"/>')
+        t(X0 + 18, ry + 26, a, 14, C["text"], MONO)
+        t(X1 - 18, ry + 26, d, 15.5, C["gold"], MONO, 600, anchor="end")
+        t(X0 + 18, ry + 49, m, 13.5, C["soft"])
+    ny = y + 14 + len(IMAGES) * 62
+    o.append(f'<line x1="{X0+16}" y1="{ny}" x2="{X1-16}" y2="{ny}" stroke="{C["line"]}"/>')
+    for k, line in enumerate(text):
+        t(X0 + 18, ny + 24 + k * 19, escape(line), 14, C["soft"])
+    ny += 10 + len(text) * 19 + 10
+    for k, line in enumerate(note):
+        t(X0 + 18, ny + 12 + k * 16, escape(line), 11.5, C["dim"])
+    y += ih + 30
 
     # operating points, two lines per row
     y = msection(y, "Operating points", "mark")
@@ -357,6 +421,6 @@ H = y - 20
 
 
 svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" '
-       f'aria-label="Crow: an agent, not a chat box. Features, tools, operating points.">'
+       f'aria-label="Crow: an agent, not a chat box. Features, tools, images, operating points.">'
        '' + "".join(o) + "</svg>\n")
 (OUT / ("crow-" + ("mobile-" if MOBILE else "") + VARIANT + ".svg")).write_text(svg)
