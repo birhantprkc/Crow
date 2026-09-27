@@ -9147,6 +9147,44 @@ class AnImageIsAnAttachmentTests(ApiCase):
         self.assertIn('dt.getData("text/uri-list")', block)
         self.assertIn("this.dropped(paths)", block)
 
+    def test_a_file_manager_drop_takes_the_uris_gtk_carried(self):
+        """#312, MEASURED (crow.log 10:00:46): the page got types text/uri-list
+        and text/html, zero files, an EMPTY uri text. The URIs come from the
+        GTK drag data now: kept when non-empty, taken once by `on_drop`, turned
+        into paths, and a picture among them is staged by the page's route."""
+        api = self.api()
+        seen = []
+        api.push = seen.append
+        api.note_drag_uris(["file:///home/r/Projects/models/crownest-16x9.png"], "text/uri-list")
+        api.note_drag_uris(None, "text/html")        # a later target without URIs keeps them
+        api.on_drop({"dataTransfer": {"files": []}})
+        self.assertEqual(seen[-1], {"k": "drop", "paths": ["/home/r/Projects/models/crownest-16x9.png"]})
+        seen.clear()
+        api.on_drop({"dataTransfer": {"files": []}})   # taken once
+        self.assertEqual(seen[-1], {"k": "drop", "paths": []})
+        # NEGATIVE: stale drag data (a drag that left without dropping)
+        api.note_drag_uris(["file:///tmp/old.png"])
+        api._drag_uris = (api._drag_uris[0] - crow_gui.DRAG_URIS_FRESH - 1,) + api._drag_uris[1:]
+        seen.clear()
+        api.on_drop({"dataTransfer": {"files": []}})
+        self.assertEqual(seen[-1], {"k": "drop", "paths": []})
+
+    def test_a_drag_uri_becomes_a_local_path_or_nothing(self):
+        f = crow_gui.drag_uri_path
+        self.assertEqual(f("file:///home/x/a%20b.png"), "/home/x/a b.png")
+        self.assertEqual(f("file://localhost/tmp/c.jpg"), "/tmp/c.jpg")
+        self.assertEqual(f("file:///C:/Users/r/x.png"), "C:/Users/r/x.png")
+        for no in ("https://x.org/y.png", "file://otherhost/x.png", "", None, "/plain"):
+            self.assertEqual(f(no), "", no)
+
+    def test_the_gtk_drag_signal_is_read_with_get_uris(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        wire = source[source.index("    def wire_gtk_drag_uris() -> None:"):]
+        wire = wire[:wire.index("    def wire_drop(")]
+        self.assertIn('connect("drag-data-received", received)', wire)
+        self.assertIn("data.get_uris()", wire)
+        self.assertIn("GLib.idle_add(hook)", wire)
+
     def test_what_a_drop_carried_is_logged(self):
         api = self.api()
         before = crow_core.LOG_FILE

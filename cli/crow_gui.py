@@ -425,6 +425,20 @@ def write_settings(doc: dict) -> bool:
         return False
 
 
+def drag_uri_path(uri: str) -> str:
+    """#312: the local path of one `file://` URI from a GTK drag, else "".
+    `file:///home/x/a%20b.png` -> `/home/x/a b.png`; `file:///C:/x.png` ->
+    `C:/x.png`; any other scheme (a web image's https) is not a file here."""
+    import urllib.parse
+    parts = urllib.parse.urlsplit(str(uri or "").strip())
+    if parts.scheme.lower() != "file" or parts.netloc not in ("", "localhost"):
+        return ""
+    path = urllib.parse.unquote(parts.path)
+    if re.match(r"^/[A-Za-z]:/", path):
+        path = path[1:]
+    return path
+
+
 def write_paste(suffix: str, raw: bytes) -> str:
     """Put `raw` in PASTE_DIR under a name nothing else has, and return it.
 
@@ -13518,6 +13532,28 @@ class Api:
         self.push({"k": "chips", "c": self._image_chips()})
         return {"chips": self._image_chips()}
 
+    def note_drag_uris(self, uris, target: str = "") -> None:
+        """#312: what the GTK drag data carried, kept for the drop that follows.
+
+        MEASURED 2026-09-27 (crow.log 10:00:46, 10:00:49): WebKitGTK handed the
+        page a file-manager drop with types `text/uri-list`, `text/html`, zero
+        files and an EMPTY uri text, and pywebview's own GTK handler reads the
+        same data with `get_text()`, which is None for a uri-list. The URIs are
+        there one level down -- `Gtk.SelectionData.get_uris()` on the WebKit
+        widget's `drag-data-received` -- and that is where `wire_drop` reads
+        them. WebKit asks for the data on motion too and once per target, so
+        only a non-empty list is kept, and `on_drop` takes it once."""
+        uris = [str(u) for u in (uris or []) if u]
+        if uris:
+            self._drag_uris = (time.monotonic(), uris, str(target or ""))
+
+    def _take_drag_paths(self) -> "tuple[list, str]":
+        stamp, uris, target = getattr(self, "_drag_uris", (0.0, [], ""))
+        self._drag_uris = (0.0, [], "")
+        if not uris or time.monotonic() - stamp > DRAG_URIS_FRESH:
+            return [], target
+        return [p for p in (drag_uri_path(u) for u in uris) if p], target
+
     def drop_seen(self, info) -> None:
         """#312: one crow.log line with what a drop carried to the page --
         its data types, how many File objects, how long the uri text was."""
@@ -16138,6 +16174,11 @@ class Api:
         files = ((event or {}).get("dataTransfer") or {}).get("files") or []
         paths = [f.get("pywebviewFullPath") for f in files
                  if isinstance(f, dict) and f.get("pywebviewFullPath")]
+        # #312: no path from pywebview -> the URIs the GTK drag data carried
+        source = "pywebview"
+        if not paths:
+            paths, target = self._take_drag_paths()
+            source = "the GTK drag data (%s)" % (target or "no target")
         # A DROP THAT CARRIED NO PATH IS SAID OUT LOUD, and it is not a
         # theoretical case: the path is attached by the backend, out of what the
         # toolkit's own drag handler collected, and a source that hands over
@@ -16154,9 +16195,10 @@ class Api:
         if rest:
             self.push({"k": "note", "t": "that drop carried no location on disk"
                                          " -- typing the path works"})
-        crow_core.log_note("drop: %d file(s) %s, %d with a path"
+        crow_core.log_note("drop: %d file(s) %s, %d path(s) from %s: %s"
                            % (len(files), [str(f.get("name")) for f in files
-                                           if isinstance(f, dict)][:8], len(paths)),
+                                           if isinstance(f, dict)][:8], len(paths),
+                              source, [os.path.basename(p) for p in paths][:8]),
                            "drop")
         self.push({"k": "drop", "paths": paths})
 
@@ -17484,12 +17526,36 @@ def main(argv: list[str] | None = None) -> int:
     # a path at all: the page receives a File with a name and no location, while
     # pywebview adds `pywebviewFullPath` on this side. Wired on `loaded` rather
     # than beside create_window, because window.dom needs a document.
+    def wire_gtk_drag_uris() -> None:
+        """#312: read the file manager's URIs where GTK has them -- see
+        `Api.note_drag_uris`. Connected on the GTK main thread."""
+        from gi.repository import GLib
+        from webview.platforms import gtk as wgtk
+
+        def received(_widget, _context, _x, _y, data, _info, _time) -> None:
+            try:
+                api.note_drag_uris(data.get_uris() or [], data.get_data_type().name())
+            except Exception:          # noqa: BLE001 - a drag never breaks the window
+                pass
+
+        def hook() -> bool:
+            view = wgtk.BrowserView.instances.get(window.uid)
+            if view is not None:
+                view.webview.connect("drag-data-received", received)
+            else:
+                crow_core.log_note("drop: no GTK view to read drag URIs from", "drop")
+            return False
+
+        GLib.idle_add(hook)
+
     def wire_drop(*_) -> None:
         try:
             from webview.dom import DOMEventHandler
 
             window.dom.document.events.drop += DOMEventHandler(
                 api.on_drop, prevent_default=True)
+            if not crow_platform.IS_WINDOWS:
+                wire_gtk_drag_uris()
         except Exception:              # noqa: BLE001 - the window still works
             # SAID, NOT SWALLOWED SILENTLY: dropping is a convenience, and a
             # window that opens without it is still a window. The page keeps its
@@ -17545,6 +17611,9 @@ def daemon_bridge_threads() -> None:
 # there, with their stacks, in Crow's log, runs the one atexit hook Crow owns
 # (the MCP children) and ends the process.
 EXIT_GRACE = 5.0
+# #312: how old the GTK drag data may be when the drop takes it (a drag that
+# left the window without dropping leaves it behind)
+DRAG_URIS_FRESH = 30.0
 
 
 def arm_exit_watchdog(grace: float = EXIT_GRACE, end=os._exit) -> threading.Thread:
