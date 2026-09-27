@@ -43,6 +43,7 @@ rather than discovered at import time.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import contextvars
 import getpass
@@ -5688,6 +5689,27 @@ const crow = {
   // the paths come back through `on(...)` a moment later.
   dragging(on){ box.classList.toggle("drag", !!on); },
 
+  // #312. A DROPPED PICTURE TRAVELS AS ITS BYTES, not as its path. On
+  // Linux the path comes from pywebview's GTK drag handler, which reads the
+  // drag data as TEXT -- a file manager that offers only a uri-list hands it
+  // nothing, and robin's drop on 2026-09-27 never reached the model (no request
+  // at serve after the window opened). The File the page holds carries the
+  // bytes on every backend, so an image is read here and handed over the way a
+  // paste is; `dropped` skips the path of a picture already read this way.
+  _byteNames: [],
+  dropBytes(dt){
+    this._byteNames=[];
+    const img=/\.(png|jpe?g|gif|webp|bmp)$/i;
+    Array.prototype.forEach.call((dt && dt.files) || [], f => {
+      if(!img.test(f.name)) return;
+      this._byteNames.push(f.name);
+      const r=new FileReader();
+      r.onload=()=>pywebview.api.stage_image_data(f.name, r.result);
+      r.onerror=()=>pywebview.api.stage_image_data(f.name, "");
+      r.readAsDataURL(f);
+    });
+  },
+
   dropped(paths){
     this.dragging(false);
     if(!paths || !paths.length){ return; }
@@ -5699,7 +5721,11 @@ const crow = {
     const img=/\.(png|jpe?g|gif|webp|bmp)$/i;
     // The strip redraws through the "chips" event the Python side pushes --
     // the same channel /image uses, so there is exactly one renderer call.
-    paths.filter(p=>img.test(p)).forEach(p=>pywebview.api.stage_image(p));
+    paths.filter(p=>img.test(p)).forEach(p=>{
+      const i=this._byteNames.indexOf(p.split(/[\\/]/).pop());
+      if(i!==-1){ this._byteNames.splice(i,1); return; }
+      pywebview.api.stage_image(p);
+    });
     paths=paths.filter(p=>!img.test(p));
     if(!paths.length){ return; }
     // QUOTED WHEN IT HAS TO BE. A Windows path with a space in it is the normal
@@ -7960,7 +7986,7 @@ input.addEventListener("keydown",e=>{
 // the drop never reaches a listener at all, because WebView2 has already
 // decided to navigate to the file and show it instead of the window.
 document.addEventListener("dragover", e => { e.preventDefault(); crow.dragging(true); });
-document.addEventListener("drop",     e => { e.preventDefault(); crow.dragging(false); });
+document.addEventListener("drop",     e => { e.preventDefault(); crow.dragging(false); crow.dropBytes(e.dataTransfer); });
 // LEAVING THE DOCUMENT, not an element: dragleave fires for every child the
 // pointer crosses, and `relatedTarget === null` is what tells the two apart.
 document.addEventListener("dragleave", e => { if(!e.relatedTarget) crow.dragging(false); });
@@ -8359,6 +8385,10 @@ REMOTE_DESKTOP_BOUND = {
     "close": "tab", "copy": "copy", "paste_clipboard": "paste",
     "dictate_start": "dictate", "dictate_stop": "dictate",
     "stage_image": "upload", "pick_root": "root", "open_url": "link",
+    # #312: a picture dropped into the page as bytes -- the desktop
+    # window, and a phone or browser mirror the same way (robin 2026-09-27:
+    # "Handy auch, wichtig")
+    "stage_image_data": "upload",
     "reveal_path": "desktop", "roll_show": "desktop",
     "provider_authorise": "desktop",
     "pane_go": "pane", "pane_show": "pane", "pane_hide": "pane",
@@ -13439,7 +13469,7 @@ class Api:
 
     # ------------------------------------------------------------ #142 images
 
-    def stage_image(self, path: str) -> dict:
+    def stage_image(self, path: str, name: str = "") -> dict:
         """Read one dropped image and hold it for the next send.
 
         THE PAGE NEVER SEES THE BYTES ON DISK, only what comes back here:
@@ -13453,12 +13483,36 @@ class Api:
             self.push({"k": "note", "t": str(exc)})
             return {"chips": self._image_chips()}
         self._staged_images.append({"part": part,
-                                    "name": os.path.basename(path)})
+                                    "name": name or os.path.basename(path)})
         # PUSHED AS WELL AS RETURNED: a drop reads the return value, but
         # `/image <path>` goes through slash_answer, which returns a sentence
         # -- the strip learns about its chip through this event either way.
         self.push({"k": "chips", "c": self._image_chips()})
         return {"chips": self._image_chips()}
+
+    def stage_image_data(self, name: str, data_url: str) -> dict:
+        """#312: a dropped picture that came as bytes from the page.
+
+        Written down like a paste (the part has to outlive the turn, and
+        `image_part` reads a file), staged under the name it was dropped with.
+        Anything that is not a base64 data URL of an image type Crow reads is
+        a note and no chip -- the same outcome as a refused path.
+        """
+        label = os.path.basename(str(name or "")) or "image"
+        suffix = os.path.splitext(label)[1].lower()
+        raw = b""
+        head, _, body = str(data_url or "").partition(",")
+        if head.startswith("data:") and head.endswith(";base64"):
+            try:
+                raw = base64.b64decode(body, validate=True)
+            except ValueError:
+                raw = b""
+        path = write_paste(suffix, raw) if suffix in crow_core.IMAGE_TYPES else ""
+        if not path:
+            self.push({"k": "note", "t": "%s could not be taken from the drop"
+                                         " -- /image <path> works" % label})
+            return {"chips": self._image_chips()}
+        return self.stage_image(path, name=label)
 
     def unstage_image(self, index) -> dict:
         """Drop one staged image, from its chip. Out-of-range is a no-op: the
@@ -16055,9 +16109,19 @@ class Api:
         # speaking a flavour the handler does not read -- leaves the name and
         # nothing else. Silence there looks exactly like a window that ignored
         # the drop, and the way round it (type the path) is one nobody guesses.
-        if files and not paths:
+        # #312: a picture without a path is not lost -- the page reads its
+        # bytes (`dropBytes`), so only a nameless OTHER file is said.
+        rest = [f for f in files if isinstance(f, dict)
+                and not f.get("pywebviewFullPath")
+                and os.path.splitext(str(f.get("name") or ""))[1].lower()
+                not in crow_core.IMAGE_TYPES]
+        if rest:
             self.push({"k": "note", "t": "that drop carried no location on disk"
                                          " -- typing the path works"})
+        crow_core.log_note("drop: %d file(s) %s, %d with a path"
+                           % (len(files), [str(f.get("name")) for f in files
+                                           if isinstance(f, dict)][:8], len(paths)),
+                           "drop")
         self.push({"k": "drop", "paths": paths})
 
     def paste_clipboard(self) -> str:
@@ -17412,7 +17476,45 @@ def main(argv: list[str] | None = None) -> int:
         webview.start(styles, window)
     else:
         webview.start(styles, window, gui="gtk", icon=icon_png(256) or None)
+    arm_exit_watchdog()
     return 0
+
+
+# #313. THE WINDOW IS SHUT, SO THE PROCESS ENDS -- within seconds.
+# robin, 2026-09-27: after Crow's X the process stayed (pid 34193: main thread in
+# a futex wait, 43 threads, SIGINT ignored, SIGTERM ended it), and from a
+# terminal Ctrl+C was always needed on top. Python's exit joins every non-daemon
+# thread and runs the atexit hooks; one that never returns keeps a window-less
+# process alive. After EXIT_GRACE seconds this says which threads are still
+# there, with their stacks, in Crow's log, runs the one atexit hook Crow owns
+# (the MCP children) and ends the process.
+EXIT_GRACE = 5.0
+
+
+def arm_exit_watchdog(grace: float = EXIT_GRACE, end=os._exit) -> threading.Thread:
+    """Start the daemon timer that ends a process the window has already left."""
+    def fire() -> None:
+        time.sleep(grace)
+        try:
+            alive = [t for t in threading.enumerate()
+                     if t is not threading.current_thread()]
+            crow_core.log_note(
+                "exit: the process was still alive %.0f s after the window closed; "
+                "threads: %s -- ending it" % (grace, ", ".join(
+                    "%s%s" % (t.name, "" if t.daemon else " (non-daemon)")
+                    for t in alive) or "none"), "exit")
+            import faulthandler
+            with open(crow_core.LOG_FILE, "a", encoding="utf-8") as fh:
+                fh.write("---- exit watchdog: stacks of every thread ----\n")
+                fh.flush()
+                faulthandler.dump_traceback(file=fh, all_threads=True)
+            crow_core.forget_mcp_servers()
+        except Exception:                  # noqa: BLE001 - ending anyway
+            pass
+        end(0)
+    watchdog = threading.Thread(target=fire, name="crow-exit-watchdog", daemon=True)
+    watchdog.start()
+    return watchdog
 
 
 

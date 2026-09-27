@@ -39,11 +39,13 @@ import difflib
 import io
 import inspect
 import json
+import base64
 import os
 import re
 import shutil
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -9096,6 +9098,68 @@ class AnImageIsAnAttachmentTests(ApiCase):
         out = api.unstage_image(0)
         self.assertEqual([c["name"] for c in out["chips"]], ["b.png"])
 
+    # -- #312: a picture dropped without a path ----------------------
+
+    def _paste_dir(self):
+        before = crow_gui.PASTE_DIR
+        crow_gui.PASTE_DIR = os.path.join(self.dir, "pastes")
+        self.addCleanup(setattr, crow_gui, "PASTE_DIR", before)
+
+    def test_a_dropped_picture_that_came_as_bytes_becomes_a_chip(self):
+        """POSITIVE. robin's drop on 2026-09-27 (Linux, WebKitGTK) reached no
+        request: pywebview's GTK handler found no path. The page now hands the
+        bytes over; they are written down, staged, and the chip keeps the name
+        the file was dropped with -- not the paste- name it was written under."""
+        self._paste_dir()
+        api = self.api()
+        raw = b"\x89PNG\r\n\x1a\n" + b"d" * 64
+        url = "data:image/png;base64," + base64.b64encode(raw).decode()
+        out = api.stage_image_data("crownest-16x9.png", url)
+        self.assertEqual([c["name"] for c in out["chips"]], ["crownest-16x9.png"])
+        written = os.listdir(crow_gui.PASTE_DIR)
+        self.assertEqual(len(written), 1)
+        with open(os.path.join(crow_gui.PASTE_DIR, written[0]), "rb") as fh:
+            self.assertEqual(fh.read(), raw)
+
+    def test_bytes_that_are_not_a_picture_are_a_note_and_no_chip(self):
+        """NEGATIVE: a name Crow cannot read as an image, a body that is not a
+        base64 data URL, an empty read (the page's FileReader failed)."""
+        self._paste_dir()
+        api = self.api()
+        good = "data:image/png;base64," + base64.b64encode(b"\x89PNG").decode()
+        for name, url in (("notes.txt", good), ("a.png", "not a data url"),
+                          ("a.png", "data:image/png;base64,@@@"), ("a.png", "")):
+            out = api.stage_image_data(name, url)
+            self.assertEqual(out["chips"], [], name + " " + url[:20])
+        self.assertEqual([e.get("k") for e in self.drained(api)].count("note"), 4)
+
+    def test_a_picture_without_a_path_is_not_called_a_lost_drop(self):
+        """The 'no location on disk' note is for files the page cannot carry;
+        a picture is carried as bytes, so it is not said for one."""
+        api = self.api()
+        seen = []
+        api.push = seen.append
+        api.on_drop({"dataTransfer": {"files": [{"name": "shot.png"}]}})
+        self.assertNotIn("note", [e.get("k") for e in seen])
+        seen.clear()
+        api.on_drop({"dataTransfer": {"files": [{"name": "log.txt"}]}})
+        self.assertIn("note", [e.get("k") for e in seen])
+
+    def test_the_page_reads_a_dropped_picture_and_skips_its_path(self):
+        """The page half, read from the source: the drop listener hands the
+        DataTransfer to `dropBytes`, which sends each picture's bytes to
+        `stage_image_data`; `dropped` does not stage the same picture again
+        when its path arrives after."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn('crow.dragging(false); crow.dropBytes(e.dataTransfer); });', source)
+        block = source[source.index("  dropBytes(dt){"):]
+        block = block[:block.index("\n  },\n")]
+        self.assertIn("readAsDataURL(f)", block)
+        self.assertIn("pywebview.api.stage_image_data(f.name, r.result)", block)
+        dropped = source[source.index("  dropped(paths){"):]
+        dropped = dropped[:dropped.index("\n  },\n")]
+        self.assertIn("this._byteNames.indexOf(", dropped)
+
     def test_a_refused_file_is_a_note_and_no_chip(self):
         """NEGATIVE PROBE: a .txt drop says image_part's sentence and stages
         nothing -- the old path-in-the-composer behaviour is for the page to
@@ -12552,8 +12616,10 @@ class TheDropSaysWhenItCarriedNoPathTests(ApiCase):
         self.assertEqual(said[0]["paths"], ["/home/x/a.txt"])
 
     def test_a_drop_without_a_path_says_so(self):
+        """#312 (2026-09-27): a PICTURE without a path is no longer said --
+        the page carries its bytes (`dropBytes`); any other file still is."""
         api = self.api()
-        api.on_drop({"dataTransfer": {"files": [{"name": "a.png"}]}})
+        api.on_drop({"dataTransfer": {"files": [{"name": "a.pdf"}]}})
         said = self.drained(api)
         self.assertEqual([m["k"] for m in said], ["note", "drop"])
         self.assertIn("typing the path", said[0]["t"])
@@ -13924,7 +13990,7 @@ class RemoteApiParityTests(RemoteCase):
     to the desktop with a stated replacement -- and a call from one client
     produces the push the other one needs."""
 
-    PAGE_METHODS = 94          # 88 at fb31ca2 + the six pairing controls (#249 stage 5)
+    PAGE_METHODS = 95          # 88 at fb31ca2 + the six pairing controls (#249 stage 5) + stage_image_data (drop bytes)
 
     def page_methods(self) -> set:
         page = crow_gui.PAGE
@@ -13952,8 +14018,8 @@ class RemoteApiParityTests(RemoteCase):
         allowed = crow_gui.REMOTE_ALLOWED
         self.assertTrue(crow_gui.REMOTE_PROXIED <= allowed)
         self.assertEqual(allowed - crow_gui.REMOTE_PROXIED,
-                         {"stage_image", "reveal_path", "roll_show",
-                          "provider_authorise"})
+                         {"stage_image", "stage_image_data", "reveal_path",
+                          "roll_show", "provider_authorise"})
         # NEGATIVE: the window, the layout and the pairing controls never.
         for name in ("maximise", "close", "set_theme", "rail_width",
                      "pane_go", "remote_allow", "remote_open", "copy"):
@@ -15636,6 +15702,40 @@ globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content
         self.assertEqual(out["hint"], crow_core.REMOTE_PHONE_TEXT["dictate"])
         self.assertIn("HTTPS (Tailscale)", out["hint"])
         self.assertEqual(out["title"], "dictate: opens the keyboard")
+
+
+
+class TheProcessEndsAfterTheWindowTests(unittest.TestCase):
+    """#313 (robin, 2026-09-27): after Crow's X the process stayed --
+    pid 34193, main thread in a futex wait, SIGINT ignored, SIGTERM ended it --
+    and from a terminal Ctrl+C was always needed on top. A thread that never
+    returns must not keep a window-less process alive."""
+
+    def test_a_hung_non_daemon_thread_no_longer_keeps_the_process(self):
+        """POSITIVE, in a real interpreter: a non-daemon thread blocks forever,
+        main returns -- the process ends within the grace and the log names
+        the thread and carries the stacks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "crow.log")
+            code = (
+                "import sys, threading; sys.path.insert(0, %r)\n"
+                "import crow_core, crow_gui\n"
+                "crow_core.LOG_FILE = %r\n"
+                "threading.Thread(target=threading.Event().wait, name='stuck').start()\n"
+                "crow_gui.arm_exit_watchdog(grace=0.5)\n" % (str(HERE), log))
+            start = time.monotonic()
+            done = subprocess.run([sys.executable, "-c", code], timeout=60,
+                                  capture_output=True)
+            self.assertLess(time.monotonic() - start, 30)
+            self.assertEqual(done.returncode, 0, done.stderr[-400:])
+            text = open(log, encoding="utf-8").read()
+            self.assertIn("stuck (non-daemon)", text)
+            self.assertIn("exit watchdog: stacks of every thread", text)
+
+    def test_main_arms_the_watchdog_once_the_window_loop_returns(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        tail = source[source.index('webview.start(styles, window, gui="gtk"'):]
+        self.assertLess(tail.index("arm_exit_watchdog()"), tail.index("return 0"))
 
 
 if __name__ == "__main__":
