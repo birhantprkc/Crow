@@ -5,6 +5,15 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 2.8.1 — 2026-09-27
+
+**A calmer chat box.** The window's composer no longer wears the banner blue while nobody types in it;
+only the focused box glows. A one-change patch on top of 2.8.0.
+
+### Changed
+
+- **The idle chat box has no coloured frame** (`9de5f41`, robin, 2026-09-27). At rest the composer's frame was the banner blue with a faint blue ring, so a box nobody was typing in looked selected. It is now the neutral line colour of the other frames, without a ring; the focused box keeps its accent border and glow unchanged. Desktop window only; the phone mirror already drew no ring.
+
 ## 2.8.0 — 2026-09-27
 
 **Crow makes and edits images, and the 27B on crow-nest sees them.** `generate_image` and `edit_image` run

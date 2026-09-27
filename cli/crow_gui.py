@@ -2797,8 +2797,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `display:none`, das der Browser an `[hidden]` haengt -- ohne sie stuende das
    Band immer da, und das `hidden` im Markup saehe aus, als taete es etwas. */
 #voice[hidden]{display:none}
-#box{border:1px solid var(--bevel);border-radius:8px;background:var(--panel);
-  padding:9px 11px 8px;box-shadow:0 0 0 3px rgba(126,176,248,.06);
+/* AT REST NO COLOUR (robin, 2026-09-27): the idle frame was --bevel, the
+   banner blue, plus a faint blue ring, so a box nobody was typing in
+   read as selected. It is now the neutral --line of every other frame and no
+   ring; the glow belongs to #box.focus alone, which is unchanged. */
+#box{border:1px solid var(--line);border-radius:8px;background:var(--panel);
+  padding:9px 11px 8px;box-shadow:none;
   transition:border-color .15s ease,box-shadow .15s ease;
   /* --colw (900), the width .turn's text runs at: .turn is --colw plus
      --colpad either side. The same variable here puts this box's border on
