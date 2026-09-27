@@ -18437,6 +18437,10 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="crow-218-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self._saved = (crow_core.COMMAND_CAPTURE_BYTES, crow_core.COMMAND_TIMEOUT)
+        # #309: a job another test left in the background is not this one's.
+        jobs = getattr(crow_core, "_BACKGROUND_JOBS", [])
+        jobs.clear()
+        self.addCleanup(jobs.clear)
         for name in ("CROW_COMMAND_MEMORY_MAX", "CROW_COMMAND_SCOPE"):
             self._env(name, "")
         self.stray = []
@@ -18730,7 +18734,7 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         self.assertIn("--expand-environment=no", prefix)
         props = [prefix[i + 1] for i, a in enumerate(prefix) if a == "-p"]
         self.assertEqual(sorted(props), ["CollectMode=inactive-or-failed",
-                                         "MemoryHigh=7G", "MemoryMax=8G",
+                                         "MemoryMax=8G",
                                          "MemorySwapMax=0", "OOMPolicy=kill"])
         self.assertEqual(prefix[-1], "--")
         crow_platform._SYSTEMD_VERSIONS["/usr/bin/systemd-run"] = 253
@@ -18740,12 +18744,52 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
 
     def test_the_ceiling_moves_with_its_variable(self):
         self.assertEqual(crow_platform.command_memory_bounds(),
-                         {"MemorySwapMax": "0", "MemoryHigh": "7G", "MemoryMax": "8G"})
+                         {"MemorySwapMax": "0", "MemoryMax": "8G"})
         self._env("CROW_COMMAND_MEMORY_MAX", "12G")
         self.assertEqual(crow_platform.command_memory_bounds(),
                          {"MemorySwapMax": "0", "MemoryMax": "12G"})
         self._env("CROW_COMMAND_MEMORY_MAX", "none")
         self.assertEqual(crow_platform.command_memory_bounds(), {"MemorySwapMax": "0"})
+
+    # ---- #309: the ceiling kills, and what outlives the call is looked at again
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_the_default_scope_has_no_throttle_below_the_ceiling(self):
+        """#309, 2026-09-27: under MemoryHigh=7G a Qwen-Image load sat at
+        7.40 GiB for 10 min 47 s, full avg60=88.13, never reaching the 8G
+        kill. The kernel's own files for the default scope: memory.high is
+        `max`, memory.max the ceiling."""
+        out = crow_core.tool_run_command(
+            'd=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); '
+            'cat "$d/memory.high" "$d/memory.max"', cwd=self.dir)
+        self.assertEqual(out, "[exit 0]\nmax\n%d" % (8 << 30))
+
+    def _poll(self, command):
+        crow_core._SEEN.clear()
+        out, _ = crow_core.run_tool_cached(
+            "run_command", json.dumps({"command": command, "cwd": self.dir}))
+        return out
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_a_background_job_killed_at_its_ceiling_is_named_in_the_next_result(self):
+        """#309: the measured launch returned `[exit 0]`, and every later poll
+        read "RUNNING" or "GONE". The kill of a job that outlived its call is
+        now a note at the head of the next result -- once, and only for it."""
+        self._env("CROW_COMMAND_MEMORY_MAX", "100M")
+        launch = self._poll("nohup sh -c 'sleep 1; %s' > hog.log 2>&1 &"
+                            % self._hog().replace("'", ""))
+        self.assertEqual(launch, "[exit 0]")
+        out = self._poll("sleep 4; echo polled")
+        self.assertTrue(out.startswith(
+            "note: the background job from `nohup sh -c 'sleep 1; "), out + "\n" + self._witnesses())
+        self.assertIn("was killed at its memory ceiling (MemoryMax=100M, no swap)", out)
+        self.assertTrue(out.endswith("\n[exit 0]\npolled"), out)
+        self.assertEqual(out.count("note: "), 1)
+        # said once; and a background job that ends by itself says nothing
+        self.assertEqual(self._poll("sleep 1 >/dev/null 2>&1 & echo polled"),
+                         "[exit 0]\npolled")
+        self.assertEqual(self._poll("sleep 2; echo polled"), "[exit 0]\npolled")
+        self.assertEqual(getattr(crow_core, "_BACKGROUND_JOBS", None), [])
 
     # ---- the note
 
@@ -18780,6 +18824,135 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
                                          cwd=self.dir)
         self.assertTrue(out.startswith("[exit 0]\nchromium --headless=new"), out)
         self.assertIn("\nnote: render_page takes this screenshot", out)
+
+
+class BackgroundJobsAreLookedAtAgainTests(unittest.TestCase):
+    """#309: a job that outlives its run_command call is read again -- its
+    scope's memory.pressure and whether it died at the ceiling -- and what
+    the model cannot see from inside the scope comes back as a note.
+
+    A fake cgroup tree stands in for /sys/fs/cgroup, with the numbers the
+    lead read off crow-cmd-548410-bcdb59bc.scope on 2026-09-27."""
+
+    UNIT = "crow-cmd-548410-bcdb59bc"
+    SD_CLI = ("nohup ~/.local/share/crow/bin/sd-cli --diffusion-model "
+              "transformer/ --max-vram 7 > gen.log 2>&1 &")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="crow-309-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.scope = os.path.join(self.root, "slice", self.UNIT + ".scope")
+        os.makedirs(self.scope)
+        self.kills = [3]
+        for patch in (mock.patch.object(crow_platform, "_CGROUP_ROOT", self.root,
+                                        create=True),
+                      mock.patch.object(crow_platform, "_SLICE_CGROUP", ["/slice"]),
+                      mock.patch.object(crow_platform, "IS_WINDOWS", False),
+                      mock.patch.object(crow_platform, "session_oom_kills",
+                                        side_effect=lambda: self.kills[0]),
+                      mock.patch.dict(os.environ, {"CROW_COMMAND_MEMORY_MAX": ""})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        jobs = getattr(crow_core, "_BACKGROUND_JOBS", [])
+        jobs.clear()
+        self.addCleanup(jobs.clear)
+        self._write(procs="550628\n550629\n", current=7950123008, high="max",
+                    maximum=8589934592, full=88.13)
+
+    def _write(self, procs, current=0, high="max", maximum=8589934592, full=0.0):
+        files = {"cgroup.procs": procs, "memory.current": "%d\n" % current,
+                 "memory.high": high + "\n", "memory.max": "%d\n" % maximum,
+                 "memory.pressure": "some avg10=95.00 avg60=94.10 avg300=40.00 total=1\n"
+                                    "full avg10=89.01 avg60=%.2f avg300=38.00 total=1\n" % full}
+        for name, text in files.items():
+            with open(os.path.join(self.scope, name), "w") as fh:
+                fh.write(text)
+
+    def test_the_scope_state_is_read_from_its_cgroup_files(self):
+        state = crow_platform.scope_memory_state(self.UNIT)
+        self.assertEqual(state, {"procs": 2, "current": 7950123008,
+                                 "max": 8589934592, "full_avg60": 88.13})
+        self._write(procs="")
+        self.assertIsNone(crow_platform.scope_memory_state(self.UNIT))
+        self.assertIsNone(crow_platform.scope_memory_state("crow-cmd-1-gone"))
+
+    def test_the_measured_thrash_becomes_a_note_at_the_head_of_the_next_result(self):
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self.assertEqual(len(crow_core._BACKGROUND_JOBS), 1)
+        with mock.patch.object(crow_core, "run_tool", return_value="[exit 0]\nRUNNING"):
+            out, _ = crow_core.run_tool_cached("run_command", '{"command": "pgrep sd-cli"}')
+        first, _, rest = out.partition("\n")
+        self.assertEqual(rest, "[exit 0]\nRUNNING")
+        self.assertTrue(first.startswith("note: the background job from `nohup "
+                                         "~/.local/share/crow/bin/sd-cli"), first)
+        self.assertIn("(%s) has been stalled on memory 88%% of the last 60 s at 7.4 GiB "
+                      "of its 8.0 GiB ceiling (no swap): it is thrashing, not progressing"
+                      % self.UNIT, first)
+        self.assertIn("systemctl --user stop %s.scope" % self.UNIT, first)
+        self.assertIn("CROW_COMMAND_MEMORY_MAX in Crow's own environment -- a command "
+                      "cannot raise it", first)
+        # an error stays an error: the note goes after its first line
+        with mock.patch.object(crow_core, "run_tool", return_value="error: no such file: x"):
+            out, _ = crow_core.run_tool_cached("read_file", '{"path": "x"}')
+        self.assertTrue(out.startswith("error: no such file: x\nnote: the background job"), out)
+
+    def test_below_the_threshold_nothing_is_said(self):
+        """NEGATIVPROBE, and the threshold #309 fixed: full avg60 >= 50."""
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self._write(procs="550628\n", current=6 << 30, full=49.99)
+        self.assertEqual(crow_core.background_job_notes(), "")
+        self._write(procs="550628\n", current=6 << 30, full=50.0)
+        self.assertIn("stalled on memory 50%", crow_core.background_job_notes())
+
+    def test_a_vanished_scope_with_a_risen_count_was_killed_at_the_ceiling(self):
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self._write(procs="")
+        self.kills[0] = 4
+        self.assertEqual(
+            crow_core.background_job_notes(),
+            "note: the background job from `%s` (%s) was killed at its memory ceiling "
+            "(MemoryMax=8G, no swap), with everything it started." % (self.SD_CLI, self.UNIT))
+        self.assertEqual(crow_core._BACKGROUND_JOBS, [])
+        self.assertEqual(crow_core.background_job_notes(), "")
+
+    def test_a_foreground_kill_is_not_blamed_on_a_job_that_ended_by_itself(self):
+        """NEGATIVPROBE. The count is the whole slice's: a kill run_command
+        already named in its own result re-bases the jobs still alive."""
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self._write(procs="550628\n", full=0.0)
+        self.kills[0] = 4                       # the foreground call's own kill
+        crow_core._rebase_background_jobs()
+        self._write(procs="")                   # then the job ends by itself
+        self.assertEqual(crow_core.background_job_notes(), "")
+
+    def test_several_vanishing_at_one_kill_are_named_as_candidates(self):
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        other = os.path.join(self.root, "slice", "crow-cmd-548410-00000000.scope")
+        os.makedirs(other)
+        with open(os.path.join(other, "cgroup.procs"), "w") as fh:
+            fh.write("1\n")
+        crow_core._record_background_job("crow-cmd-548410-00000000", "make -j32 &")
+        self._write(procs="")
+        os.unlink(os.path.join(other, "cgroup.procs"))
+        self.kills[0] = 4
+        note = crow_core.background_job_notes()
+        self.assertTrue(note.startswith("note: these background jobs ended while a "
+                                        "memory-ceiling kill was counted"), note)
+        self.assertIn(self.UNIT, note)
+        self.assertIn("crow-cmd-548410-00000000", note)
+        self.assertNotIn("was killed at", note)
+
+    def test_windows_records_nothing_and_says_nothing(self):
+        """The platform switch: run_command has no scope on Windows
+        (command_scope_prefix is []), and nothing there reads a cgroup."""
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(crow_platform.command_scope_prefix(self.UNIT), [])
+            self.assertIsNone(crow_platform.scope_memory_state(self.UNIT))
+            crow_core._record_background_job(self.UNIT, self.SD_CLI)
+            self.assertEqual(crow_core._BACKGROUND_JOBS, [])
+            self.assertEqual(crow_core.background_job_notes(), "")
+        # the same files on Linux are read
+        self.assertIsNotNone(crow_platform.scope_memory_state(self.UNIT))
 
 
 class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):

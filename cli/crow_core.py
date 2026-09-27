@@ -13370,10 +13370,135 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         head = ("error: command exceeded its memory ceiling (%sno swap) and was "
                 "killed, with everything it started: %s"
                 % ("MemoryMax=%s, " % cap if cap else "", command))
+        _rebase_background_jobs()   # #309: this kill is this call's, not theirs
         return _clip(head + (f"\n{out}".rstrip())
                      + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
+    if prefix and code is not None:
+        _record_background_job(unit, command)   # #309: what outlived the call
     return _clip(f"[exit {code}]\n{out}".rstrip()
                  + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
+
+
+# #309. A JOB THAT OUTLIVES ITS run_command CALL IS LOOKED AT AGAIN. It stays in
+# the call's scope, under the call's ceiling (_bounded_run leaves a finished
+# command's background alone on purpose), and until this registry nothing read
+# that scope after the call returned. Measured 2026-09-27: a backgrounded
+# sd-cli load sat at its memory bound for 10 min 47 s in D state, and 7 polls
+# read "RUNNING" -- from inside the scope throttling and slow progress look
+# the same. Every later tool result the model gets (run_tool_cached) reads each
+# recorded scope once and says, in a note before the result, what the model
+# cannot see: the job was killed at its ceiling, or it is stalled on memory.
+#
+# THE KILL'S WITNESS IS THE KERNEL'S COUNT, as in #218's CI fix: the scope is
+# collected at once (CollectMode=inactive-or-failed), so its Result= is gone
+# with it. session.slice's oom_kill rose while the recorded scope vanished.
+# Several vanishing between two reads are named together as candidates, never
+# one guessed; a foreground ceiling kill re-bases the count first.
+#
+# THE PRESSURE THRESHOLD, fixed in #309 before any after-measurement: full
+# avg60 >= 50 % -- below systemd-oomd's 60 % default, at Omarchy's app.slice
+# 50 %. The measured case read 88.13.
+BACKGROUND_PRESSURE_FULL_AVG60 = 50.0
+_BACKGROUND_JOBS: "list[dict]" = []
+
+
+def _record_background_job(unit: str, command: str) -> None:
+    """Keep `unit` when its scope still holds a process after the call returned.
+
+    The count is read BEFORE the scope: a job killed in between is then gone
+    here and never recorded, instead of recorded with its own kill counted."""
+    oom = crow_platform.session_oom_kills()
+    if crow_platform.scope_memory_state(unit) is None:
+        return
+    _BACKGROUND_JOBS.append({
+        "unit": unit, "command": " ".join(command.split()),
+        "cap": crow_platform.command_memory_bounds().get("MemoryMax"),
+        "oom": oom, "shared": False})
+
+
+def _rebase_background_jobs() -> None:
+    """A foreground kill this call already named moved the slice's count: the
+    jobs still alive did not cause it. One already gone might have -- or might
+    have ended by itself -- so it can only be named as a candidate."""
+    if not _BACKGROUND_JOBS:
+        return
+    now = crow_platform.session_oom_kills()
+    for job in _BACKGROUND_JOBS:
+        if crow_platform.scope_memory_state(job["unit"]) is not None:
+            job["oom"] = now
+        else:
+            job["shared"] = True
+
+
+def _gib(size: "int | None") -> str:
+    return "?" if size is None else "%.1f GiB" % (size / float(1 << 30))
+
+
+def _clip_line(text: str, limit: int = 120) -> str:
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def background_job_notes() -> str:
+    """The note lines about recorded background jobs, "" when there is nothing to say.
+
+    TWO READS OF THE COUNT AROUND THE SCOPES. A scope found empty was killed
+    (if at all) before it was read, so `after` holds its kill; a scope found
+    alive is re-based to `before`, so a kill right after its read is counted
+    at the next look instead of being swallowed by this one."""
+    if not _BACKGROUND_JOBS:
+        return ""
+    before = crow_platform.session_oom_kills()
+    notes: "list[str]" = []
+    vanished: "list[dict]" = []
+    for job in list(_BACKGROUND_JOBS):
+        state = crow_platform.scope_memory_state(job["unit"])
+        if state is None:
+            _BACKGROUND_JOBS.remove(job)
+            vanished.append(job)
+            continue
+        job["oom"] = before
+        full = state.get("full_avg60")
+        if full is not None and full >= BACKGROUND_PRESSURE_FULL_AVG60:
+            limit = state.get("max")
+            notes.append(
+                "note: the background job from `%s` (%s) has been stalled on memory "
+                "%d%% of the last 60 s at %s%s: it is thrashing, not progressing. "
+                "Stop it (systemctl --user stop %s.scope) and tell the user; the "
+                "ceiling is CROW_COMMAND_MEMORY_MAX in Crow's own environment -- a "
+                "command cannot raise it."
+                % (_clip_line(job["command"]), job["unit"], round(full),
+                   _gib(state.get("current")),
+                   " of its %s ceiling (no swap)" % _gib(limit) if limit else "",
+                   job["unit"]))
+    after = crow_platform.session_oom_kills() if vanished else before
+    killed = [job for job in vanished
+              if after is not None and job["oom"] is not None and after > job["oom"]]
+    if len(killed) == 1 and not killed[0]["shared"]:
+        job = killed[0]
+        notes.insert(0, "note: the background job from `%s` (%s) was killed at its "
+                        "memory ceiling (%sno swap), with everything it started."
+                     % (_clip_line(job["command"]), job["unit"],
+                        "MemoryMax=%s, " % job["cap"] if job["cap"] else ""))
+    elif killed:
+        notes.insert(0, "note: these background jobs ended while a memory-ceiling "
+                        "kill was counted, and one or more of them may have been "
+                        "it: %s."
+                     % "; ".join("`%s` (%s)" % (_clip_line(job["command"]), job["unit"])
+                                 for job in killed))
+    return "\n".join(notes)
+
+
+def _with_background_notes(result: str) -> str:
+    """The notes go first, so the model reads them before the result -- after
+    the first line when the result is an error, so it still starts "error: "
+    and stays recoverable on every surface."""
+    notes = background_job_notes()
+    if not notes:
+        return result
+    if result.startswith("error: "):
+        head, _, rest = result.partition("\n")
+        return head + "\n" + notes + ("\n" + rest if rest else "")
+    return notes + "\n" + result
 
 
 # #218. THE BOUNDED WAY TO A SCREENSHOT, SAID WHERE THE UNBOUNDED ONE IS TAKEN.
@@ -22777,12 +22902,15 @@ def run_tool_cached(name: str, arguments: str) -> tuple[str, bool]:
     """
     key = _cache_key(name, arguments)
     if key is not None and key in _SEEN:
-        return (f"[you already called {name} with these exact arguments this turn. "
-                f"The result was, and still is:]\n{_SEEN[key]}"), True
+        return _with_background_notes(
+            f"[you already called {name} with these exact arguments this turn. "
+            f"The result was, and still is:]\n{_SEEN[key]}"), True
     out = run_tool(name, arguments)
     if key is not None:
         _SEEN[key] = out
-    return out, False
+    # #309: what a job left in the background did since, beside -- never
+    # inside -- the cached answer.
+    return _with_background_notes(out), False
 
 
 # ---------------------------------------------------------------- #196 -----

@@ -286,14 +286,14 @@ Full setup and troubleshooting: [Phone over Tailscale](remote-tailscale.md).
 
 ---
 
-## The tools get a ceiling of their own (#213, #218)
+## The tools get a ceiling of their own (#213, #218, #309)
 
 The server is not the only process that gets a scope. When `systemd-run` is on the PATH and the
 user manager answers, two tools start their children in a transient user scope as well:
 
-| | `render_page`'s browser (#213) | `run_command`'s shell (#218) |
+| | `render_page`'s browser (#213) | `run_command`'s shell (#218, #309) |
 |---|---|---|
-| bounds | `MemoryHigh=5G`, `MemoryMax=6G`, `MemorySwapMax=0` | `MemoryHigh=7G`, `MemoryMax=8G`, `MemorySwapMax=0`, `OOMPolicy=kill` |
+| bounds | `MemoryHigh=5G`, `MemoryMax=6G`, `MemorySwapMax=0` | `MemoryMax=8G`, `MemorySwapMax=0`, `OOMPolicy=kill` — no `MemoryHigh` (#309) |
 | move the bound | `CROW_RENDER_MEMORY_MAX=<size>` (`none` keeps only the swap cap) | `CROW_COMMAND_MEMORY_MAX=<size>` (`none` keeps only the swap cap) |
 | switch off | `CROW_RENDER_SCOPE=0` | `CROW_COMMAND_SCOPE=0` |
 | GPU only (#293) | default: the GPU when at least 512 MiB of VRAM are free; below that a local crow-nest serve is asked to lend the shortfall for the capture (#297, crow-nest#117), otherwise an ENVIRONMENT error and no image; `CROW_RENDER_GL=angle` skips that gate (`swiftshader` is refused); `CROW_RENDER_ANGLE=vulkan\|default` pins the ANGLE backend (default: vulkan, then default) | — |
@@ -306,6 +306,15 @@ measured 2026-09-22 as each scope's own `memory.peak`: the diorama's three.js es
 `OOMPolicy=kill` a command at the ceiling dies whole, and the result says it was the ceiling; a
 timeout or capture-cap kill takes the whole process group and the scope. systemd-run's own
 `${VAR}`/`$$` expansion is switched off (`--expand-environment=no`, systemd 254 or newer).
+
+No throttle below the command ceiling (#309): on 2026-09-27 an image-generation load started in
+the background sat at 7.4 GiB under the old `MemoryHigh=7G` for 10 min 47 s, loading at
+~11 MB/s instead of ~5 GB/s, and never reached the 8G kill. A command over its budget now dies at
+`MemoryMax`. A job a command leaves in the background stays in that command's scope; the next
+tool result starts with a `note:` when that job was killed at its ceiling or has been stalled on
+memory for at least 50 % of the last 60 s (`memory.pressure` `full avg60`). A heavy job that
+really needs more (Qwen-Image's load needs ~31 GB) needs a larger ceiling at GUI launch:
+`CROW_COMMAND_MEMORY_MAX=40G`.
 
 Without `systemd-run` both run as before, bounded by their clocks and capture caps only;
 `install.sh` warns about it in the preflight. The 8G ceiling does not scale with the machine's
