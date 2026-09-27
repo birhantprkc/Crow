@@ -14065,7 +14065,7 @@ class RemoteApiParityTests(RemoteCase):
     to the desktop with a stated replacement -- and a call from one client
     produces the push the other one needs."""
 
-    PAGE_METHODS = 96          # 88 at fb31ca2 + the six pairing controls (#249 stage 5) + stage_image_data, drop_seen (#312)
+    PAGE_METHODS = 104         # 88 at fb31ca2 + the six pairing controls (#249 stage 5) + stage_image_data, drop_seen (#312) + the eight image_* (#311)
 
     def page_methods(self) -> set:
         page = crow_gui.PAGE
@@ -14094,7 +14094,10 @@ class RemoteApiParityTests(RemoteCase):
         self.assertTrue(crow_gui.REMOTE_PROXIED <= allowed)
         self.assertEqual(allowed - crow_gui.REMOTE_PROXIED,
                          {"stage_image", "stage_image_data", "reveal_path",
-                          "roll_show", "provider_authorise"})
+                          "roll_show", "provider_authorise",
+                          # #311: the lightbox's actions on the desktop's file
+                          "image_reveal", "image_copy", "image_open",
+                          "image_trash"})
         # NEGATIVE: the window, the layout and the pairing controls never.
         for name in ("maximise", "close", "set_theme", "rail_width",
                      "pane_go", "remote_allow", "remote_open", "copy"):
@@ -15829,6 +15832,616 @@ class TheProcessEndsAfterTheWindowTests(unittest.TestCase):
         source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
         tail = source[source.index('webview.start(styles, window, gui="gtk"'):]
         self.assertLess(tail.index("arm_exit_watchdog()"), tail.index("return 0"))
+
+
+# ------------------------------------------- #308 / #311: images in the chat ----
+
+def _write_png(path: str, w: int, h: int) -> str:
+    """A real PNG, w x h, black -- enough for the header, the magic bytes and
+    GdkPixbuf. Built here so the suite carries no binary fixture."""
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    raw = b"".join(b"\x00" + b"\x00\x00\x00" * w for _ in range(h))
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n"
+                 + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                 + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return path
+
+
+def _progress(job="call_1", **kw) -> dict:
+    """One `tool_progress` state as the core's contract spells it."""
+    state = {"job": job, "kind": "generate", "phase": "sampling", "stage": "",
+             "i": 12, "n": 40, "eta_s": 84.0,
+             "line": "sampling 12/40", "width": 1024, "height": 576}
+    state.update(kw)
+    return state
+
+
+class AnImageJobReachesTheChatAsATileTests(unittest.TestCase):
+    """#308: `tool_progress` -> `{"k": "imgjob"}`, throttled per job."""
+
+    def setUp(self) -> None:
+        self.got: list = []
+        self.turn = crow_gui.Turn(self.got.append)
+        self.now = [100.0]
+        self.turn._clock = lambda: self.now[0]
+
+    def test_a_progress_line_carries_every_field_the_tile_draws(self):
+        self.turn.tool_progress("generate_image", _progress())
+        self.assertEqual(self.got, [{
+            "k": "imgjob", "job": "call_1", "kind": "generate",
+            "phase": "sampling", "stage": "", "i": 12, "n": 40, "eta_s": 84.0,
+            "line": "sampling 12/40", "w": 1024, "h": 576}])
+
+    def test_the_throttle_lets_four_a_second_through_per_job(self):
+        for step, at in enumerate((0.0, 0.1, 0.2, 0.26, 0.3, 0.4, 0.52)):
+            self.now[0] = 100.0 + at
+            self.turn.tool_progress("generate_image", _progress(i=step))
+        self.assertEqual([m["i"] for m in self.got], [0, 3, 6])
+        # A SECOND JOB HAS ITS OWN CLOCK: its first line passes at once.
+        self.turn.tool_progress("edit_image", _progress(job="call_2", kind="edit"))
+        self.assertEqual(self.got[-1]["job"], "call_2")
+
+    def test_a_new_phase_and_every_end_pass_the_throttle(self):
+        self.turn.tool_progress("generate_image", _progress(phase="sampling"))
+        self.turn.tool_progress("generate_image", _progress(phase="decoding"))
+        self.turn.tool_progress("generate_image", _progress(phase="saved"))
+        self.turn.tool_progress("generate_image", _progress(phase="saved"))
+        self.assertEqual([m["phase"] for m in self.got],
+                         ["sampling", "decoding", "saved", "saved"])
+        self.turn.tool_progress("generate_image", _progress(job="c3", phase="error"))
+        self.turn.tool_progress("generate_image", _progress(job="c3", phase="error"))
+        self.assertEqual([m["phase"] for m in self.got[-2:]], ["error", "error"])
+
+    def test_a_state_without_a_job_draws_nothing(self):
+        self.turn.tool_progress("generate_image", _progress(job=""))
+        self.turn.tool_progress("generate_image", None)
+        self.assertEqual(self.got, [])
+
+
+class AnImageIsVettedBeforeThePageHearsItsPathTests(unittest.TestCase):
+    """#311's `image_card`: bytes, size and place, before `{"k": "image"}`."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-img-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.root = os.path.join(self.dir, "root")
+        self.away = os.path.join(self.dir, "away")
+        os.makedirs(self.root)
+        os.makedirs(self.away)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.root)
+        stored = crow_core._STORED_APPROVALS
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", stored)
+        crow_core._STORED_APPROVALS = set()
+        self.got: list = []
+        self.turn = crow_gui.Turn(self.got.append)
+
+    def test_an_image_in_the_working_area_becomes_a_card(self):
+        path = _write_png(os.path.join(self.root, "crow.png"), 64, 36)
+        self.turn.image_created(path, "generate_image", "call_1")
+        (msg,) = self.got
+        self.assertEqual({k: msg[k] for k in ("k", "path", "name", "w", "h",
+                                              "bytes", "source", "job")},
+                         {"k": "image", "path": path, "name": "crow.png",
+                          "w": 64, "h": 36, "bytes": os.path.getsize(path),
+                          "source": "generate_image", "job": "call_1"})
+        self.assertAlmostEqual(msg["mtime"], os.path.getmtime(path))
+
+    def test_an_image_outside_every_approved_path_is_refused(self):
+        path = _write_png(os.path.join(self.away, "x.png"), 8, 8)
+        self.turn.image_created(path, "generate_image", "call_1")
+        self.turn.image_created(path, "run_command")
+        self.assertNotIn("image", [m["k"] for m in self.got])
+        self.assertEqual(self.got[0]["k"], "imgjob")
+        self.assertEqual(self.got[0]["phase"], "refused")
+        self.assertIn("outside the working area", self.got[0]["line"])
+        self.assertEqual(self.got[1]["k"], "note")
+
+    def test_an_approved_outside_path_is_allowed(self):
+        path = _write_png(os.path.join(self.away, "x.png"), 8, 8)
+        scope = ("outside", os.path.normcase(self.away))
+        crow_core._ALLOWED.add(scope)
+        self.addCleanup(crow_core._ALLOWED.discard, scope)
+        self.turn.image_created(path, "generate_image", "call_1")
+        self.assertEqual(self.got[0]["k"], "image")
+
+    def test_text_named_png_and_an_oversized_file_are_refused(self):
+        fake = os.path.join(self.root, "x.png")
+        with open(fake, "w") as fh:
+            fh.write("not an image at all\n")
+        self.assertIsNone(crow_gui.image_card(fake)[0])
+        self.assertIn("bytes are not a PNG", crow_gui.image_card(fake)[1])
+        real = _write_png(os.path.join(self.root, "big.png"), 8, 8)
+        with mock.patch.object(crow_core, "IMAGE_MAX_BYTES", 10):
+            self.assertIsNone(crow_gui.image_card(real)[0])
+        self.assertIsNone(crow_gui.image_card(self.root)[0])      # a folder
+        self.assertIsNone(crow_gui.image_card(os.path.join(self.root, "gone.png"))[0])
+
+    def test_the_header_gives_the_size_of_every_type_crow_shows(self):
+        size = crow_gui.image_size
+        self.assertEqual(size(open(_write_png(os.path.join(self.root, "a.png"),
+                                              2752, 3), "rb").read()), (2752, 3))
+        self.assertEqual(size(b"GIF89a" + struct.pack("<HH", 40, 30) + b"\0" * 8),
+                         (40, 30))
+        self.assertEqual(size(b"BM" + b"\0" * 16 + struct.pack("<ii", 12, -7)),
+                         (12, 7))
+        webp = (b"RIFF\0\0\0\0WEBPVP8X" + b"\0" * 8
+                + (99).to_bytes(3, "little") + (49).to_bytes(3, "little"))
+        self.assertEqual(size(webp), (100, 50))
+        jpeg = (b"\xff\xd8" + b"\xff\xe0" + struct.pack(">H", 16) + b"\0" * 14
+                + b"\xff\xc0" + struct.pack(">HBHH", 17, 8, 1536, 2752) + b"\0" * 12)
+        self.assertEqual(size(jpeg), (2752, 1536))
+        self.assertIsNone(size(b"hello world"))
+
+
+class EveryImageActionReVetsItsPathTests(ApiCase):
+    """#311: the page may only ask for images this chat announced, and each
+    action asks again whether the file is still an image."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = os.path.join(self.dir, "root")
+        os.makedirs(self.root)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.root)
+        self.api_ = self.api()
+        self.png = _write_png(os.path.join(self.root, "crow.png"), 1024, 600)
+        self.ran: list = []
+        for name in ("Popen", "run"):
+            real = getattr(crow_gui.subprocess, name)
+            self.addCleanup(setattr, crow_gui.subprocess, name, real)
+        crow_gui.subprocess.Popen = lambda argv, **kw: self.ran.append(("popen", argv))
+        crow_gui.subprocess.run = (lambda argv, **kw: self.ran.append(("run", argv))
+                                   or types.SimpleNamespace(returncode=0))
+        self.trashed: list = []
+        real_trash = crow_gui.trash_file
+        self.addCleanup(setattr, crow_gui, "trash_file", real_trash)
+        crow_gui.trash_file = lambda p: self.trashed.append(p) or ""
+        real_show = crow_gui.show_in_file_manager
+        self.addCleanup(setattr, crow_gui, "show_in_file_manager", real_show)
+        crow_gui.show_in_file_manager = lambda p: self.ran.append(("dbus", p)) or True
+
+    def announce(self, path=None, **kw):
+        crow_gui.Turn(self.api_.push).image_created(path or self.png,
+                                                    kw.get("source", "generate_image"),
+                                                    kw.get("job", "call_1"))
+        self.drained(self.api_)
+
+    def calls(self, path):
+        """Every image_* method on `path`, with what each answers."""
+        api = self.api_
+        api._window = types.SimpleNamespace(
+            create_file_dialog=lambda *a, **k: self.ran.append(("dialog", a)) or None)
+        return {"thumb": api.image_thumb(path), "full": api.image_full(path),
+                "info": api.image_info(path), "reveal": api.image_reveal(path),
+                "copy": api.image_copy(path), "save_as": api.image_save_as(path),
+                "open": api.image_open(path), "trash": api.image_trash(path)}
+
+    def assertRefusedEverywhere(self, path):
+        got = self.calls(path)
+        self.assertEqual(got["thumb"], "")
+        self.assertEqual(got["full"], "")
+        self.assertFalse(got["info"]["ok"])
+        for name in ("reveal", "copy", "save_as", "open", "trash"):
+            self.assertTrue(got[name], "%s answered '' for a refused path" % name)
+        self.assertEqual(self.ran, [], "a refused path reached a program")
+        self.assertEqual(self.trashed, [])
+
+    def test_an_unannounced_image_in_the_working_area_is_refused(self):
+        self.assertRefusedEverywhere(self.png)
+
+    def test_an_unannounced_file_outside_is_refused(self):
+        outside = _write_png(os.path.join(self.dir, "elsewhere.png"), 8, 8)
+        self.assertRefusedEverywhere(outside)
+        self.assertRefusedEverywhere("/etc/passwd")
+        self.assertRefusedEverywhere("")
+
+    def test_an_announced_file_that_stopped_being_an_image_is_refused(self):
+        self.announce()
+        with open(self.png, "w") as fh:
+            fh.write("#!/bin/sh\necho swapped\n")
+        self.assertRefusedEverywhere(self.png)
+
+    def test_the_info_panel_gets_the_vetted_fields(self):
+        self.api_.push({"k": "image", "path": self.png, "name": "crow.png",
+                        "w": 1024, "h": 600, "bytes": 1, "mtime": 0,
+                        "source": "edit_image", "job": "call_9", "seed": 42})
+        info = self.api_.image_info(self.png)
+        self.assertTrue(info["ok"])
+        self.assertEqual({k: info[k] for k in ("path", "name", "w", "h", "bytes",
+                                                "format", "source", "job", "seed")},
+                         {"path": self.png, "name": "crow.png", "w": 1024,
+                          "h": 600, "bytes": os.path.getsize(self.png),
+                          "format": "PNG", "source": "edit_image",
+                          "job": "call_9", "seed": 42})
+        self.assertAlmostEqual(info["mtime"], os.path.getmtime(self.png))
+
+    def test_the_desktop_gets_a_file_url(self):
+        self.announce()
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(self.api_.image_full(self.png), "file://" + self.png)
+
+    def test_the_preview_is_a_png_no_longer_than_512(self):
+        self.announce()
+        url = self.api_.image_thumb(self.png)
+        if not url:
+            self.skipTest("no GdkPixbuf on this machine")
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        head = base64.b64decode(url.split(",", 1)[1])[:24]
+        self.assertEqual(crow_gui.image_size(head), (512, 300))
+        self.assertIs(self.api_.image_thumb(self.png), url)     # cached
+
+    def test_reveal_selects_the_file_and_falls_back_to_the_folder(self):
+        self.announce()
+        self.assertEqual(self.api_.image_reveal(self.png), "")
+        self.assertEqual(self.ran, [("dbus", self.png)])
+        crow_gui.show_in_file_manager = lambda p: False
+        self.assertEqual(self.api_.image_reveal(self.png), "")
+        self.assertEqual(self.ran[-1],
+                         ("popen", crow_platform.reveal_command(self.png, False)))
+
+    def test_copy_hands_the_picture_over_typed(self):
+        self.announce()
+        real = crow_gui.shutil.which
+        self.addCleanup(setattr, crow_gui.shutil, "which", real)
+        crow_gui.shutil.which = lambda name: "/usr/bin/" + name
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(self.api_.image_copy(self.png), "")
+        self.assertEqual(self.ran, [("run", ["wl-copy", "--type", "image/png"])])
+
+    def test_open_runs_the_viewer_on_a_vetted_image_only(self):
+        self.announce()
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(self.api_.image_open(self.png), "")
+        self.assertEqual(self.ran, [("popen", crow_platform.opener_command(self.png))])
+
+    def test_save_as_copies_byte_for_byte(self):
+        self.announce()
+        target = os.path.join(self.dir, "copy.png")
+        self.api_._window = types.SimpleNamespace(
+            create_file_dialog=lambda kind, **kw: (target,))
+        self.assertEqual(self.api_.image_save_as(self.png), "saved as " + target)
+        self.assertEqual(open(target, "rb").read(), open(self.png, "rb").read())
+        self.api_._window = types.SimpleNamespace(
+            create_file_dialog=lambda kind, **kw: None)
+        self.assertEqual(self.api_.image_save_as(self.png), "")    # cancelled
+
+    def test_trash_goes_through_the_trash_and_says_why_when_refused(self):
+        self.announce()
+        self.assertEqual(self.api_.image_trash(self.png), "")
+        self.assertEqual(self.trashed, [self.png])
+        crow_gui.trash_file = lambda p: "not moved to the trash: no trash here"
+        self.assertIn("no trash here", self.api_.image_trash(self.png))
+
+
+class TrashNeverUnlinksTests(unittest.TestCase):
+    """#311: `trash_file` moves into the freedesktop trash and has no road
+    that deletes. Run in a child process with its own XDG_DATA_HOME, so the
+    suite never writes the user's real trash, and with every unlink patched
+    to raise."""
+
+    def test_the_file_lands_in_the_trash_with_its_trashinfo(self):
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("the freedesktop trash is Linux's")
+        # NOT UNDER /tmp: GIO refuses to trash on a tmpfs ("Trashing on system
+        # internal mounts is not supported", measured here 2026-09-27), so
+        # the box sits on the home file system, beside its own trash.
+        cache = os.path.expanduser("~/.cache")
+        if not os.path.isdir(cache):
+            self.skipTest("no ~/.cache to stand on")
+        box = tempfile.mkdtemp(prefix="crow-trash-", dir=cache)
+        self.addCleanup(shutil.rmtree, box, True)
+        png = _write_png(os.path.join(box, "crow.png"), 4, 4)
+        prog = (
+            "import os, shutil, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import crow_gui\n"
+            "def boom(*a, **k): raise AssertionError('unlink called')\n"
+            "os.remove = os.unlink = os.rmdir = shutil.rmtree = boom\n"
+            "print(repr(crow_gui.trash_file(%r)))\n" % (str(HERE), png))
+        env = dict(os.environ, XDG_DATA_HOME=os.path.join(box, "data"))
+        done = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                              text=True, env=env, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        if "No module named 'gi'" in done.stdout:
+            self.skipTest("no PyGObject")
+        self.assertEqual(done.stdout.strip(), "''", done.stdout)
+        self.assertFalse(os.path.exists(png))
+        trash = os.path.join(box, "data", "Trash")
+        self.assertTrue(os.path.exists(os.path.join(trash, "files", "crow.png")))
+        info = open(os.path.join(trash, "info", "crow.png.trashinfo")).read()
+        self.assertIn("Path=" + png, info)
+
+    def test_the_source_has_no_delete_road(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        for name in ("def trash_file", "def _trash_windows", "    def image_trash"):
+            body = source[source.index(name):]
+            body = body[:body.index("\n\n\n") if name.startswith("def") else
+                        body.index("\n    def ", 10)]
+            for call in ("os.remove", "os.unlink", "shutil.rmtree", "os.rmdir"):
+                self.assertNotIn(call, body, "%s in %s" % (call, name))
+
+
+class TheImageBandReplaysTests(ApiCase):
+    """#308/#311 through #173's band: a picture redraws as its card, a job
+    that never finished as a still "interrupted" tile."""
+
+    def replay(self, notes, running=()):
+        box: list = []
+        collector = types.SimpleNamespace(
+            push=box.append, _replaying=False, _tools_cleared=0,
+            _context_tokens=0, _n_ctx=0, _imgjobs_running=set(running))
+        crow_gui.Api._replay(collector, [], notes)
+        return box
+
+    def job(self, **kw):
+        mark = {"k": "imgjob", "job": "call_1", "kind": "generate",
+                "phase": "sampling", "stage": "", "i": 3, "n": 40, "eta_s": 90.0,
+                "line": "", "w": 1024, "h": 576, "at": 0}
+        mark.update(kw)
+        return mark
+
+    def test_an_image_note_redraws_as_a_card(self):
+        note = {"k": "image", "path": "/x/crow.png", "name": "crow.png",
+                "w": 8, "h": 8, "bytes": 99, "source": "generate_image",
+                "job": "call_1", "at": 0}
+        self.assertEqual(self.replay([note]),
+                         [{k: v for k, v in note.items() if k != "at"}])
+
+    def test_the_replayed_card_is_announced_for_the_actions(self):
+        root = os.path.join(self.dir, "root")
+        os.makedirs(root)
+        png = _write_png(os.path.join(root, "crow.png"), 8, 8)
+        api = self.api()
+        self.assertFalse(api.image_info(png)["ok"])
+        api._replay([], [{"k": "image", "path": png, "name": "crow.png",
+                          "w": 8, "h": 8, "bytes": 1, "job": "", "at": 0}])
+        self.assertTrue(api.image_info(png)["ok"])
+
+    def test_an_unfinished_job_redraws_interrupted_and_still(self):
+        (tile,) = self.replay([self.job()])
+        self.assertEqual(tile["k"], "imgjob")
+        self.assertEqual(tile["phase"], "interrupted")
+        self.assertIsNone(tile["eta_s"])
+
+    def test_a_job_that_still_runs_keeps_its_line(self):
+        (tile,) = self.replay([self.job()], running={"call_1"})
+        self.assertEqual(tile["phase"], "sampling")
+
+    def test_errors_and_stops_keep_what_they_said(self):
+        for phase in ("error", "stopped", "refused"):
+            (tile,) = self.replay([self.job(phase=phase, line="why")])
+            self.assertEqual((tile["phase"], tile["line"]), (phase, "why"))
+
+    def test_a_job_whose_picture_arrived_draws_only_the_card(self):
+        card = {"k": "image", "path": "/x/a.png", "name": "a.png", "w": 8,
+                "h": 8, "bytes": 1, "job": "call_1", "at": 0}
+        self.assertEqual([m["k"] for m in self.replay([self.job(), card])],
+                         ["image"])
+
+    def test_the_band_keeps_one_mark_per_job_where_it_began(self):
+        api = self.api()
+        api._conversation.append("user", "draw")
+        began = len(api._conversation)
+        api.push({"k": "imgjob", "job": "j", "phase": "loading"})
+        api._conversation.append("assistant", "...")
+        api.push({"k": "imgjob", "job": "j", "phase": "sampling", "i": 5})
+        marks = [n for n in api._notes if n.get("k") == "imgjob"]
+        self.assertEqual(len(marks), 1)
+        self.assertEqual((marks[0]["at"], marks[0]["phase"], marks[0]["i"]),
+                         (began, "sampling", 5))
+        self.assertEqual(api._imgjobs_running, {"j"})
+        api.push({"k": "image", "path": "/nowhere.png", "job": "j"})
+        self.assertEqual(api._imgjobs_running, set())
+
+
+class ImagesOnThePhoneTests(RemoteCase):
+    """#249 + #311: previews, the lightbox and its info reach a phone; the
+    desktop's file actions stay on the desktop; Download is the phone's own."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = os.path.join(self.dir, "root")
+        os.makedirs(self.root)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.root)
+        self.png = _write_png(os.path.join(self.root, "crow.png"), 16, 9)
+
+    def test_the_image_methods_are_classified(self):
+        for name in ("image_thumb", "image_full", "image_info"):
+            self.assertIn(name, crow_gui.REMOTE_PROXIED)
+        for name in ("image_reveal", "image_copy", "image_open", "image_trash"):
+            self.assertEqual(crow_gui.REMOTE_DESKTOP_BOUND[name], "desktop")
+        self.assertEqual(crow_gui.REMOTE_DESKTOP_BOUND["image_save_as"], "download")
+        self.assertNotIn("image_save_as", crow_gui.REMOTE_ALLOWED)
+
+    def test_progress_from_the_turn_reaches_a_phone_on_the_live_chat(self):
+        api = self.mirrored()
+        api._worker = threading.current_thread()
+        crow_gui.Turn(api.push).tool_progress("generate_image", _progress())
+        sent = [(m["k"], to) for m, to in api._remote.published]
+        self.assertIn(("imgjob", [PHONE]), sent)
+        self.assertEqual(self.drained(api)[0]["k"], "imgjob")
+
+    def test_a_phone_gets_the_bytes_where_the_desktop_gets_a_file_url(self):
+        api = self.mirrored()
+        crow_gui.Turn(api.push).image_created(self.png, "generate_image", "c1")
+        url = self.as_phone(api._remote_call, "image_full", [self.png])
+        self.assertEqual(url, "data:image/png;base64,"
+                         + base64.b64encode(open(self.png, "rb").read()).decode())
+        info = self.as_phone(api._remote_call, "image_info", [self.png])
+        self.assertTrue(info["ok"])
+        with self.assertRaises(KeyError):
+            self.as_phone(api._remote_call, "image_save_as", [self.png])
+
+    def test_a_phone_is_refused_an_unannounced_path_too(self):
+        api = self.mirrored()
+        self.assertEqual(self.as_phone(api._remote_call, "image_full",
+                                       [self.png]), "")
+        self.assertEqual(self.as_phone(api._remote_call, "image_thumb",
+                                       ["/etc/passwd"]), "")
+
+
+def _page_js_between(start: str, end: str) -> str:
+    source = crow_gui.PAGE
+    i = source.index(start)
+    return source[i:source.index(end, i)]
+
+
+class TheImageTilesOnThePageTests(unittest.TestCase):
+    """The page half of #308/#311: the pure functions RUN in node, the rest
+    held against the source."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.page = crow_gui.PAGE
+        cls.css = cls.page[cls.page.index("<style>"):cls.page.index("</style>")]
+        cls.pure = _page_js_between("// ---- #308 / #311: image jobs",
+                                    "// ---- end of the pure half")
+
+    def run_js(self, expr: str):
+        if not self.node:
+            self.skipTest("no node on this machine")
+        prog = self.pure + "\nconsole.log(JSON.stringify(" + expr + "));\n"
+        done = subprocess.run([self.node, "-e", prog], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_the_tile_line_names_phase_step_and_eta(self):
+        self.assertEqual(self.run_js('genLine({phase:"sampling",i:12,n:40,eta_s:84})'),
+                         "sampling 12/40 · ETA 1:24")
+        self.assertEqual(self.run_js(
+            'genLine({kind:"edit",stage:"1/2",phase:"sampling",i:3,n:20,eta_s:3725})'),
+            "stage 1/2 · sampling 3/20 · ETA 1:02:05")
+        self.assertEqual(self.run_js('genLine({phase:"loading"})'), "loading")
+        self.assertEqual(self.run_js('genLine({phase:"error",line:"out of memory"})'),
+                         "error — out of memory")
+        self.assertEqual(self.run_js('genLine({phase:"stopped"})'),
+                         "stopped — the server finishes it in the background")
+        self.assertIn("interrupted", self.run_js('genLine({phase:"interrupted",eta_s:5})'))
+
+    def test_the_info_rows_carry_every_field_and_the_size_in_mb(self):
+        rows = self.run_js(
+            'genInfoRows({ok:true,name:"abstract-crow.png",w:2752,h:1536,'
+            'bytes:8704963,format:"PNG",mtime:1790000000,path:"/p/abstract-crow.png",'
+            'source:"generate_image",job:"call_7",seed:42}, t=>"at "+t)')
+        self.assertEqual(rows, [
+            ["Name", "abstract-crow.png"], ["Dimensions", "2752×1536"],
+            ["Size", "8.7 MB (8,704,963 bytes)"], ["Format", "PNG"],
+            ["Created", "at 1790000000"], ["Path", "/p/abstract-crow.png"],
+            ["Tool", "generate_image"], ["Job", "call_7"], ["Seed", "42"]])
+        self.assertEqual(self.run_js('genInfoRows({ok:false,why:"gone"})'),
+                         [["", "gone"]])
+        self.assertEqual(self.run_js('[genSize(8704963), genSize(187701), genSize(0)]'),
+                         ["8.7 MB", "188 KB", ""])
+
+    def test_the_phone_download_is_an_armed_link(self):
+        got = self.run_js(
+            '(()=>{ const a={removeAttribute(k){ delete this[k]; }};'
+            ' genArm(a,"data:image/png;base64,AAAA","crow.png");'
+            ' const armed={href:a.href,download:a.download,hidden:a.hidden};'
+            ' genArm(a,"","");'
+            ' return [armed,{href:a.href===undefined,hidden:a.hidden}]; })()')
+        self.assertEqual(got, [{"href": "data:image/png;base64,AAAA",
+                                "download": "crow.png", "hidden": False},
+                               {"href": True, "hidden": True}])
+        build = _page_js_between("  lbBuild(){", "\n  lightbox(e, opener){")
+        self.assertIn("if(window.CROW_REMOTE){", build)
+        self.assertIn('a.textContent="Download"', build)
+        self.assertIn("pywebview.api.image_save_as(p)", build.split("else", 1)[1])
+        self.assertIn("genArm(a, u, name)", _page_js_between(
+            "\n  lightbox(e, opener){", "\n  lbSay("))
+
+    def test_the_tile_lives_in_the_chat_flow_and_is_swapped_in_place(self):
+        job = _page_js_between("  genJob(e){", "\n  genCard(e){")
+        card = _page_js_between("  genCard(e){", "\n  genThumb(")
+        for body in (job, card):
+            self.assertIn('this.turn("gen")', body)
+            self.assertNotIn("#tclist", body)
+            self.assertNotIn("innerHTML", body)
+        self.assertIn("old.replaceWith(f)", card)
+        self.assertIn('tile.style.aspectRatio=e.w+" / "+e.h', job)
+        self.assertIn('case "imgjob": this.genJob(e); break;', self.page)
+        self.assertIn('case "image": this.genCard(e); break;', self.page)
+
+    def test_the_flow_is_drawn_from_theme_names_only(self):
+        block = self.css[self.css.index("/* #308 / #311. AN IMAGE JOB"):
+                         self.css.index("/* #311. THE LIGHTBOX.")]
+        rules = re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+        self.assertIn("@keyframes genflow", rules)
+        self.assertIn("@keyframes gendrift", rules)
+        bare = re.sub(r"var\(--[a-z0-9-]+\)", "", rules)
+        for colour in (r"#[0-9a-fA-F]{3,8}\b", r"\brgba?\(", r"\bhsla?\(",
+                       r"\b(white|black|red|blue|gray|grey|green)\b"):
+            self.assertIsNone(re.search(colour, bare), colour)
+        pending = rules[rules.index("figure.gen.pending .gentile{"):
+                        rules.index("@keyframes genflow")]
+        self.assertGreaterEqual(pending.count("var(--accent)"), 2)
+        self.assertIn("var(--bevel)", pending)
+
+    def test_reduced_motion_stands_the_tile_still(self):
+        self.assertRegex(self.css, r"@media \(prefers-reduced-motion: reduce\)\{\s*"
+                         r"figure\.gen \.gentile,figure\.gen \.gentile::after"
+                         r"\{animation:none\}\}")
+
+    def test_the_lightbox_is_a_modal_dialog_so_esc_cannot_stop_a_turn(self):
+        self.assertIn('<dialog id="lightbox"', self.page)
+        box = _page_js_between("\n  lightbox(e, opener){", "\n  lbSay(")
+        self.assertIn("d.showModal()", box)
+        # THE ONE Esc->stop IS THE COMPOSER'S, which showModal makes inert.
+        stops = [m.start() for m in re.finditer(r'"Escape"[^\n]*api\.stop\(\)', self.page)]
+        self.assertEqual(len(stops), 1)
+        owner = self.page.rindex(".addEventListener(", 0, stops[0])
+        self.assertEqual(self.page[owner - 5:owner], "input")
+
+    def test_the_lightbox_controls_are_built_with_textcontent(self):
+        body = _page_js_between("  lbBuild(){", "\n  lbTrash(btn){")
+        self.assertNotIn("innerHTML", body)
+        for label in ("Show in folder", "Copy image", "Copy path", "Save as…",
+                      "Open in viewer", "Move to trash", "Close", '"i"'):
+            self.assertIn(label, body)
+        self.assertLess(body.index("Show in folder"), body.index("Copy image"))
+
+    def test_trash_is_armed_by_the_first_click(self):
+        body = _page_js_between("  lbTrash(btn){", "\n  },\n")
+        self.assertLess(body.index('btn.dataset.armed="1"'),
+                        body.index("pywebview.api.image_trash(path)"))
+
+
+class TheWindowWarmsTheImageServerTests(unittest.TestCase):
+    """#300: `image_server_warm` on a daemon thread, only when the core says
+    the image tools are there -- and nothing at all before the core has them."""
+
+    def test_no_core_hook_warms_nothing(self):
+        with mock.patch.object(crow_gui, "crow_core", types.SimpleNamespace()):
+            self.assertFalse(crow_gui.warm_image_server())
+
+    def test_tools_off_warms_nothing(self):
+        fake = types.SimpleNamespace(image_tools_available=lambda: False,
+                                     image_server_warm=lambda: 1 / 0)
+        with mock.patch.object(crow_gui, "crow_core", fake):
+            self.assertFalse(crow_gui.warm_image_server())
+
+    def test_tools_on_warm_in_the_background(self):
+        warmed = threading.Event()
+        fake = types.SimpleNamespace(image_tools_available=lambda: True,
+                                     image_server_warm=warmed.set)
+        with mock.patch.object(crow_gui, "crow_core", fake):
+            self.assertTrue(crow_gui.warm_image_server())
+        self.assertTrue(warmed.wait(5))
+
+    def test_main_warms_once_the_pump_runs(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = source[source.index("def main("):]
+        self.assertLess(body.index("target=api.pump"), body.index("warm_image_server()"))
 
 
 if __name__ == "__main__":
