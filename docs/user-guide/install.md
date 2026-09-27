@@ -63,6 +63,29 @@ with paths resolved.
 
 There is no Start-menu entry: the last step prints the two start lines instead.
 
+### Image server (Windows)
+
+`generate_image` and `edit_image` need `sd-server.exe` in `<install>\bin`. The package carries
+it only when it was packed with `-SdBuildDir`; without it the pack prints
+`image server: none` and both tools answer `the image server is not installed`. Build it on
+Windows from the Linux builder's pin, with the same CUDA 13 toolkit as `llama-server.exe`, so
+the two share `cublas64_13.dll`/`cublasLt64_13.dll`:
+
+```powershell
+git clone https://github.com/leejet/stable-diffusion.cpp sd.cpp; cd sd.cpp
+git checkout master-920-2f88688      # 2f886889e6e8b78738d6b87f7191f6018557c551
+git submodule update --init ggml thirdparty/libwebp thirdparty/libwebm
+cmake -S . -B build -DSD_CUDA=ON -DSD_SERVER_BUILD_FRONTEND=OFF -DCMAKE_CUDA_ARCHITECTURES=120
+cmake --build build --config Release --target sd-server sd-cli
+.\tools\pack-release.ps1 -BuildDir <llama.cpp>\build\bin\Release -SdBuildDir <sd.cpp>\build\bin\Release
+```
+
+`pack-release.ps1` takes only `sd-server.exe` and `sd-cli.exe` from that directory and resolves
+their DLLs with `dumpbin` exactly as it does for `llama-server.exe`; a DLL already staged is not
+copied twice. `sd-cli.exe --version` has to read `master-920-2f88688, commit 2f88688`. This
+recipe has not been run on Windows yet. Upstream's `win-cuda12` zip is not used: it brings a
+second CUDA runtime (563 MB) and its `sm_120` support is unverified (#314).
+
 ---
 
 ## Linux
@@ -101,6 +124,7 @@ warned about; none of them stops the install.
 | `--tailscale` | also print what is still missing for the phone over HTTPS: the install line (`sudo pacman -S tailscale` on Arch, else kb/1031's script), `systemctl enable --now tailscaled`, `tailscale up`, Enable HTTPS, the `tailscale serve` line, the phone app. Reads `tailscale status --json` only; never runs sudo |
 | `--pathtracer` | also switch on the `voxel-diorama` skill: path-traced voxel scenes with `kits/pathtracer` (shipped in every install). Verifies the bundle against `kit.json`, reports the esbuild `build_bundle` would use — see [Voxel kit](voxel-kit.md) |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
+| `--build-image-server` | build `sd-server` + `sd-cli` for `generate_image`/`edit_image` (~3 minutes with the engine's CUDA toolkit) — see [Linux](linux.md#image-server) |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
 | `--no-engine` | do not look for the engine at all |
 | `--to DIR` | install root, same as `CROW_HOME=DIR` |

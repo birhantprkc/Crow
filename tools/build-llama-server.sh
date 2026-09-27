@@ -466,4 +466,9 @@ main() {
     say "done: $BIN_DIR/llama-server"
 }
 
-main "$@"
+# Run only when executed. tools/build-sd-server.sh SOURCES this file for
+# ensure_cmake_ninja/ensure_cuda, so both engines share one toolkit and one
+# copy of the download logic (#314).
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi
