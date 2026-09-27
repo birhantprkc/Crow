@@ -7612,6 +7612,21 @@ class TheVoiceLineTests(ApiCase):
                       column[:column.index("}")],
                       "die Spalte hat sich bewegt, die Maske folgt ihr nicht mehr")
 
+    def test_the_idle_composer_frame_is_neutral_and_only_focus_glows(self):
+        """robin 2026-09-27: the idle box had the banner blue (--bevel) as its
+        border and a blue ring, so it looked selected. At rest: --line, no
+        ring. Focus keeps its accent border and glow."""
+        source = self._source()
+        box = source[source.index("#box{border:"):]
+        box = box[:box.index("}")]
+        self.assertIn("border:1px solid var(--line)", box)
+        self.assertNotIn("var(--bevel)", box)
+        self.assertIn("box-shadow:none", box)
+        focus = source[source.index("#box.focus{"):]
+        focus = focus[:focus.index("}")]
+        self.assertIn("border-color:var(--accent)", focus)
+        self.assertIn("box-shadow:0 0 0 3px", focus)
+
     def test_the_bars_are_mirrored_and_thin(self):
         """robins zweite Vorgabe: nach oben UND unten, und nicht so breit.
         `align-items:center` ist das, was einen Balken um die Mitte wachsen
