@@ -2,13 +2,13 @@
 
 ## Tools
 
-28 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
+30 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
 them in either surface, derived from the declarations themselves rather than written beside them.
 
 `read_file` `read_image` `render_page` `write_file` `append_file` `edit_file` `list_dir` `find_files`
 `search_text` `run_command` `build_bundle` `web_search` `fetch_url` `memory` `skill` `session_search`
 `delegate` `subtasks` `collect` `goal_set` `goal_step` `judge` `git_status` `git_diff` `git_log`
-`git_commit` `git_push` `github_connect`.
+`git_commit` `git_push` `github_connect` `generate_image` `edit_image`.
 
 An MCP tool joins the same list as `mcp_<server>_<tool>`, above the built-ins, and carries its
 own class.
@@ -188,6 +188,49 @@ Measured 2026-09-24 on the 62 renders of the 2026-09-23 diorama run (the served 
 cover 7.0–22.2 % (`render-20260923-232855.png`: box x 512–768, y 224–512, 8.0 %, ~72 tokens;
 crop x 471–809, y 180–556 at 2.7× → 920×1024), blank captures give no box, a page drawn edge to
 edge gives no crop. Decode plus detection: 0.03–0.23 s per render.
+
+### `generate_image` and `edit_image` (#300, #308, #311)
+
+`generate_image(prompt, aspect_ratio="16:9", seed=None)` makes a new picture.
+`edit_image(images, instruction, description, aspect_ratio=None)` changes 1–10 pictures.
+Both use Qwen-Image 2.1 on a resident `sd-server`.
+
+| | |
+|---|---|
+| class | `executing`: they start a process, hold the GPU for minutes and write a file. Never answered from the repeat cache |
+| server | `sd-server` (stable-diffusion.cpp 2f88688) from `<install>/bin`, on `127.0.0.1:8097`. It starts on the first call if nothing answers `GET /sdcpp/v1/capabilities` and then stays loaded. Linux adds `LD_LIBRARY_PATH=<data>/cuda/lib`. It is detached, in its own user scope like `llama-server`, and stopped when Crow exits (by handle; a server someone else started is used, never stopped). `crow_core.image_server_warm()` starts it and sends a 256×256, 1-step job so the first real job does not pay the weight load |
+| argv | `--diffusion-model <M>/transformer/…index.json --llm <M>/text_encoder_sdcli/…index.json --vae <M>/vae/…safetensors --backend te=cpu --diffusion-fa --max-vram 7 --vae-tiling --model-args qwen_image_2_1_prefix_cache_type=q8_0 --listen-port 8097 -v` |
+| model | `M` = `$CROW_IMAGE_MODEL_DIR`, else `<models_dir()>/qwen-image-2.1`. On a Linux install `models_dir()` is a link to one text model's tree, so the variable is how a models root elsewhere is found |
+| log | the server's stdout and stderr in `<log_dir>/sd-server-8097.log`, rewritten per start, the previous one kept as `.prev.log` |
+| API | `POST /sdcpp/v1/img_gen` (202 + job id), then `GET /sdcpp/v1/jobs/{id}` every 0.5 s until `completed`, `failed` or `cancelled`. Body: `prompt`, `width`, `height`, `seed`, `sample_params {sample_steps 40, euler, txt_cfg 1.0}`. `vae_tiling_params` is never sent |
+| sizes | the model card's table: 1:1 2048×2048, 4:3 2400×1792, 3:4 1792×2400, 3:2 2528×1696, 2:3 1696×2528, 16:9 2752×1536 (default), 9:16 1536×2752 |
+| edit, stage 1 | the edit at ~1 MP. Each reference is resized by the server (`image_preprocess` `target=ref,index=k,mode=stretch,width,height,filter=lanczos`) to diffusers' `calculate_dimensions(1024², its ratio)` rounded to /32. The output uses the target shape's 1 MP size (16:9 → 1376×768). `ref_image_args` is `vae_input_max_pixels=1048576` and the prompt is `instruction` |
+| edit, stage 2 | img2img at the full size with **no references**: `init_image` = the stage-1 PNG (the server stretches it: `target=init,mode=stretch,…,filter=lanczos`), `strength` 0.25, prompt = `description`. The model sees only this text and that picture, so `description` has to describe the whole final image |
+| edit shape | `aspect_ratio`, else the last image's width:height snapped to the nearest table row (by log ratio). Sizes come from the file header (PNG, JPEG, WebP, GIF); Crow has no Pillow |
+| inputs | `read_image`'s checks (working-area path, the `IMAGE_TYPES` table, 32 MiB) plus magic bytes. A path outside the working area is refused unless the user named it or released it with "always". A release that contains the working area itself (`/`, `/home`) releases nothing here |
+| output | `<root>/images/<YYYYmmdd-HHMMSS>-<slug>.png`, created exclusively and never overwritten (`-2`, `-3`, …). The result names the path, W×H, bytes, seconds and seed (edit: both stage times), and the PNG goes on `read_image`'s ride so the model sees it. On a server without a projector the result stays a success and says the picture is not shown |
+| progress | `TurnEvents.tool_progress(name, state)` while the call runs. `state` has `job`, `kind`, `phase` (queued, loading, encoding, sampling, decoding, refining, saved, error, stopped), `stage` (`1/2`, `2/2` or empty), `i`, `n`, `eta_s`, `line`, and the final `width`/`height` from the first event. The phases come from the server's log (`SdProgress`, #308's table). ETA = remaining steps × median of the last ≤ 5 step times, step 1 excluded. After the result, `image_created(path, source, job)`. The terminal redraws its one open line with `\r` and prints `image: <path> (W×H, N KB)` |
+| stop | `sd-server` cancels only a queued job (409 while generating). Stop ends the wait, the result says the server finishes the job in the background, and nothing is saved |
+| failures | a missing binary or model, a server that exits or stops answering (with its last log lines), a `failed` job (with its message), or 20 minutes without a result per job. Each is an `error:` result, never a hang |
+| notes | a chat's `image` notes keep only `path`, `name`, `w`, `h`, `bytes`, `source` and `job`, never pixels. `imgjob` notes (one per job, kept current by the window) keep `job`, `kind`, `phase`, `stage`, `w`, `h` and `line`, so a restart can show an unfinished job as interrupted |
+| thread | `tool_progress` is always called on the turn's own thread: the tool polls the job and reads the log in its own loop, and the sink is thread-local, so a helper thread's `report_progress` reaches nothing |
+
+Measured 2026-09-27, RTX 5090 beside the 27B serve (8.15 GiB free after its load), 62 GiB host,
+sd-server 2f88688 with the argv above, 40 steps (crow-nest `decode_out/p3-img`, RESULTS.md):
+
+| job | wall clock | result |
+|---|---|---|
+| generate 2752×1536, cold (first job loads the weights) | 175.3 s | clean; card peak 31,322 MiB |
+| generate 2752×1536, warm | 155.2 s | clean; no text-encoder reload |
+| edit at 4 MP (ref 2752×1536, out 2752×1536) | 697.2 s | grain over the whole frame, edit not applied |
+| edit, ref 1376×768, out 2752×1536 | 251.4 s | frame-wide grain |
+| edit stage 1 (E3): ref 1376×768, out 1376×768 | 105.7 s | clean, edit applied |
+| stage 2 (B5): E3 to 2752×1536, strength 0.25 | 55.3 s | clean, closest to E3 |
+
+The two-stage edit is therefore about 161 s, close to one warm generation. Neither tool has run
+end to end against the real server yet; the numbers come from the measurement script's requests.
+One difference: B5's init was E3 upscaled beforehand (`E3-up.png`), while the tool lets the
+server stretch it (`image_preprocess`), which has not been measured.
 
 ### Delegation (#143)
 
