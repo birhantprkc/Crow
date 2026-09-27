@@ -625,20 +625,27 @@ def command_memory_bounds() -> dict:
     importing three 21 MiB, gcc 9 MiB, Crow's own test_crow 60 MiB and
     test_crow_core 109 MiB. 8G is ~75x the largest of those and above a node
     build at V8's own heap ceiling (~4 GiB); it stops the 54 GiB runaway at a
-    seventh of the way. MemoryHigh one below makes the kernel reclaim first,
-    the swap cap is render_memory_bounds' reason unchanged (on zram the
-    anonymous memory IS the freeze). $CROW_COMMAND_MEMORY_MAX moves the kill
-    bound (any systemd size); `none` drops the size bounds, keeps the swap cap.
+    seventh of the way. The swap cap is render_memory_bounds' reason
+    unchanged (on zram the anonymous memory IS the freeze).
+    $CROW_COMMAND_MEMORY_MAX moves the kill bound (any systemd size); `none`
+    drops the size bounds, keeps the swap cap.
+
+    #309: NO MemoryHigh BELOW THE CEILING -- the default has the override's
+    shape. memory.high throttles and never kills (cgroup-v2.rst: "Going over
+    the high limit never invokes the OOM killer"), and with no swap the
+    anonymous part cannot be reclaimed. Measured 2026-09-27: a Qwen-Image
+    sd-cli load sat at 7.40 GiB of MemoryHigh=7G for 10 min 47 s, D state,
+    memory.pressure full avg60=88.13, loading at ~11 MB/s instead of
+    ~5 GB/s, and never reached the 8G kill its error message is built for.
+    Without the throttle an over-budget command dies at memory.max and is
+    named as a ceiling kill; the measured legitimate peaks (<= 109 MiB) never
+    lived between 7G and 8G.
     """
     out = {"MemorySwapMax": "0"}
     raw = (os.environ.get("CROW_COMMAND_MEMORY_MAX") or "").strip()
     if raw.lower() in ("0", "none", "off"):
         return out
-    if raw:
-        out["MemoryMax"] = raw
-        return out
-    out["MemoryHigh"] = "7G"
-    out["MemoryMax"] = _COMMAND_MEMORY_DEFAULT
+    out["MemoryMax"] = raw or _COMMAND_MEMORY_DEFAULT
     return out
 
 
@@ -713,6 +720,7 @@ def scope_result(unit: str, settle: float = 2.0) -> str:
 
 
 _SLICE_CGROUP: "list[str]" = []
+_CGROUP_ROOT = "/sys/fs/cgroup"
 
 
 def session_oom_kills() -> "int | None":
@@ -741,7 +749,7 @@ def session_oom_kills() -> "int | None":
         _SLICE_CGROUP.append(path)
     path = _SLICE_CGROUP[0]
     try:
-        with open("/sys/fs/cgroup" + path + "/memory.events", encoding="ascii") as fh:
+        with open(_CGROUP_ROOT + path + "/memory.events", encoding="ascii") as fh:
             for line in fh:
                 key, _, value = line.partition(" ")
                 if key == "oom_kill":
@@ -751,14 +759,60 @@ def session_oom_kills() -> "int | None":
     return None
 
 
-def kill_scope(unit: str) -> None:
+def scope_memory_state(unit: str) -> "dict | None":
+    """A live crow-cmd scope's memory, or None when it holds no process (#309).
+
+    For a job that outlived its run_command call: the call's scope keeps it,
+    under the call's ceiling, and nothing else looks at it again. Read from
+    the cgroup files under session.slice (the path session_oom_kills
+    resolves): `procs` (how many), `current` and `max` (bytes; max None for
+    "max"), `full_avg60` (memory.pressure, the % of the last 60 s in which
+    every task of the scope was stalled on memory -- the PSI signal
+    systemd-oomd acts on). None on Windows, where the slice is unknown, and
+    once the scope is empty or collected: a scope with no process is over.
+    """
+    if IS_WINDOWS:
+        return None
+    if not _SLICE_CGROUP:
+        session_oom_kills()             # resolves and caches the slice path
+    if not _SLICE_CGROUP:
+        return None
+    base = "%s%s/%s.scope/" % (_CGROUP_ROOT, _SLICE_CGROUP[0], unit)
+
+    def read(name: str) -> str:
+        try:
+            with open(base + name, encoding="ascii") as fh:
+                return fh.read()
+        except (OSError, ValueError):
+            return ""
+    procs = read("cgroup.procs").split()
+    if not procs:
+        return None
+    state: dict = {"procs": len(procs), "current": None, "max": None, "full_avg60": None}
+    for key, name in (("current", "memory.current"), ("max", "memory.max")):
+        raw = read(name).strip()
+        state[key] = int(raw) if raw.isdigit() else None
+    for line in read("memory.pressure").splitlines():
+        kind, _, fields = line.partition(" ")
+        if kind == "full":
+            for field in fields.split():
+                name, _, value = field.partition("=")
+                if name == "avg60":
+                    try:
+                        state["full_avg60"] = float(value)
+                    except ValueError:
+                        pass
+    return state
+
+
+def kill_scope(unit: str, sig: str = "SIGKILL") -> None:
     """SIGKILL whatever is still in the named scope -- the sweep after a kill.
 
     The process-group kill reaches everything the shell started EXCEPT a
     descendant that left the group (setsid, a daemonizer). The scope's cgroup
     it cannot leave. The unit is the one this caller named, never a pattern
-    (#158)."""
-    _systemctl_user("kill", "--signal=SIGKILL", unit + ".scope")
+    (#158). `sig` is SIGTERM for #310's graceful first step on Stop."""
+    _systemctl_user("kill", "--signal=" + sig, unit + ".scope")
 
 
 def devtools_pipe() -> "tuple[list[str], tuple[int, int], int, int] | None":
@@ -844,6 +898,22 @@ def kill_pid(pid) -> bool:
         except OSError:
             return False
     return True
+
+
+def kill_tree(pid) -> bool:
+    """#310, Windows only: `taskkill /PID <pid> /T /F` -- the process AND the
+    children it started. `proc.kill()` on cmd.exe left those running. True
+    when taskkill ran and said so; False elsewhere or on any failure, and the
+    caller falls back to its handle. Not measured on Windows (#247)."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        done = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                              capture_output=True, stdin=subprocess.DEVNULL,
+                              timeout=30)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 def terminate_tree(proc, grace: float = 5.0) -> None:

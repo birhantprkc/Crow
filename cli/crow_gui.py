@@ -43,6 +43,7 @@ rather than discovered at import time.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import contextvars
 import getpass
@@ -424,6 +425,20 @@ def write_settings(doc: dict) -> bool:
         return False
 
 
+def drag_uri_path(uri: str) -> str:
+    """#312: the local path of one `file://` URI from a GTK drag, else "".
+    `file:///home/x/a%20b.png` -> `/home/x/a b.png`; `file:///C:/x.png` ->
+    `C:/x.png`; any other scheme (a web image's https) is not a file here."""
+    import urllib.parse
+    parts = urllib.parse.urlsplit(str(uri or "").strip())
+    if parts.scheme.lower() != "file" or parts.netloc not in ("", "localhost"):
+        return ""
+    path = urllib.parse.unquote(parts.path)
+    if re.match(r"^/[A-Za-z]:/", path):
+        path = path[1:]
+    return path
+
+
 def write_paste(suffix: str, raw: bytes) -> str:
     """Put `raw` in PASTE_DIR under a name nothing else has, and return it.
 
@@ -686,6 +701,296 @@ def client_version(path: str | None = None) -> str:
     except OSError:
         return ""
     return found.group(1) if found else ""
+
+
+# -- #308 / #311: the images Crow makes, from the first progress line to the file
+
+# HOW OFTEN A RUNNING JOB MAY REDRAW ITS TILE. The sampler reports every step,
+# and a 40-step job on a fast card is ten lines a second through the bridge and
+# the phone's event ring for a line nobody reads that fast. Four a second is
+# smooth for a counter; the first line, a new phase and every end go at once.
+IMGJOB_MIN_GAP_S = 0.25
+# THE PHASES AFTER WHICH NOTHING MORE COMES. They pass the throttle always:
+# a dropped "error" would leave a tile animating over a job that is dead.
+IMGJOB_TERMINAL = frozenset({"saved", "error", "stopped"})
+# THE CHAT'S PREVIEW, NOT THE PICTURE. freedesktop's x-large thumbnail class,
+# and #311 measured it: 512x286 and <= 217 KB for a 2752x1536 PNG in <= 0.1 s,
+# where the full file is an 11.6 M-character data URL through the bridge.
+IMAGE_THUMB_EDGE = 512
+# ENOUGH HEAD FOR EVERY SIZE FIELD. PNG, GIF, BMP and WebP carry it in the first
+# 30 bytes; a JPEG's SOF sits behind its APP segments, and an EXIF block with an
+# embedded preview is tens of kilobytes (a segment is at most 64 KiB, and a
+# camera writes two or three of them).
+IMAGE_HEAD_BYTES = 256 * 1024
+# THE SOF MARKERS THAT CARRY A FRAME SIZE: C0-CF without DHT (C4), JPG (C8)
+# and DAC (CC), which share the range and mean something else.
+_JPEG_SOF = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
+
+
+def image_size(head: bytes) -> "tuple[int, int] | None":
+    """(width, height) out of an image's first bytes, or None.
+
+    OUT OF THE HEADER, NOT THE DECODER: the card needs two numbers, and
+    `crow_core._png_pixels` gives up over 16 MiB of pixels (#311 measured None
+    for exactly the images this card is for). Every format `IMAGE_TYPES`
+    names, so Windows -- which has no GdkPixbuf -- gets the same caption.
+    """
+    w = h = 0
+    if head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR" \
+            and len(head) >= 24:
+        w, h = struct.unpack(">II", head[16:24])
+    elif head[:6] in (b"GIF87a", b"GIF89a") and len(head) >= 10:
+        w, h = struct.unpack("<HH", head[6:10])
+    elif head[:2] == b"BM" and len(head) >= 26:
+        w, h = struct.unpack("<ii", head[18:26])
+        h = abs(h)                      # negative height = top-down rows
+    elif head[:4] == b"RIFF" and head[8:12] == b"WEBP" and len(head) >= 30:
+        chunk = head[12:16]
+        if chunk == b"VP8X":
+            w = 1 + int.from_bytes(head[24:27], "little")
+            h = 1 + int.from_bytes(head[27:30], "little")
+        elif chunk == b"VP8 ":
+            w, h = struct.unpack("<HH", head[26:30])
+            w, h = w & 0x3FFF, h & 0x3FFF
+        elif chunk == b"VP8L":
+            bits = int.from_bytes(head[21:25], "little")
+            w, h = (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    elif head[:3] == b"\xff\xd8\xff":
+        i = 2
+        while i + 9 <= len(head):
+            if head[i] != 0xFF:
+                return None
+            marker = head[i + 1]
+            if marker == 0xFF:          # fill byte before a marker
+                i += 1
+                continue
+            if marker in _JPEG_SOF:
+                h, w = struct.unpack(">HH", head[i + 5:i + 9])
+                break
+            if marker == 0x01 or 0xD0 <= marker <= 0xD9:
+                i += 2                  # standalone markers carry no length
+                continue
+            i += 2 + struct.unpack(">H", head[i + 2:i + 4])[0]
+    return (int(w), int(h)) if w > 0 and h > 0 else None
+
+
+def image_file_card(path: str) -> "tuple[dict | None, str]":
+    """(card, "") for a file the window may show as an image, else (None, why).
+
+    THE BYTES DECIDE, NOT THE NAME (#311): a regular file, an `IMAGE_TYPES`
+    extension, at most `IMAGE_MAX_BYTES`, and magic bytes of THAT type --
+    `crow_core._binary_kind`, the #301 sniffer, so a text file called `x.png`
+    is refused here exactly as `read_file` names it. Where the file lies is
+    `image_place_ok`'s question; this one is asked again by every action.
+    """
+    if not isinstance(path, str) or not path or "\0" in path:
+        return None, "no path"
+    full = os.path.abspath(path)
+    name = os.path.basename(full)
+    if not os.path.isfile(full):
+        return None, "no longer on disk: " + full
+    mime = crow_core.IMAGE_TYPES.get(os.path.splitext(full)[1].lower())
+    if mime is None:
+        return None, "not an image type Crow shows: " + name
+    try:
+        size = os.path.getsize(full)
+        mtime = os.path.getmtime(full)
+        with open(full, "rb") as fh:
+            head = fh.read(IMAGE_HEAD_BYTES)
+    except OSError as exc:
+        return None, "cannot read %s: %s" % (name, exc)
+    if not size:
+        return None, "empty: " + name
+    if size > crow_core.IMAGE_MAX_BYTES:
+        return None, "%s is over %d MiB" % (
+            name, crow_core.IMAGE_MAX_BYTES // (1024 * 1024))
+    found = crow_core._binary_kind(head)
+    if not found or not found[1] or crow_core.IMAGE_TYPES.get(found[1]) != mime:
+        return None, "its bytes are not a %s image: %s" % (
+            mime.split("/")[1].upper(), name)
+    dims = image_size(head) or (0, 0)
+    return {"path": full, "name": name, "w": dims[0], "h": dims[1],
+            "bytes": size, "mtime": mtime, "mime": mime,
+            "format": found[0].split()[0]}, ""
+
+
+def image_place_ok(path: str) -> bool:
+    """Inside the working area, or under an `("outside", ...)` approval.
+
+    VS CODE'S `localResourceRoots`, IN CROW'S TERMS (#311): the page gets
+    pixels only where the tools were allowed to be -- the root the user
+    picked, and the outside paths they released in this session or wrote
+    down for good (`approvals.json`). `_inside` resolves links, so a symlink
+    in the root pointing at `~/.ssh` is judged by where it lands.
+    """
+    root = crow_core.get_root()
+    if root and crow_core._inside(root, path):
+        return True
+    scopes = set(getattr(crow_core, "_ALLOWED", set()))
+    stored = getattr(crow_core, "_approvals_stored", None)
+    if stored is not None:
+        scopes |= set(stored())
+    return any(kind == "outside" and where and crow_core._inside(where, path)
+               for kind, where in scopes)
+
+
+def image_card(path: str) -> "tuple[dict | None, str]":
+    """`image_file_card` plus `image_place_ok`: what `Turn.image_created`
+    asks before a picture may enter the chat."""
+    card, why = image_file_card(path)
+    if card is None:
+        return None, why
+    if not image_place_ok(card["path"]):
+        return None, ("outside the working area and every approved path: "
+                      + card["path"])
+    return card, ""
+
+
+def image_thumb_png(path: str, edge: int = IMAGE_THUMB_EDGE) -> "bytes | None":
+    """A PNG no longer than `edge` on its long side, or None.
+
+    GDKPIXBUF ON LINUX, measured in #311 at 0.07-0.10 s for 2752x1536 (it
+    loads through glycin there). NEVER UPSCALED: a 200-px icon stays 200 px.
+    PNG and not JPEG because the same measurement had glycin refuse JPEG for
+    an RGBA pixbuf. WINDOWS AND MACOS ANSWER None, and the page shrinks the
+    full image in a canvas instead -- slower, but no second code path here.
+    """
+    if crow_platform.IS_WINDOWS:
+        return None
+    try:
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        _fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(path)
+        if not w or not h:
+            return None
+        scale = min(1.0, float(edge) / max(w, h))
+        pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            path, max(1, round(w * scale)), max(1, round(h * scale)), True)
+        ok, buf = pix.save_to_bufferv("png", [], [])
+        return bytes(buf) if ok else None
+    except Exception:                  # noqa: BLE001 -- the canvas takes over
+        return None
+
+
+def data_url(path: str, mime: str) -> str:
+    """The file as a data URL -- for a client that cannot load `file://`."""
+    with open(path, "rb") as fh:
+        return "data:%s;base64,%s" % (mime, base64.b64encode(fh.read())
+                                      .decode("ascii"))
+
+
+def show_in_file_manager(path: str) -> bool:
+    """freedesktop `FileManager1.ShowItems`: the folder WITH THE FILE SELECTED.
+
+    #311: `xdg-open <parent>` opens the folder and leaves the user to find
+    the file among the others; Nautilus (and Dolphin, Nemo, Thunar) own this
+    name on the session bus and select it. False when nobody answers, and the
+    caller falls back to `reveal_command`.
+    """
+    if not crow_platform.IS_LINUX:
+        return False
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call_sync("org.freedesktop.FileManager1",
+                      "/org/freedesktop/FileManager1",
+                      "org.freedesktop.FileManager1", "ShowItems",
+                      GLib.Variant("(ass)", ([Gio.File.new_for_path(path)
+                                              .get_uri()], "")),
+                      None, Gio.DBusCallFlags.NONE, 3000, None)
+        return True
+    except Exception:                  # noqa: BLE001 -- no owner is an answer
+        return False
+
+
+def trash_file(path: str) -> str:
+    """Move one file to the desktop's trash. "" when it went, else why not.
+
+    NEVER AN UNLINK, and there is no fallback that is one (#311). Linux:
+    `Gio.File.trash`, the freedesktop Trash spec with its `.trashinfo`, so the
+    file manager can put it back. Windows: `SHFileOperationW(FO_DELETE)` with
+    FOF_ALLOWUNDO and the FULL path -- without either, Microsoft's own page
+    says the file is deleted for good. A mount with no trash is a refusal
+    with the reason, and the file stays where it is.
+    """
+    full = os.path.abspath(path)
+    if crow_platform.IS_WINDOWS:
+        return _trash_windows(full)
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio
+        Gio.File.new_for_path(full).trash(None)
+    except Exception as exc:           # noqa: BLE001 -- the reason goes back
+        return "not moved to the trash: %s" % (getattr(exc, "message", "")
+                                               or exc)
+    return ""
+
+
+def _trash_windows(full: str) -> str:
+    """`trash_file` on Windows: SHFileOperationW, recycle bin, no dialogs.
+    NOT MEASURED on robin's Windows machine yet (#311 Expected result 9)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", ctypes.c_ushort),
+                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+    fo_delete, allow_undo, no_confirm, silent, no_error_ui = 3, 0x40, 0x10, 0x4, 0x400
+    op = SHFILEOPSTRUCTW(None, fo_delete, full + "\0", None,
+                         allow_undo | no_confirm | silent | no_error_ui,
+                         False, None, None)
+    try:
+        code = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    except Exception as exc:           # noqa: BLE001
+        return "not moved to the recycle bin: %s" % exc
+    if code or op.fAnyOperationsAborted:
+        return "not moved to the recycle bin (code %d)" % code
+    return ""
+
+
+def image_copy_argvs(path: str, mime: str) -> list:
+    """The programs that can put this image on the clipboard, in order.
+
+    THE SAME TWO AS `Api.copy`, with the type named: `wl-copy --type` reads
+    the bytes from stdin (the file is handed over as stdin, never read into
+    Python), `xclip -t -i` reads the file itself. Windows: PowerShell in an
+    STA apartment, the path through the environment so no quoting can turn
+    a file name into code -- NOT MEASURED (#311).
+    """
+    if crow_platform.IS_WINDOWS:
+        return [["powershell", "-NoProfile", "-STA", "-Command",
+                 "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+                 "[System.Windows.Forms.Clipboard]::SetImage("
+                 "[System.Drawing.Image]::FromFile($env:CROW_IMAGE))"]]
+    return [["wl-copy", "--type", mime],
+            ["xclip", "-selection", "clipboard", "-t", mime, "-i", path]]
+
+
+def warm_image_server() -> bool:
+    """#300: wake the image server once the window is up, if the core has one.
+
+    ASKED THROUGH `getattr`: the core half of the image tools lands on its own
+    branch, and a window built before it must start exactly as before. On a
+    daemon thread because warming loads weights -- the window does not wait.
+    """
+    available = getattr(crow_core, "image_tools_available", None)
+    warm = getattr(crow_core, "image_server_warm", None)
+    try:
+        if available is None or warm is None or not available():
+            return False
+    except Exception:                  # noqa: BLE001 -- no tools is an answer
+        return False
+    threading.Thread(target=warm, name="crow-image-warm", daemon=True).start()
+    return True
 
 
 # THE MEMORY MARK, BAKED IN. `docs/` is not in the package: an installed
@@ -2528,6 +2833,87 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   cursor:pointer}
 .you img.sent{display:block;justify-self:end;max-width:min(320px,70%);border-radius:8px;
   margin-top:6px;border:1px solid var(--bevel)}
+/* #308 / #311. AN IMAGE JOB IN THE CHAT, AND THE PICTURE THAT REPLACES IT.
+   ONE FIGURE PER JOB: the placeholder tile in the image's own aspect ratio
+   while it runs, swapped IN PLACE for the card when the file exists -- no
+   second block, no jump.
+   THE FLOW IS DRAWN FROM THE THEME'S NAMES ONLY (robin, 2026-09-27: "an das
+   ausgewaehlte Theme anpassen"): --accent, --bevel, --raised, --panel, --bg.
+   The keyframes move positions and never name a colour, so a theme switch
+   recolours a running tile at once and a new theme needs nothing here. */
+.turn.gen figure{margin:0;max-width:min(512px,100%)}
+figure.gen .gentile{position:relative;width:100%;aspect-ratio:1 / 1;
+  border-radius:8px;overflow:hidden;border:1px solid var(--bevel);
+  background:var(--raised)}
+figure.gen.pending .gentile{
+  background:linear-gradient(120deg,var(--raised) 0%,
+    color-mix(in srgb,var(--accent) 34%,var(--raised)) 28%,var(--panel) 50%,
+    color-mix(in srgb,var(--bevel) 70%,var(--raised)) 72%,var(--raised) 100%);
+  background-size:320% 320%;animation:genflow 5.5s ease-in-out infinite alternate}
+figure.gen.pending .gentile::after{content:"";position:absolute;inset:-40%;
+  background:
+    radial-gradient(closest-side at 30% 40%,
+      color-mix(in srgb,var(--accent) 30%,transparent),transparent),
+    radial-gradient(closest-side at 70% 65%,
+      color-mix(in srgb,var(--bevel) 45%,transparent),transparent);
+  animation:gendrift 7s ease-in-out infinite alternate}
+@keyframes genflow{0%{background-position:0% 30%}100%{background-position:100% 70%}}
+@keyframes gendrift{0%{transform:translate(-8%,-6%) rotate(0deg)}
+  100%{transform:translate(8%,6%) rotate(24deg)}}
+/* NOT RUNNING ANY MORE: the flow stops where it stands. An error turns the
+   tile red with its reason under it; stopped, interrupted and refused stay
+   the plain surface with their line. */
+figure.gen.still .gentile,figure.gen.still .gentile::after{animation:none}
+figure.gen.still .gentile::after{display:none}
+figure.gen.err .gentile{background:color-mix(in srgb,var(--bad) 22%,var(--raised));
+  border-color:var(--bad)}
+figure.gen .genline{font:11.5px/1.45 var(--mono);color:var(--dim);margin-top:5px}
+figure.gen.err .genline{color:var(--bad)}
+/* A READER WHO ASKED FOR LESS MOTION gets the tile and its line, still. */
+@media (prefers-reduced-motion: reduce){
+  figure.gen .gentile,figure.gen .gentile::after{animation:none}}
+/* THE CARD: a button, so Enter and Space open it (#229 learned that from
+   href-less links); the image keeps its box before its pixels arrive. */
+figure.gen .genbtn{display:block;width:100%;padding:0;border:0;background:none;
+  cursor:zoom-in;border-radius:8px}
+figure.gen .genbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+figure.gen .genbtn img{display:block;width:100%;height:auto;border-radius:8px;
+  border:1px solid var(--bevel);background:var(--raised)}
+figure.gen .gencap{font-size:11.5px;color:var(--dim);margin-top:5px}
+figure.gen.gone .gentile{animation:none}
+figure.gen.gone .gencap{color:var(--dimmer)}
+
+/* #311. THE LIGHTBOX. A native modal <dialog>: showModal makes the page
+   behind it inert (so Esc here can never stop a running turn), Esc closes
+   it, and ::backdrop is the dim layer. The picture fits the window and is
+   never upscaled past 1:1 -- max-* without a width. */
+#lightbox{padding:0;border:0;margin:0;width:100vw;height:100vh;max-width:100vw;
+  max-height:100vh;background:transparent;color:var(--text);overflow:hidden}
+#lightbox::backdrop{background:color-mix(in srgb,var(--bg) 90%,transparent)}
+#lightbox .lbimg{position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;padding:58px 16px 16px}
+#lightbox .lbimg img{max-width:100%;max-height:100%;object-fit:contain;
+  border-radius:4px;box-shadow:0 8px 40px var(--shadow)}
+#lightbox .lbbar{position:absolute;top:10px;right:12px;left:12px;display:flex;
+  gap:6px;flex-wrap:wrap;justify-content:flex-end;z-index:2}
+#lightbox .lbbar button,#lightbox .lbbar a{font:12px/1 var(--ui);color:var(--text);
+  background:var(--panel);border:1px solid var(--bevel);border-radius:6px;
+  padding:7px 10px;cursor:pointer;text-decoration:none;white-space:nowrap}
+#lightbox .lbbar button:hover,#lightbox .lbbar a:hover{background:var(--hover)}
+#lightbox .lbbar .prime{border-color:var(--accent);color:var(--text-strong)}
+#lightbox .lbbar .danger[data-armed="1"]{border-color:var(--bad);color:var(--bad)}
+#lightbox .lbbar .lbi{font-weight:700;min-width:30px}
+#lightbox .lbsay{position:absolute;left:16px;bottom:12px;font-size:12px;
+  color:var(--text-soft);background:var(--panel);border-radius:6px;padding:4px 8px;
+  z-index:2}
+#lightbox .lbsay:empty{display:none}
+#lbinfo{position:absolute;top:52px;right:12px;z-index:3;max-width:min(460px,calc(100vw - 24px));
+  background:var(--panel);border:1px solid var(--bevel);border-radius:8px;
+  padding:10px 12px;font-size:12px;box-shadow:0 8px 30px var(--shadow)}
+#lbinfo dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:4px 12px}
+#lbinfo dt{color:var(--dim)}
+#lbinfo dd{margin:0;color:var(--text);overflow-wrap:anywhere;-webkit-user-select:text;
+  user-select:text}
 #in{flex:1;background:transparent;border:0;outline:0;resize:none;color:var(--text);
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
 #in::placeholder{color:var(--dimmer)}
@@ -3212,6 +3598,9 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
      which is why they go in by textContent and never into an HTML string; the
      same rule modelMenu is built under. -->
 <div id="menu"></div>
+<!-- #311: the lightbox. Its controls are built by `crow.lbBuild` with
+     textContent: a file name is a stranger's text. -->
+<dialog id="lightbox" aria-label="Image"></dialog>
 
 <div class="grip" id="g-n"></div><div class="grip" id="g-s"></div>
 <div class="grip" id="g-w"></div><div class="grip" id="g-e"></div>
@@ -3537,6 +3926,9 @@ if (window.CROW_REMOTE) (function(){
     link: url => { if(url) window.open(url, "_blank", "noopener"); return null; },
     pane: () => null,
     "desktop-only": () => null,
+    // #311: the lightbox never calls this on a phone -- its Download is an
+    // <a download> (`genArm`); the table entry is the safety net.
+    download: () => "",
   };
   window.pywebview = {api: new Proxy({}, {get: (_, name) => (...args) => {
     const how = BOUND[name];
@@ -3884,6 +4276,97 @@ const LINK = {
     return null; }
 };
 
+// #312: the local paths in a drag's `text/uri-list` (RFC 2483: one URI per
+// line, `#` lines are comments). `file:///home/x/a%20b.png` -> `/home/x/a b.png`,
+// `file:///C:/x.png` -> `C:/x.png`; anything that is not a local file is left out.
+function dropUriPaths(text){
+  return String(text || "").split(/\r?\n/).map(l => l.trim())
+    .filter(l => l && l[0] !== "#" && /^file:\/\//i.test(l))
+    .map(l => { let p=l.replace(/^file:\/\/(localhost)?/i, "");
+                try{ p=decodeURIComponent(p); }catch(_){ }
+                return /^\/[A-Za-z]:\//.test(p) ? p.slice(1) : p; })
+    .filter(p => p.startsWith("/") || /^[A-Za-z]:\//.test(p));
+}
+
+// ---- #308 / #311: image jobs and their pictures, the pure half ------------
+// PURE AND TOP-LEVEL, like dropUriPaths: the suite cuts them out and runs
+// them in node, so the words on the tile are tested, not just present.
+// THE PHASES WHOSE TILE STANDS STILL: nothing more comes for them.
+const GEN_STILL = ["saved", "error", "stopped", "interrupted", "refused"];
+// ETA as a clock: 84 s -> "1:24", 3725 s -> "1:02:05".
+function genClock(sec){
+  const s=Math.max(0, Math.round(Number(sec) || 0));
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=String(s%60).padStart(2,"0");
+  return h ? h+":"+String(m).padStart(2,"0")+":"+x : m+":"+x;
+}
+// THE TILE'S LINE, from the job's fields rather than a sentence built
+// elsewhere: the same words live, on the phone and in a replay. An edit
+// names its stage ("stage 1/2 · sampling 12/40 · ETA 1:24").
+function genLine(e){
+  const ph=String((e && e.phase) || "");
+  if(ph==="error") return "error — "+String(e.line || "the job failed");
+  if(ph==="stopped") return "stopped — the server finishes it in the background";
+  if(ph==="interrupted") return "interrupted — Crow ended before the image was saved";
+  if(ph==="refused") return String(e.line || "saved, not shown here");
+  const parts=[];
+  if(e.stage) parts.push("stage "+e.stage);
+  let word=ph || "queued";
+  if(typeof e.i==="number" && typeof e.n==="number" && e.n>0) word+=" "+e.i+"/"+e.n;
+  parts.push(word);
+  if(typeof e.eta_s==="number" && isFinite(e.eta_s) && e.eta_s>=0 && ph!=="saved")
+    parts.push("ETA "+genClock(e.eta_s));
+  return parts.join(" · ");
+}
+// SIZES AS PEOPLE READ THEM: decimal megabytes with one place (Crow's own
+// chat said "8,7 MB" for 8,704,963 B), kilobytes below one. "" for none.
+function genSize(bytes){
+  const b=Number(bytes) || 0;
+  if(b<=0) return "";
+  return b>=1e6 ? (b/1e6).toFixed(1)+" MB" : Math.max(1, Math.round(b/1e3))+" KB";
+}
+function genWhen(t){ return new Date(Number(t)*1000).toLocaleString(); }
+// THE (i) PANEL'S ROWS, [label, value], out of `image_info`. The size is
+// always in MB with its byte count beside it: "8.7 MB (8,704,963 bytes)".
+function genInfoRows(i, when){
+  if(!i || !i.ok) return [["", String((i && i.why) || "no information")]];
+  const b=Number(i.bytes) || 0;
+  const rows=[["Name", String(i.name || "")]];
+  if(i.w>0 && i.h>0) rows.push(["Dimensions", i.w+"×"+i.h]);
+  rows.push(["Size", (b/1e6).toFixed(1)+" MB ("+b.toLocaleString("en-US")+" bytes)"]);
+  if(i.format) rows.push(["Format", String(i.format)]);
+  if(i.mtime) rows.push(["Created", (when || genWhen)(i.mtime)]);
+  rows.push(["Path", String(i.path || "")]);
+  if(i.source) rows.push(["Tool", String(i.source)]);
+  if(i.job) rows.push(["Job", String(i.job)]);
+  if(i.seed!==undefined && i.seed!==null && i.seed!=="") rows.push(["Seed", String(i.seed)]);
+  return rows;
+}
+// THE PHONE'S DOWNLOAD IS A REAL LINK, armed with the data URL the lightbox
+// already holds -- a tap on an <a download> is a download on iOS as well,
+// where a click synthesised after an await is not. No URL, no link.
+function genArm(a, url, name){
+  if(url){ a.href=url; } else { a.removeAttribute("href"); }
+  a.download=String(name || "image");
+  a.hidden=!url;
+  return a;
+}
+// THE CANVAS ROAD TO A PREVIEW, for a desktop without GdkPixbuf (Windows):
+// the full image in, a PNG no longer than `edge` out, "" when it cannot.
+function genShrink(url, edge){
+  return new Promise(done=>{
+    const im=new Image();
+    im.onload=()=>{ try{
+      const k=Math.min(1, edge/Math.max(im.naturalWidth || 1, im.naturalHeight || 1));
+      const c=document.createElement("canvas");
+      c.width=Math.max(1, Math.round(im.naturalWidth*k));
+      c.height=Math.max(1, Math.round(im.naturalHeight*k));
+      c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
+      done(c.toDataURL("image/png")); }catch(_){ done(""); } };
+    im.onerror=()=>done("");
+    im.src=url; });
+}
+// ---- end of the pure half
+
 const crow = {
   running:false, col:null, say:null, think:null, fence:null, fenceLang:"",
   cursor:null, blocks:[],
@@ -3974,6 +4457,204 @@ const crow = {
     urls.forEach(u=>{ const im=document.createElement("img");
       im.className="sent"; im.src=u; you.appendChild(im); });
     this.bottom();
+  },
+
+  // #308 / #311. ONE FIGURE PER JOB ID, kept here so every later line, the
+  // picture and a replay find the same element. A figure a `clear` took
+  // out of the flow is simply no longer connected, and a new one is made.
+  // ITS OWN TURN, NOT THE ROUND'S COLUMN: a finished round folds into the
+  // Trace (`fold`), and a picture folded away is a picture nobody sees.
+  gens:{},
+
+  genJob(e){
+    const job=String(e.job || ""); if(!job) return;
+    let f=this.gens[job];
+    // THE CARD IS FINAL: a late progress line never turns it back.
+    if(f && f.isConnected && !f.classList.contains("pending")) return;
+    if(!f || !f.isConnected){
+      f=document.createElement("figure"); f.className="gen pending";
+      f.dataset.job=job;
+      const tile=document.createElement("div"); tile.className="gentile";
+      tile.setAttribute("role","img");
+      const line=document.createElement("figcaption"); line.className="genline";
+      f.append(tile, line); this.turn("gen").appendChild(f);
+      this.gens[job]=f; this.bottom(); }
+    const ph=String(e.phase || ""), tile=f.querySelector(".gentile"), text=genLine(e);
+    if(e.w>0 && e.h>0) tile.style.aspectRatio=e.w+" / "+e.h;
+    f.classList.toggle("err", ph==="error");
+    f.classList.toggle("still", GEN_STILL.indexOf(ph)!==-1);
+    f.querySelector(".genline").textContent=text;
+    tile.setAttribute("aria-label",
+      (e.kind==="edit" ? "Editing an image: " : "Making an image: ")+text);
+  },
+
+  // THE PICTURE. Swapped IN PLACE for its job's tile when there is one
+  // (`replaceWith`: same spot, no second block), appended otherwise -- a
+  // picture no job announced, or a replay whose tile was never drawn.
+  genCard(e){
+    const job=String(e.job || ""), path=String(e.path || ""), name=String(e.name || "image");
+    const dims=(e.w>0 && e.h>0) ? e.w+"×"+e.h : "";
+    const f=document.createElement("figure"); f.className="gen card";
+    f.dataset.path=path; if(job) f.dataset.job=job;
+    const b=document.createElement("button"); b.type="button"; b.className="genbtn";
+    b.setAttribute("aria-label", "Open "+name+" enlarged");
+    const im=document.createElement("img"); im.decoding="async"; im.loading="lazy";
+    im.alt=name+(dims ? ", "+dims : "");
+    if(dims) im.style.aspectRatio=e.w+" / "+e.h;
+    const cap=document.createElement("figcaption"); cap.className="gencap";
+    cap.textContent=cap.dataset.base=[name, dims, genSize(e.bytes)].filter(Boolean).join(" · ");
+    b.appendChild(im); f.append(b, cap);
+    b.onclick=()=>this.lightbox(e, b);
+    const old=job ? this.gens[job] : null;
+    if(old && old.isConnected) old.replaceWith(f);
+    else this.turn("gen").appendChild(f);
+    if(job) this.gens[job]=f;
+    this.genThumb(im, f, path); this.bottom();
+  },
+
+  // THE PREVIEW, NEVER THE ORIGINAL: Python's 512-px PNG; where it has none
+  // (Windows), the full image shrunk in a canvas; neither, and the card
+  // says the file is gone instead of showing a broken image.
+  genThumb(im, f, path){
+    const gone=()=>this.genGone(f, "no longer on disk");
+    pywebview.api.image_thumb(path).then(u=>{
+      if(u){ im.src=u; return; }
+      return pywebview.api.image_full(path).then(full=>{
+        if(!full){ gone(); return; }
+        return genShrink(full, 512).then(small=>{ im.src=small || full; }); });
+    }).catch(gone);
+  },
+
+  // A CARD WHOSE FILE LEFT: no button to open what is not there, and the
+  // reason beside the name. The button's removal is also what sends focus
+  // to the composer when the lightbox that trashed it closes.
+  genGone(f, why){
+    f.classList.add("gone");
+    const b=f.querySelector(".genbtn");
+    if(b){ const tile=document.createElement("div"); tile.className="gentile";
+      const im=b.querySelector("img");
+      if(im && im.style.aspectRatio) tile.style.aspectRatio=im.style.aspectRatio;
+      b.replaceWith(tile); }
+    const cap=f.querySelector(".gencap");
+    if(cap) cap.textContent=(cap.dataset.base ? cap.dataset.base+" · " : "")+why;
+  },
+
+  // #311. THE LIGHTBOX, built once and on first use. Every label is
+  // textContent; the only strings from outside are the name and the path.
+  lbE:null, lbOpener:null,
+  lbBuild(){
+    const d=$("#lightbox"); if(d.dataset.built) return d;
+    d.dataset.built="1";
+    const bar=document.createElement("div"); bar.className="lbbar";
+    bar.setAttribute("role","toolbar"); bar.setAttribute("aria-label","Image actions");
+    const mk=(cls, label, title, fn)=>{ const b=document.createElement("button");
+      b.type="button"; b.className=cls; b.textContent=label;
+      if(title) b.title=title; b.onclick=fn; bar.appendChild(b); return b; };
+    // SHOW IN FOLDER FIRST AND IN THE ACCENT: robin's "im File Explorer
+    // oeffnen" is the action this lightbox exists for.
+    mk("prime lbreveal", "Show in folder", "Open the file manager with this file selected",
+       ()=>this.lbDo(p=>pywebview.api.image_reveal(p), ""));
+    mk("lbi", "i", "Information", ()=>this.lbInfo());
+    mk("lbcopy", "Copy image", "", ()=>this.lbDo(p=>pywebview.api.image_copy(p), "image copied"));
+    mk("lbpath", "Copy path", "", ()=>this.lbCopyPath());
+    // THE PHONE DOWNLOADS, THE DESKTOP SAVES AS: a phone has no dialog of
+    // the desktop's to answer, and its own download is the save it knows.
+    if(window.CROW_REMOTE){ const a=document.createElement("a"); a.className="lbdl";
+      a.textContent="Download"; genArm(a, "", ""); bar.appendChild(a); }
+    else mk("lbsave", "Save as…", "", ()=>this.lbDo(p=>pywebview.api.image_save_as(p), ""));
+    mk("lbopen", "Open in viewer", "", ()=>this.lbDo(p=>pywebview.api.image_open(p), ""));
+    const tr=mk("danger lbtrash", "Move to trash", "", ()=>this.lbTrash(tr));
+    mk("lbclose", "Close", "Close (Esc)", ()=>d.close());
+    const view=document.createElement("div"); view.className="lbimg";
+    const big=document.createElement("img"); big.decoding="async"; view.appendChild(big);
+    const info=document.createElement("div"); info.id="lbinfo"; info.hidden=true;
+    const say=document.createElement("div"); say.className="lbsay";
+    say.setAttribute("role","status");
+    d.append(view, bar, info, say);
+    // THE CLICK BESIDE THE PICTURE closes, the one on it does not.
+    view.addEventListener("click", ev=>{ if(ev.target===view) d.close(); });
+    // ESC IS THE BROWSER'S (the dialog's own cancel). On close the full
+    // decode is dropped, and focus goes back to the card -- or, when the
+    // card is gone (trashed), to the composer (WAI-ARIA APG's exception).
+    d.addEventListener("close", ()=>{ big.removeAttribute("src");
+      const a=d.querySelector(".lbdl"); if(a) genArm(a, "", "");
+      const o=this.lbOpener; this.lbE=null; this.lbOpener=null;
+      (o && o.isConnected ? o : input).focus(); });
+    return d;
+  },
+
+  lightbox(e, opener){
+    const d=this.lbBuild();
+    this.lbE=e; this.lbOpener=opener || null;
+    const path=String(e.path || ""), name=String(e.name || "image");
+    const big=d.querySelector(".lbimg img");
+    big.removeAttribute("src");
+    big.alt=name+((e.w>0 && e.h>0) ? ", "+e.w+"×"+e.h : "");
+    $("#lbinfo").hidden=true; this.lbSay("");
+    const tr=d.querySelector(".lbtrash"); tr.dataset.armed=""; tr.textContent="Move to trash";
+    const a=d.querySelector(".lbdl"); if(a) genArm(a, "", name);
+    // showModal: the page behind goes inert -- the composer's Esc->stop
+    // cannot fire while this is open -- and Esc closes this instead.
+    if(!d.open) d.showModal();
+    pywebview.api.image_full(path).then(u=>{
+      if(this.lbE!==e) return;
+      if(!u){ this.lbSay("no longer on disk"); return; }
+      big.src=u; if(a) genArm(a, u, name); });
+  },
+
+  lbSay(t){ const s=$("#lightbox .lbsay"); if(s) s.textContent=t || ""; },
+
+  // ONE ACTION, ITS ANSWER IN THE STATUS LINE: Python returns the sentence
+  // to show ("" = done and nothing to add, then `ok` is said).
+  lbDo(call, ok){
+    const e=this.lbE; if(!e) return;
+    call(String(e.path || "")).then(r=>this.lbSay(r || ok || ""),
+                                    ()=>this.lbSay("that did not work"));
+  },
+
+  // THE PATH AS TEXT. On a phone the page behind the modal is inert, so the
+  // helper field for execCommand goes INSIDE the dialog, or nothing copies.
+  lbCopyPath(){
+    const e=this.lbE; if(!e) return;
+    const p=String(e.path || "");
+    if(window.CROW_REMOTE){
+      const t=document.createElement("textarea"); t.value=p; t.setAttribute("readonly","");
+      t.style.position="fixed"; t.style.opacity="0"; $("#lightbox").appendChild(t); t.select();
+      let ok=false; try{ ok=document.execCommand("copy"); }catch(_){ ok=false; }
+      t.remove(); this.lbSay(ok ? "path copied" : "the clipboard refused"); return; }
+    pywebview.api.copy(p).then(ok=>this.lbSay(ok ? "path copied" : "the clipboard refused"));
+  },
+
+  lbInfo(){
+    const box=$("#lbinfo"), e=this.lbE; if(!box || !e) return;
+    if(!box.hidden){ box.hidden=true; return; }
+    pywebview.api.image_info(String(e.path || "")).then(i=>{
+      if(this.lbE!==e) return;
+      const dl=document.createElement("dl");
+      genInfoRows(i).forEach(([k, v])=>{
+        const dt=document.createElement("dt"); dt.textContent=k;
+        const dd=document.createElement("dd"); dd.textContent=v;
+        dl.append(dt, dd); });
+      box.replaceChildren(dl); box.hidden=false; });
+  },
+
+  // TWO CLICKS, the house arm (`deleteTarget`): the second click is on a
+  // button that names the file. The trash can be emptied back, but a click
+  // that meant "close" must not move a file.
+  lbTrash(btn){
+    const e=this.lbE; if(!e) return;
+    const name=String(e.name || "image"), path=String(e.path || "");
+    if(btn.dataset.armed!=="1"){
+      btn.dataset.armed="1"; btn.textContent="Move "+name+" to trash";
+      setTimeout(()=>{ if(btn.dataset.armed==="1"){ btn.dataset.armed="";
+        btn.textContent="Move to trash"; } }, 4000);
+      return; }
+    btn.dataset.armed=""; btn.textContent="Move to trash";
+    pywebview.api.image_trash(path).then(why=>{
+      if(why){ this.lbSay(why); return; }
+      document.querySelectorAll("figure.gen.card").forEach(f=>{
+        if(f.dataset.path===path) this.genGone(f, "moved to trash"); });
+      $("#lightbox").close(); });
   },
 
   // #131. VARIANT A (robin, 2026-08-22). A 24-round turn put 24 rounds of
@@ -5688,6 +6369,42 @@ const crow = {
   // the paths come back through `on(...)` a moment later.
   dragging(on){ box.classList.toggle("drag", !!on); },
 
+  // #312. A DROPPED PICTURE TRAVELS AS ITS BYTES, not as its path. On
+  // Linux the path comes from pywebview's GTK drag handler, which reads the
+  // drag data as TEXT -- a file manager that offers only a uri-list hands it
+  // nothing, and robin's drop on 2026-09-27 never reached the model (no request
+  // at serve after the window opened). The File the page holds carries the
+  // bytes on every backend, so an image is read here and handed over the way a
+  // paste is; `dropped` skips the path of a picture already read this way.
+  _byteNames: [],
+  // #312, second half, MEASURED on robin's retest (crow.log 09:38:03 and
+  // 09:38:47): a drop from the file manager reached the page with ZERO files
+  // -- WebKitGTK handed over no File objects, so neither the bytes nor
+  // pywebview's path matching had anything to work on. What the drag carries
+  // then is the file manager's `text/uri-list`: the page reads it itself and
+  // treats each `file://` entry exactly like a path pywebview would have
+  // delivered. `drop_seen` writes what the drop carried into crow.log.
+  dropBytes(dt){
+    this._byteNames=[];
+    const img=/\.(png|jpe?g|gif|webp|bmp)$/i;
+    const files=Array.prototype.slice.call((dt && dt.files) || []);
+    let uris="";
+    try{ uris=(dt && (dt.getData("text/uri-list") || dt.getData("text/plain"))) || ""; }catch(_){ uris=""; }
+    try{ pywebview.api.drop_seen({types: Array.prototype.slice.call((dt && dt.types) || []),
+                                  files: files.length, uris: uris.length}); }catch(_){}
+    files.forEach(f => {
+      if(!img.test(f.name)) return;
+      this._byteNames.push(f.name);
+      const r=new FileReader();
+      r.onload=()=>pywebview.api.stage_image_data(f.name, r.result);
+      r.onerror=()=>pywebview.api.stage_image_data(f.name, "");
+      r.readAsDataURL(f);
+    });
+    if(files.length){ return; }
+    const paths=dropUriPaths(uris);
+    if(paths.length){ this.dropped(paths); }
+  },
+
   dropped(paths){
     this.dragging(false);
     if(!paths || !paths.length){ return; }
@@ -5699,7 +6416,11 @@ const crow = {
     const img=/\.(png|jpe?g|gif|webp|bmp)$/i;
     // The strip redraws through the "chips" event the Python side pushes --
     // the same channel /image uses, so there is exactly one renderer call.
-    paths.filter(p=>img.test(p)).forEach(p=>pywebview.api.stage_image(p));
+    paths.filter(p=>img.test(p)).forEach(p=>{
+      const i=this._byteNames.indexOf(p.split(/[\\/]/).pop());
+      if(i!==-1){ this._byteNames.splice(i,1); return; }
+      pywebview.api.stage_image(p);
+    });
     paths=paths.filter(p=>!img.test(p));
     if(!paths.length){ return; }
     // QUOTED WHEN IT HAS TO BE. A Windows path with a space in it is the normal
@@ -7869,6 +8590,9 @@ const crow = {
       case "ask": this.ask(e.name, e.args, e.scope); break;
       // #175. Ein Render des Modells oeffnet sein Tab im Browser-Panel.
       case "page": this.brRendered(e.url, e.shot); break;
+      // #308 / #311: an image job's tile, and the picture that replaces it.
+      case "imgjob": this.genJob(e); break;
+      case "image": this.genCard(e); break;
       // #227: the pane moved (a link, a redirect); #201: a link to open here.
       case "brnav": this.brNav(e.url, e.how); break;
       case "bropen": this.brOpen(e.url); break;
@@ -7881,7 +8605,7 @@ const crow = {
       // writes on the Python side; without this the page would keep breathing
       // about notes that no longer exist. One place, because `clear` is already
       // the one event that means "this conversation is gone".
-      case "clear": flow.innerHTML=""; this.cost("",null);
+      case "clear": flow.innerHTML=""; this.gens={}; this.cost("",null);
         this.pendState([]); this.toolsReset(); this.endTrace(); break;
       case "hello": this.hello(e.t); break;
       // #94. /thoughts in the terminal shows or hides the reasoning; here it is
@@ -7960,7 +8684,7 @@ input.addEventListener("keydown",e=>{
 // the drop never reaches a listener at all, because WebView2 has already
 // decided to navigate to the file and show it instead of the window.
 document.addEventListener("dragover", e => { e.preventDefault(); crow.dragging(true); });
-document.addEventListener("drop",     e => { e.preventDefault(); crow.dragging(false); });
+document.addEventListener("drop",     e => { e.preventDefault(); crow.dragging(false); crow.dropBytes(e.dataTransfer); });
 // LEAVING THE DOCUMENT, not an element: dragleave fires for every child the
 // pointer crosses, and `relatedTarget === null` is what tells the two apart.
 document.addEventListener("dragleave", e => { if(!e.relatedTarget) crow.dragging(false); });
@@ -8326,6 +9050,9 @@ REMOTE_PROXIED = frozenset({
     "set_tools", "skills", "stop", "toggle_server", "toggle_skill",
     "tools_cleared", "unstage_image", "update_check", "update_start",
     "view_live",
+    # #311: the phone sees the previews, the lightbox and its (i) panel --
+    # `image_full` answers a phone with the bytes, never a `file://` URL.
+    "image_thumb", "image_full", "image_info",
 })
 # WAS DAS TELEFON STATTDESSEN TUT, je Schluessel ein Satz. Die Seite liest
 # die Schluessel (`__REMOTE_BOUND__`), dieser Text ist fuer Menschen.
@@ -8348,6 +9075,9 @@ REMOTE_PHONE_DOES = {
     "pane": "the desktop pane keeps working; the phone shows the URL and "
             "the render_page screenshot, never a live pane",
     "desktop-only": "never served to a phone (the pairing controls)",
+    "download": "#311: the phone saves the file itself -- the lightbox's "
+                "Download is an <a download> on image_full's data URL, named "
+                "after the file; the desktop's save dialog never opens",
 }
 REMOTE_DESKTOP_BOUND = {
     "maximise": "noop", "minimise": "noop", "begin_move": "noop",
@@ -8359,6 +9089,11 @@ REMOTE_DESKTOP_BOUND = {
     "close": "tab", "copy": "copy", "paste_clipboard": "paste",
     "dictate_start": "dictate", "dictate_stop": "dictate",
     "stage_image": "upload", "pick_root": "root", "open_url": "link",
+    # #312: a picture dropped into the page as bytes -- the desktop
+    # window, and a phone or browser mirror the same way (robin 2026-09-27:
+    # "Handy auch, wichtig")
+    "stage_image_data": "upload",
+    "drop_seen": "desktop-only",
     "reveal_path": "desktop", "roll_show": "desktop",
     "provider_authorise": "desktop",
     "pane_go": "pane", "pane_show": "pane", "pane_hide": "pane",
@@ -8367,6 +9102,12 @@ REMOTE_DESKTOP_BOUND = {
     "remote_forget": "desktop-only", "remote_use_ip": "desktop-only",
     "remote_use_https": "desktop-only",
     "remote_stop": "desktop-only",
+    # #311: the lightbox's actions act on the desktop's file and machine --
+    # its file manager, clipboard, viewer and trash (robin's "im File
+    # Explorer oeffnen" is the first of them).
+    "image_reveal": "desktop", "image_copy": "desktop",
+    "image_open": "desktop", "image_trash": "desktop",
+    "image_save_as": "download",
 }
 # WAS EIN TELEFON UEBER HTTP RUFEN DARF: das Proxierte plus die gebundenen,
 # deren Ersatz doch auf dem Desktop landet. Alles andere beantwortet der
@@ -10045,6 +10786,84 @@ class Turn(TurnEvents):
         """
         self._put({"k": "page", "url": url, "shot": shot})
 
+    def tool_progress(self, name: str, state: dict) -> None:
+        """#308. An image job's progress, as the placeholder in the chat.
+
+        DEFINED HERE BEFORE THE CORE HAS IT, and that stays right after the
+        merge: the core's `TurnEvents` gains the same method as a no-op, and
+        this override is what the window does with it.
+
+        THROTTLED PER JOB, NOT PER CALL (`IMGJOB_MIN_GAP_S`): an edit and a
+        generation in one turn each keep their own clock. The first line, a
+        phase change and every terminal phase always pass -- a swallowed
+        "error" is a tile that animates over a dead job.
+        """
+        if not isinstance(state, dict):
+            return
+        job = str(state.get("job") or "")
+        if not job:
+            return
+        phase = str(state.get("phase") or "")
+        clocks = self.__dict__.setdefault("_imgjob_clock", {})
+        now = self._clock()
+        last = clocks.get(job)
+        if (last is not None and phase == last[1]
+                and phase not in IMGJOB_TERMINAL
+                and now - last[0] < IMGJOB_MIN_GAP_S):
+            return
+        clocks[job] = (now, phase)
+        w, h = state.get("width"), state.get("height")
+        # THE FINAL SIZE, KEPT: `image_created` falls back to it when the
+        # file's header cannot be read (a format `image_size` does not parse).
+        kind = str(state.get("kind") or "generate")
+        if isinstance(w, int) and isinstance(h, int):
+            self.__dict__.setdefault("_imgjob_size", {})[job] = (w, h, kind)
+        self._put({"k": "imgjob", "job": job, "kind": kind,
+                   "phase": phase, "stage": str(state.get("stage") or ""),
+                   "i": state.get("i"), "n": state.get("n"),
+                   "eta_s": state.get("eta_s"),
+                   "line": str(state.get("line") or ""),
+                   "w": w if isinstance(w, int) else 0,
+                   "h": h if isinstance(h, int) else 0})
+
+    def image_created(self, path: str, source: str, job: str = "") -> None:
+        """#311. A tool wrote an image: it enters the chat as a card.
+
+        VETTED HERE, ONCE, BEFORE THE PAGE HEARS A PATH (`image_card`): a
+        regular image file by its bytes, inside the working area or an
+        approved outside path. A refused one does not go quiet -- the job's
+        tile says it was saved and why it is not shown, and a picture with
+        no job gets a note, because "nothing appeared" reads as "nothing was
+        made". `Api.push` records the card as a #173 note and as announced,
+        which is what every image_* action later checks against.
+        """
+        card, why = image_card(path)
+        job = str(job or "")
+        if card is None:
+            line = "saved, not shown here: " + why
+            if job:
+                size = self.__dict__.get("_imgjob_size", {}).get(
+                    job, (0, 0, "generate"))
+                self._put({"k": "imgjob", "job": job, "kind": size[2],
+                           "phase": "refused", "stage": "", "i": None,
+                           "n": None, "eta_s": None, "line": line,
+                           "w": size[0], "h": size[1]})
+            else:
+                self._put({"k": "note", "t": "image " + line})
+            return
+        if not (card["w"] and card["h"]) and job:
+            card["w"], card["h"] = self.__dict__.get(
+                "_imgjob_size", {}).get(job, (0, 0, ""))[:2]
+        self._put({"k": "image", "path": card["path"], "name": card["name"],
+                   "w": card["w"], "h": card["h"], "bytes": card["bytes"],
+                   "mtime": card["mtime"], "source": str(source or ""),
+                   "job": job})
+
+    @staticmethod
+    def _clock() -> float:
+        """The throttle's clock; a test replaces it on the instance."""
+        return time.monotonic()
+
     def boundary_escaped(self, name: str, refused: list) -> None:
         """#98, and it is drawn in `auto`'s own colour rather than as a note.
 
@@ -10841,6 +11660,19 @@ class Api:
         # ihrer Aussage: unten gelesen behauptet sie, der Schnitt sei gerade
         # eben gewesen.
         self._notes: list[dict] = []
+        # #311. DIE BILDER, DIE DIESES FENSTER IM CHAT GEZEIGT HAT, Pfad ->
+        # was das Ereignis ueber sie sagte. Jede Bildaktion der Seite (Vorschau,
+        # Lightbox, Papierkorb ...) prueft ihren Pfad HIERGEGEN: eine Seite, die
+        # einen beliebigen Pfad schickt, bekommt nichts -- auch kein Telefon.
+        # Gefuellt in `push`, live wie beim Wiederzeichnen eines Chats.
+        self._images: dict[str, dict] = {}
+        # #308. DIE BILDJOBS, DIE GERADE LAUFEN. Was beim Wiederzeichnen nicht
+        # hier steht und kein Bild bekam, war unterbrochen -- es wird als
+        # stehende Kachel gezeichnet, nie als laufende Animation.
+        self._imgjobs_running: set = set()
+        # #311. Vorschauen nach (Pfad, mtime, Groesse): ein Chat, der zehnmal
+        # gewechselt wird, rechnet jedes Bild einmal.
+        self._thumbs: dict = {}
         # #175. DIE SCHEIBE: das zweite, rahmenlose WebView2, das ueber der
         # Panelflaeche liegt. Erst beim ersten Gebrauch erzeugt -- ein Fenster,
         # das beim Start entsteht, kostet Speicher fuer jeden, der den Browser
@@ -10991,6 +11823,11 @@ class Api:
         before #249 whenever no phone is involved; the phones get the same
         dicts through `Remote.publish(message, to=...)`.
         """
+        # #311. EIN BILD IM CHAT IST AB HIER ANGEKUENDIGT -- auch aus einem
+        # Schnappschuss oder einem Replay: ein Telefon, das einen anderen Chat
+        # ansieht, fragt nach dessen Vorschauen, und die muessen es geben.
+        if message.get("k") == "image" and message.get("path"):
+            self._announce_image(message)
         # #249: `state_snapshot` sammelt, statt zuzustellen. Vor allem anderen,
         # damit ein Schnappschuss weder Kostenzeilen noch Notizen mitschreibt.
         captured = _CAPTURE.get()
@@ -11033,10 +11870,18 @@ class Api:
             if not self._replaying:
                 crow_core.log_note(str(message.get("t")), message.get("k"))
             return
+        # "imgjob" is a session note kind too (the core keeps it for the
+        # restart), but it is ONE mark per job, updated in place below -- the
+        # plain append here would add a second one per progress line.
         if (not self._replaying
-                and message.get("k") in crow_core.SESSION_NOTE_KINDS):
+                and message.get("k") in crow_core.SESSION_NOTE_KINDS
+                and message.get("k") != "imgjob"):
             self._notes.append(dict(message, at=len(self._conversation)))
             del self._notes[:-crow_core.SESSION_NOTES_MAX]
+        # #308. DIE KACHEL EINES BILDJOBS STEHT IM BAND, EINMAL PRO JOB: jede
+        # Fortschrittszeile aktualisiert dieselbe Marke, statt 40 anzuhaengen.
+        if not self._replaying and message.get("k") in ("imgjob", "image"):
+            self._note_imgjob(message)
         kind = message.get("k")
         if kind in _STICKY_KINDS:
             self._remember(message)
@@ -13439,7 +14284,7 @@ class Api:
 
     # ------------------------------------------------------------ #142 images
 
-    def stage_image(self, path: str) -> dict:
+    def stage_image(self, path: str, name: str = "") -> dict:
         """Read one dropped image and hold it for the next send.
 
         THE PAGE NEVER SEES THE BYTES ON DISK, only what comes back here:
@@ -13453,12 +14298,66 @@ class Api:
             self.push({"k": "note", "t": str(exc)})
             return {"chips": self._image_chips()}
         self._staged_images.append({"part": part,
-                                    "name": os.path.basename(path)})
+                                    "name": name or os.path.basename(path)})
         # PUSHED AS WELL AS RETURNED: a drop reads the return value, but
         # `/image <path>` goes through slash_answer, which returns a sentence
         # -- the strip learns about its chip through this event either way.
         self.push({"k": "chips", "c": self._image_chips()})
         return {"chips": self._image_chips()}
+
+    def note_drag_uris(self, uris, target: str = "") -> None:
+        """#312: what the GTK drag data carried, kept for the drop that follows.
+
+        MEASURED 2026-09-27 (crow.log 10:00:46, 10:00:49): WebKitGTK handed the
+        page a file-manager drop with types `text/uri-list`, `text/html`, zero
+        files and an EMPTY uri text, and pywebview's own GTK handler reads the
+        same data with `get_text()`, which is None for a uri-list. The URIs are
+        there one level down -- `Gtk.SelectionData.get_uris()` on the WebKit
+        widget's `drag-data-received` -- and that is where `wire_drop` reads
+        them. WebKit asks for the data on motion too and once per target, so
+        only a non-empty list is kept, and `on_drop` takes it once."""
+        uris = [str(u) for u in (uris or []) if u]
+        if uris:
+            self._drag_uris = (time.monotonic(), uris, str(target or ""))
+
+    def _take_drag_paths(self) -> "tuple[list, str]":
+        stamp, uris, target = getattr(self, "_drag_uris", (0.0, [], ""))
+        self._drag_uris = (0.0, [], "")
+        if not uris or time.monotonic() - stamp > DRAG_URIS_FRESH:
+            return [], target
+        return [p for p in (drag_uri_path(u) for u in uris) if p], target
+
+    def drop_seen(self, info) -> None:
+        """#312: one crow.log line with what a drop carried to the page --
+        its data types, how many File objects, how long the uri text was."""
+        info = info if isinstance(info, dict) else {}
+        crow_core.log_note("drop: page saw types %s, %s file(s), uri text %s chars"
+                           % (list(info.get("types") or [])[:12], info.get("files"),
+                              info.get("uris")), "drop")
+
+    def stage_image_data(self, name: str, data_url: str) -> dict:
+        """#312: a dropped picture that came as bytes from the page.
+
+        Written down like a paste (the part has to outlive the turn, and
+        `image_part` reads a file), staged under the name it was dropped with.
+        Anything that is not a base64 data URL of an image type Crow reads is
+        a note and no chip -- the same outcome as a refused path.
+        """
+        label = os.path.basename(str(name or "")) or "image"
+        suffix = os.path.splitext(label)[1].lower()
+        raw = b""
+        head, _, body = str(data_url or "").partition(",")
+        if head.startswith("data:") and head.endswith(";base64"):
+            try:
+                raw = base64.b64decode(body, validate=True)
+            except ValueError:
+                raw = b""
+        path = write_paste(suffix, raw) if suffix in crow_core.IMAGE_TYPES else ""
+        if not path:
+            self.push({"k": "note", "t": "%s could not be taken from the drop"
+                                         " -- /image <path> works" % label})
+            return {"chips": self._image_chips()}
+        return self.stage_image(path, name=label)
 
     def unstage_image(self, index) -> dict:
         """Drop one staged image, from its chip. Out-of-range is a no-op: the
@@ -14349,8 +15248,7 @@ class Api:
         wird in der Suite UNGEBUNDEN auf einem Sammler aufgerufen, der nur `push`
         kennt, und ein `self._eigene_methode(...)` waere dort ein AttributeError.
         """
-        marks = sorted((n for n in (notes or []) if isinstance(n, dict)),
-                       key=lambda n: int(n.get("at") or 0))
+        marks = _replay_marks(notes, getattr(self, "_imgjobs_running", set()))
 
         def upto(count: int) -> None:
             """Jede Marke, die vor die (count+1)-te Nachricht gehoert."""
@@ -15074,6 +15972,241 @@ class Api:
                              stderr=subprocess.DEVNULL)
         except OSError:
             return "no file manager took " + full
+        return ""
+
+    # -- #308 / #311: the images in the chat, and what a click on one can do --
+
+    def _note_imgjob(self, message: dict) -> None:
+        """#308: a job's tile in the #173 band, one mark per job, and whether
+        it still runs. `image` with a job ends it; the mark stays, and the
+        replay skips a job whose picture arrived."""
+        job = str(message.get("job") or "")
+        if not job:
+            return
+        if message.get("k") == "image":
+            self._imgjobs_running.discard(job)
+            return
+        if message.get("phase") in IMGJOB_TERMINAL | {"refused"}:
+            self._imgjobs_running.discard(job)
+        else:
+            self._imgjobs_running.add(job)
+        # IN PLACE, AT THE FIRST LINE'S POSITION: the tile stands where the
+        # job began, and only its last state is worth keeping.
+        for note in self._notes:
+            if note.get("k") == "imgjob" and note.get("job") == job:
+                note.update(message)
+                return
+        self._notes.append(dict(message, at=len(self._conversation)))
+        del self._notes[:-crow_core.SESSION_NOTES_MAX]
+
+    def _announce_image(self, message: dict) -> None:
+        """#311: this path may be asked for by the page from now on."""
+        full = os.path.abspath(str(message.get("path")))
+        self._images[full] = {k: message.get(k) for k in
+                              ("source", "job", "seed")
+                              if message.get(k) not in (None, "")}
+
+    def _image_vet(self, path) -> "tuple[dict | None, str]":
+        """(card, "") for a path this chat announced and that is still an
+        image on disk, else (None, why). EVERY image_* method starts here.
+
+        TWO QUESTIONS, both asked again on every call: was it announced
+        (`push` recorded it -- `image_created` vetted the place then), and is
+        it STILL a regular image file by its bytes. A file swapped for a
+        script after the card was drawn is refused by the second.
+        """
+        if not isinstance(path, str) or not path or "\0" in path:
+            return None, "no image"
+        full = os.path.abspath(path)
+        seen = self._images.get(full)
+        if seen is None:
+            return None, "not an image this chat showed: " + full
+        card, why = image_file_card(full)
+        if card is None:
+            return None, why
+        card.update(seen)
+        return card, ""
+
+    def image_thumb(self, path: str) -> str:
+        """#311: the chat's preview as a PNG data URL, long edge <= 512 px.
+
+        "" when there is none to make here (Windows, no GdkPixbuf, a refused
+        path): the page then asks `image_full` and shrinks it in a canvas, or
+        says the file is gone. Cached by (path, mtime, size), so a chat opened
+        again does not decode its pictures again.
+        """
+        card, _why = self._image_vet(path)
+        if card is None:
+            return ""
+        key = (card["path"], card["mtime"], card["bytes"])
+        cached = self._thumbs.get(key)
+        if cached is not None:
+            return cached
+        png = image_thumb_png(card["path"])
+        if not png:
+            return ""
+        url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+        self._thumbs[key] = url
+        # A BOUND, NOT A POLICY: 64 previews of ~0.2 MB each.
+        while len(self._thumbs) > 64:
+            self._thumbs.pop(next(iter(self._thumbs)))
+        return url
+
+    def image_full(self, path: str) -> str:
+        """#311: the lightbox's source -- the ORIGINAL pixels, "" when refused.
+
+        THE GTK PAGE LOADS `file://` (it is handed over with `load_html`, base
+        URI the app directory -- measured 2026-09-16), so the desktop on Linux
+        gets a file URL and the bridge carries 60 characters, not 11 million.
+        A PHONE CANNOT: `file://` there names the phone's own disk, so it gets
+        the bytes as a data URL. WINDOWS gets the same, because WebView2
+        refuses `file://` subresources in a page from NavigateToString (#311
+        Research); the virtual-host mapping is the better road and is not
+        built yet.
+        """
+        card, _why = self._image_vet(path)
+        if card is None:
+            return ""
+        if _client() != DESKTOP or crow_platform.IS_WINDOWS:
+            try:
+                return data_url(card["path"], card["mime"])
+            except OSError:
+                return ""
+        import pathlib
+        return pathlib.Path(card["path"]).as_uri()
+
+    def image_info(self, path: str) -> dict:
+        """#311: what the lightbox's (i) panel lists, from the vetted file and
+        the event that announced it. `ok` False carries the reason."""
+        card, why = self._image_vet(path)
+        if card is None:
+            return {"ok": False, "why": why}
+        info = {"ok": True}
+        for key in ("path", "name", "w", "h", "bytes", "mtime", "format",
+                    "mime", "source", "job", "seed"):
+            if card.get(key) not in (None, ""):
+                info[key] = card[key]
+        return info
+
+    def image_reveal(self, path: str) -> str:
+        """#311: the file manager, with THIS FILE SELECTED where it can be.
+
+        FileManager1 first (Nautilus selects the file); nobody on the bus and
+        it is #229's `reveal_command` -- the folder, which on Windows selects
+        the file too (`explorer /select,`).
+        """
+        card, why = self._image_vet(path)
+        if card is None:
+            return why
+        if show_in_file_manager(card["path"]):
+            return ""
+        try:
+            subprocess.Popen(crow_platform.reveal_command(card["path"], False),
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError:
+            return "no file manager took " + card["path"]
+        return ""
+
+    def image_copy(self, path: str) -> str:
+        """#311: the PICTURE on the clipboard, typed, "" when it arrived.
+
+        `Api.copy`'s shape and its measured rule: the owner outlives the call,
+        so output goes to /dev/null and a timeout is success. The path copy is
+        `Api.copy` itself -- one clipboard door for text.
+        """
+        card, why = self._image_vet(path)
+        if card is None:
+            return why
+        for argv in image_copy_argvs(card["path"], card["mime"]):
+            if not shutil.which(argv[0]):
+                continue
+            try:
+                if argv[0] == "wl-copy":
+                    with open(card["path"], "rb") as fh:
+                        done = subprocess.run(argv, stdin=fh,
+                                              stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL,
+                                              timeout=5)
+                else:
+                    done = subprocess.run(
+                        argv, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        env=dict(os.environ, CROW_IMAGE=card["path"]),
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        timeout=15)
+            except subprocess.TimeoutExpired:
+                return ""
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if done.returncode == 0:
+                return ""
+        return ("no clipboard tool for images here" if not crow_platform.IS_WINDOWS
+                else "the clipboard refused the image")
+
+    def image_save_as(self, path: str) -> str:
+        """#311: a SAVE dialog and a byte-for-byte copy (`copy2` keeps the
+        mtime). "" when cancelled; the sentence to show otherwise. Raised
+        from the bridge thread, like `pick_root`'s dialog. A PHONE never calls
+        this: its Download is an `<a download>` on `image_full`'s data URL."""
+        card, why = self._image_vet(path)
+        if card is None:
+            return why
+        import webview
+        try:
+            picked = self._window.create_file_dialog(
+                webview.FileDialog.SAVE,
+                directory=os.path.dirname(card["path"]),
+                save_filename=card["name"])
+        except Exception:                       # noqa: BLE001 -- cancelled
+            picked = None
+        if not picked:
+            return ""
+        target = os.path.abspath(picked[0] if isinstance(picked, (list, tuple))
+                                 else str(picked))
+        if target == card["path"]:
+            return "that is the file itself"
+        try:
+            shutil.copy2(card["path"], target)
+        except (OSError, shutil.Error) as exc:
+            return "not saved: %s" % exc
+        return "saved as " + target
+
+    def image_open(self, path: str) -> str:
+        """#311: the default image viewer -- the ONE place Crow opens a file.
+
+        #229 WIDENED FOR VETTED IMAGES ONLY, and on purpose: `reveal_command`
+        never opens a file because a `.desktop` or `.bat` named in a model's
+        text can run. `_image_vet` has just read this file's magic bytes and
+        found an image of its extension's type, so its default program is an
+        image viewer, not an interpreter.
+        """
+        card, why = self._image_vet(path)
+        if card is None:
+            return why
+        argv = crow_platform.opener_command(card["path"])
+        try:
+            if argv is None:
+                os.startfile(card["path"])       # noqa: S606 -- vetted image
+            else:
+                subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except OSError:
+            return "no viewer took " + card["path"]
+        return ""
+
+    def image_trash(self, path: str) -> str:
+        """#311: into the desktop's trash, "" when it went. NEVER UNLINKED --
+        `trash_file` has no fallback that deletes, and a mount without a trash
+        refuses with the reason."""
+        card, why = self._image_vet(path)
+        if card is None:
+            return why
+        why = trash_file(card["path"])
+        if why:
+            return why
+        for key in [k for k in self._thumbs if k[0] == card["path"]]:
+            self._thumbs.pop(key, None)
         return ""
 
     def update_check(self) -> dict:
@@ -16048,6 +17181,11 @@ class Api:
         files = ((event or {}).get("dataTransfer") or {}).get("files") or []
         paths = [f.get("pywebviewFullPath") for f in files
                  if isinstance(f, dict) and f.get("pywebviewFullPath")]
+        # #312: no path from pywebview -> the URIs the GTK drag data carried
+        source = "pywebview"
+        if not paths:
+            paths, target = self._take_drag_paths()
+            source = "the GTK drag data (%s)" % (target or "no target")
         # A DROP THAT CARRIED NO PATH IS SAID OUT LOUD, and it is not a
         # theoretical case: the path is attached by the backend, out of what the
         # toolkit's own drag handler collected, and a source that hands over
@@ -16055,9 +17193,20 @@ class Api:
         # speaking a flavour the handler does not read -- leaves the name and
         # nothing else. Silence there looks exactly like a window that ignored
         # the drop, and the way round it (type the path) is one nobody guesses.
-        if files and not paths:
+        # #312: a picture without a path is not lost -- the page reads its
+        # bytes (`dropBytes`), so only a nameless OTHER file is said.
+        rest = [f for f in files if isinstance(f, dict)
+                and not f.get("pywebviewFullPath")
+                and os.path.splitext(str(f.get("name") or ""))[1].lower()
+                not in crow_core.IMAGE_TYPES]
+        if rest:
             self.push({"k": "note", "t": "that drop carried no location on disk"
                                          " -- typing the path works"})
+        crow_core.log_note("drop: %d file(s) %s, %d path(s) from %s: %s"
+                           % (len(files), [str(f.get("name")) for f in files
+                                           if isinstance(f, dict)][:8], len(paths),
+                              source, [os.path.basename(p) for p in paths][:8]),
+                           "drop")
         self.push({"k": "drop", "paths": paths})
 
     def paste_clipboard(self) -> str:
@@ -17270,6 +18419,7 @@ def main(argv: list[str] | None = None) -> int:
             "      pip install pywebview\n"
             "      The terminal client needs nothing: python cli/crow.py\n")
         return 2
+    daemon_bridge_threads()
 
     # #249: the chain lives in `stamped_page`, shared with the phone's
     # variant of the same page.
@@ -17344,6 +18494,8 @@ def main(argv: list[str] | None = None) -> int:
     if not crow_platform.IS_WINDOWS:
         window.events.before_show += api.pane_embed
     threading.Thread(target=api.pump, daemon=True).start()
+    # #300: the image server warms while the window opens, if the core has one.
+    warm_image_server()
     # #249: `remote_enabled` -- the mirror starts with the window, so the
     # phone's home-screen icon works whenever Crow is open. Its sentence goes
     # to crow.log; a window must open even when the LAN is not there.
@@ -17383,12 +18535,36 @@ def main(argv: list[str] | None = None) -> int:
     # a path at all: the page receives a File with a name and no location, while
     # pywebview adds `pywebviewFullPath` on this side. Wired on `loaded` rather
     # than beside create_window, because window.dom needs a document.
+    def wire_gtk_drag_uris() -> None:
+        """#312: read the file manager's URIs where GTK has them -- see
+        `Api.note_drag_uris`. Connected on the GTK main thread."""
+        from gi.repository import GLib
+        from webview.platforms import gtk as wgtk
+
+        def received(_widget, _context, _x, _y, data, _info, _time) -> None:
+            try:
+                api.note_drag_uris(data.get_uris() or [], data.get_data_type().name())
+            except Exception:          # noqa: BLE001 - a drag never breaks the window
+                pass
+
+        def hook() -> bool:
+            view = wgtk.BrowserView.instances.get(window.uid)
+            if view is not None:
+                view.webview.connect("drag-data-received", received)
+            else:
+                crow_core.log_note("drop: no GTK view to read drag URIs from", "drop")
+            return False
+
+        GLib.idle_add(hook)
+
     def wire_drop(*_) -> None:
         try:
             from webview.dom import DOMEventHandler
 
             window.dom.document.events.drop += DOMEventHandler(
                 api.on_drop, prevent_default=True)
+            if not crow_platform.IS_WINDOWS:
+                wire_gtk_drag_uris()
         except Exception:              # noqa: BLE001 - the window still works
             # SAID, NOT SWALLOWED SILENTLY: dropping is a convenience, and a
             # window that opens without it is still a window. The page keeps its
@@ -17412,8 +18588,101 @@ def main(argv: list[str] | None = None) -> int:
         webview.start(styles, window)
     else:
         webview.start(styles, window, gui="gtk", icon=icon_png(256) or None)
+    arm_exit_watchdog()
     return 0
 
+
+def daemon_bridge_threads() -> None:
+    """#313, the cause. pywebview runs every JS-API call and every DOM event
+    handler in a plain `Thread` (webview/util.py:303, :335 -- non-daemon) and
+    hands a call's answer back with `evaluate_js`, which on GTK waits on a
+    semaphore with no timeout for WebKit's asynchronous reply
+    (platforms/gtk.py:693-695). An answer still in flight when the window goes
+    never gets that reply -- the GTK loop has ended -- and Python's exit joins
+    that thread forever. MEASURED: the exit watchdog's stacks on robin's close
+    (crow.log 2026-09-27 09:39:45: MainThread in `threading._shutdown`,
+    `Thread-14 (_call)` in `evaluate_js`); a harness with one answer in flight
+    at the close hangs 2 of 2 without this and ends 2 of 2 with it. Nothing
+    Crow must finish runs on those threads after the window is gone: `close`
+    saves before it destroys."""
+    import functools
+    import webview.util as wutil
+    if getattr(wutil.Thread, "func", None) is not threading.Thread:
+        wutil.Thread = functools.partial(threading.Thread, daemon=True)
+
+
+# #313. THE WINDOW IS SHUT, SO THE PROCESS ENDS -- within seconds.
+# robin, 2026-09-27: after Crow's X the process stayed (pid 34193: main thread in
+# a futex wait, 43 threads, SIGINT ignored, SIGTERM ended it), and from a
+# terminal Ctrl+C was always needed on top. Python's exit joins every non-daemon
+# thread and runs the atexit hooks; one that never returns keeps a window-less
+# process alive. After EXIT_GRACE seconds this says which threads are still
+# there, with their stacks, in Crow's log, runs the one atexit hook Crow owns
+# (the MCP children) and ends the process.
+EXIT_GRACE = 5.0
+# #312: how old the GTK drag data may be when the drop takes it (a drag that
+# left the window without dropping leaves it behind)
+DRAG_URIS_FRESH = 30.0
+
+
+def arm_exit_watchdog(grace: float = EXIT_GRACE, end=os._exit) -> threading.Thread:
+    """Start the daemon timer that ends a process the window has already left."""
+    def fire() -> None:
+        time.sleep(grace)
+        try:
+            alive = [t for t in threading.enumerate()
+                     if t is not threading.current_thread()]
+            crow_core.log_note(
+                "exit: the process was still alive %.0f s after the window closed; "
+                "threads: %s -- ending it" % (grace, ", ".join(
+                    "%s%s" % (t.name, "" if t.daemon else " (non-daemon)")
+                    for t in alive) or "none"), "exit")
+            import faulthandler
+            with open(crow_core.LOG_FILE, "a", encoding="utf-8") as fh:
+                fh.write("---- exit watchdog: stacks of every thread ----\n")
+                fh.flush()
+                faulthandler.dump_traceback(file=fh, all_threads=True)
+            crow_core.forget_mcp_servers()
+        except Exception:                  # noqa: BLE001 - ending anyway
+            pass
+        end(0)
+    watchdog = threading.Thread(target=fire, name="crow-exit-watchdog", daemon=True)
+    watchdog.start()
+    return watchdog
+
+
+
+# #308. WAS EINE BILDJOB-KACHEL BEIM WIEDERZEICHNEN BEHAELT: der Fehler und das
+# Anhalten sagen, was geschah; "refused" nennt den Grund. Jede andere Phase
+# eines Jobs, der weder laeuft noch ein Bild bekam, war unterbrochen.
+IMGJOB_KEPT_ON_REPLAY = frozenset({"error", "stopped", "refused"})
+
+
+def _replay_marks(notes: "list | None", running) -> list:
+    """#173's marks in drawing order, with #308's job tiles settled.
+
+    A JOB WHOSE PICTURE ARRIVED IS NOT DRAWN AT ALL: the `image` mark draws
+    the card, and a tile drawn first and swapped a moment later would flash.
+    A JOB THAT STILL RUNS keeps its last line -- the live progress goes on
+    updating that tile. ANY OTHER ONE WAS INTERRUPTED: the process ended
+    mid-job, nobody will ever finish that tile, and an animation over it
+    would claim work that is not happening.
+    """
+    marks = sorted((n for n in (notes or []) if isinstance(n, dict)),
+                   key=lambda n: int(n.get("at") or 0))
+    pictured = {n.get("job") for n in marks
+                if n.get("k") == "image" and n.get("job")}
+    out = []
+    for mark in marks:
+        if mark.get("k") == "imgjob":
+            job = mark.get("job")
+            if not job or job in pictured:
+                continue
+            if (job not in running
+                    and mark.get("phase") not in IMGJOB_KEPT_ON_REPLAY):
+                mark = dict(mark, phase="interrupted", eta_s=None)
+        out.append(mark)
+    return out
 
 
 def _replay_rows(api, messages: list, upto) -> None:

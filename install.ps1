@@ -67,7 +67,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "2.7.0",
+    [string] $Version   = "2.8.0",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -818,9 +818,10 @@ function Test-RunsFromDir {
 }
 
 function Get-LockingServer {
-    <# The llama-server running out of $BinDir, or $null when none is. #>
+    <# The llama-server -- or, since #314, the image tools' sd-server -- running
+       out of $BinDir, or $null when none is. Both hold their DLLs in bin\. #>
     param([string] $BinDir)
-    foreach ($p in @(Get-Process -Name "llama-server" -ErrorAction SilentlyContinue)) {
+    foreach ($p in @(Get-Process -Name "llama-server", "sd-server" -ErrorAction SilentlyContinue)) {
         # .Path throws for a process this user cannot open. Not being able to
         # look is not the same as nothing being there, but it is all we have.
         $exe = $null
@@ -1719,7 +1720,7 @@ New-Item -ItemType Directory -Force -Path $InstallTo | Out-Null
 $binDir = Join-Path $InstallTo "bin"
 $holder = if (Test-Path -LiteralPath $binDir) { Get-LockingServer -BinDir $binDir } else { $null }
 if ($holder) {
-    Write-Item "server running" "llama-server.exe (pid $($holder.Id)) is holding $binDir" "warn"
+    Write-Item "server running" "$($holder.ProcessName).exe (pid $($holder.Id)) is holding $binDir" "warn"
     $aside = Move-LockedAside -BinDir $binDir
     if ($aside.Moved -gt 0) {
         Write-Item "moved aside" "$($aside.Moved) files renamed -- the running server keeps the old ones" "ok"
@@ -1729,7 +1730,7 @@ if ($holder) {
     # why, and the user has already waited for a download by then.
     if ($aside.Failed.Count -gt 0) {
         Write-Item "could not move" "$($aside.Failed -join ', ')" "fail"
-        Write-Item "stop llama-server and run this again" "those files cannot be overwritten while they are held" "fail"
+        Write-Item "stop $($holder.ProcessName) and run this again" "those files cannot be overwritten while they are held" "fail"
         Exit-Run 1
         return
     }

@@ -35,6 +35,7 @@ bash install.sh --models ~/Projects/models/qwen3.8-flash-next
 | `--tailscale` | also print what is still missing for the phone over HTTPS — see [Phone over Tailscale](#phone-over-tailscale) |
 | `--pathtracer` | also switch on the `voxel-diorama` skill — see [Voxel kit](voxel-kit.md) |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
+| `--build-image-server` | build `sd-server` + `sd-cli` for the image tools now — see [Image server](#image-server). `CROW_BUILD_IMAGE_SERVER=1` is the same |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
 | `--no-engine` | do not look for the engine at all |
 | `--to DIR` | install root, same as `CROW_HOME=DIR` |
@@ -149,6 +150,34 @@ abort (upstream #28403, #25060).
 
 `$CROW_HOME/cuda` must stay where it is: the binary reaches its CUDA libraries through a
 `DT_RPATH` into that directory. Deleting it breaks the binary.
+
+---
+
+## Image server
+
+```bash
+bash tools/build-sd-server.sh
+```
+
+`generate_image` and `edit_image` run on `sd-server` (see [tools](../reference/tools.md#generate_image-and-edit_image-300-308-311)).
+It is built like the engine, into `$CROW_HOME/bin`: stable-diffusion.cpp pin `2f88688`
+(tag `master-920-2f88688`, the tree the image tools were measured on), `SD_CUDA=ON`, `sm_120`,
+with the engine's CUDA 13.3 prefix and cmake/ninja. Without that prefix it downloads the same
+~970 MB first. The web UI is left out (`SD_SERVER_BUILD_FRONTEND=OFF`): building it needs
+`pnpm` and the network, and Crow uses only the HTTP API.
+
+| | |
+|---|---|
+| time | 3 min 10 s for the full build (`JOBS=8`, 24 cores), 1.4 s for a re-run that changes nothing |
+| disk | ~1 GB: the build directory ~510 MB, the two binaries 110 MB each; ~0.3 GB more for the source |
+| check | `ldd` resolves `libcudart`, `libcublas`, `libcublasLt` `.so.13` into `$CROW_HOME/cuda/lib`; both binaries report `version master-920-2f88688, commit 2f88688` |
+| `SD_SRC_DIR=<tree>` | build an existing checkout of the pin; it is verified and left untouched |
+| `JOBS=8` / `CLEAN=1` | as for the engine |
+
+An `sd-cli` or `sd-server` of another commit already in `bin/` is kept as
+`sd-cli-<commit>`, never deleted. The model is separate: Qwen-Image 2.1 is read from
+`$CROW_IMAGE_MODEL_DIR`, else `<models>/qwen-image-2.1`, else `qwen-image-2.1` beside the tree
+`<install>/models` links to. `install.sh --build-image-server` says which one it found.
 
 ---
 
@@ -286,14 +315,14 @@ Full setup and troubleshooting: [Phone over Tailscale](remote-tailscale.md).
 
 ---
 
-## The tools get a ceiling of their own (#213, #218)
+## The tools get a ceiling of their own (#213, #218, #309)
 
 The server is not the only process that gets a scope. When `systemd-run` is on the PATH and the
 user manager answers, two tools start their children in a transient user scope as well:
 
-| | `render_page`'s browser (#213) | `run_command`'s shell (#218) |
+| | `render_page`'s browser (#213) | `run_command`'s shell (#218, #309) |
 |---|---|---|
-| bounds | `MemoryHigh=5G`, `MemoryMax=6G`, `MemorySwapMax=0` | `MemoryHigh=7G`, `MemoryMax=8G`, `MemorySwapMax=0`, `OOMPolicy=kill` |
+| bounds | `MemoryHigh=5G`, `MemoryMax=6G`, `MemorySwapMax=0` | `MemoryMax=8G`, `MemorySwapMax=0`, `OOMPolicy=kill` — no `MemoryHigh` (#309) |
 | move the bound | `CROW_RENDER_MEMORY_MAX=<size>` (`none` keeps only the swap cap) | `CROW_COMMAND_MEMORY_MAX=<size>` (`none` keeps only the swap cap) |
 | switch off | `CROW_RENDER_SCOPE=0` | `CROW_COMMAND_SCOPE=0` |
 | GPU only (#293) | default: the GPU when at least 512 MiB of VRAM are free; below that a local crow-nest serve is asked to lend the shortfall for the capture (#297, crow-nest#117), otherwise an ENVIRONMENT error and no image; `CROW_RENDER_GL=angle` skips that gate (`swiftshader` is refused); `CROW_RENDER_ANGLE=vulkan\|default` pins the ANGLE backend (default: vulkan, then default) | — |
@@ -306,6 +335,15 @@ measured 2026-09-22 as each scope's own `memory.peak`: the diorama's three.js es
 `OOMPolicy=kill` a command at the ceiling dies whole, and the result says it was the ceiling; a
 timeout or capture-cap kill takes the whole process group and the scope. systemd-run's own
 `${VAR}`/`$$` expansion is switched off (`--expand-environment=no`, systemd 254 or newer).
+
+No throttle below the command ceiling (#309): on 2026-09-27 an image-generation load started in
+the background sat at 7.4 GiB under the old `MemoryHigh=7G` for 10 min 47 s, loading at
+~11 MB/s instead of ~5 GB/s, and never reached the 8G kill. A command over its budget now dies at
+`MemoryMax`. A job a command leaves in the background stays in that command's scope; the next
+tool result starts with a `note:` when that job was killed at its ceiling or has been stalled on
+memory for at least 50 % of the last 60 s (`memory.pressure` `full avg60`). A heavy job that
+really needs more (Qwen-Image's load needs ~31 GB) needs a larger ceiling at GUI launch:
+`CROW_COMMAND_MEMORY_MAX=40G`.
 
 Without `systemd-run` both run as before, bounded by their clocks and capture caps only;
 `install.sh` warns about it in the preflight. The 8G ceiling does not scale with the machine's
@@ -343,6 +381,7 @@ day's session would have carried their error.
 | The window is tiled at a narrow width and the composer is cut off | the float rule is not loaded (it is optional) | add the line from the table above and `hyprctl reload` |
 | `crow: this window needs pywebview` | the venv is not the one the launcher points at | `bash install.sh` again — it reuses the venv and repairs the launcher |
 | `no llama-server to run. Tried: …` | the engine has not been built | `bash tools/build-llama-server.sh` |
+| `error: the image server is not installed: no sd-server in …` | the image server has not been built | `bash tools/build-sd-server.sh` |
 | `model 'flash-next-q2-k-xl' is not on disk. Tried: …` | `<install>/models` points at the wrong tree, or the download is not finished | the message names every path it tried; `ls -l ~/.local/share/crow/models` says where the link goes, and `install.sh --models DIR` re-points it |
 | A generic icon, or a window the launcher cannot name | the icon cache, or a `.desktop` entry from before the app id existed | `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`, then log out and in |
 | `desktop-file-validate` hints about two main categories | `Categories=Development;Utility;` — the entry may appear in two menus | nothing. It is a hint, not an error |

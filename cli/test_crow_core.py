@@ -2226,10 +2226,14 @@ class ReleaseLevelTests(TurnLoopCase):
         # `build_bundle` seit #212: executing wie render_page -- es startet
         # esbuild und legt eine Datei an, und es ersetzt die run_command-Zeilen,
         # mit denen das Modell esbuild vorher selbst gesucht und gefahren hat.
+        # `generate_image` / `edit_image` seit #300 Phase 3: executing wie
+        # render_page -- sie starten den Bildserver, halten die GPU minutenlang
+        # und legen eine Datei an.
         self.assertEqual(asks["manual"],
-                         ["append_file", "build_bundle", "edit_file", "render_page",
-                          "run_command", "write_file"])
-        self.assertEqual(asks["allowedit"], ["build_bundle", "render_page", "run_command"])
+                         ["append_file", "build_bundle", "edit_file", "edit_image",
+                          "generate_image", "render_page", "run_command", "write_file"])
+        self.assertEqual(asks["allowedit"], ["build_bundle", "edit_image", "generate_image",
+                                             "render_page", "run_command"])
         self.assertEqual(asks["auto"], [])
 
     def test_an_unknown_tool_is_treated_as_the_strictest_class(self):
@@ -5351,6 +5355,57 @@ class TurnStateTests(TurnLoopCase):
             yield  # pragma: no cover -- makes this a generator
 
         return transport
+
+
+@unittest.skipIf(crow_platform.IS_WINDOWS, "the command is POSIX sh")
+class StopDuringAToolTests(TurnLoopCase):
+    """#310: Stop pressed while a round's tool runs.
+
+    2026-09-27, measured: Stop set INTERRUPT, nothing read it while
+    run_command ran, every remaining call of the round still ran, and the next
+    request still went to serve (engine.log: 535 tokens prefilled, 2 generated,
+    "client gone"). Now the running command ends, the calls after it do not
+    start, and no further request is sent.
+    """
+
+    def setUp(self):
+        super().setUp()
+        crow_core.set_root(self.work)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "log_note", crow_core.log_note)
+        self.notes = []
+        crow_core.log_note = lambda text, kind="note": self.notes.append((kind, text))
+
+    def test_stop_mid_round_ends_the_turn_without_another_request(self):
+        marker = os.path.join(self.work, "second-ran")
+        self.serve([{"content": "two calls"},
+                    _call_delta("run_command", json.dumps(
+                        {"command": "sleep 30", "cwd": self.work}), 0, "c0"),
+                    _call_delta("run_command", json.dumps(
+                        {"command": "touch %s" % marker, "cwd": self.work}), 1, "c1")])
+        self.serve([{"content": "the round after -- must never be asked for"}])
+        timer = threading.Timer(1.0, crow_core.INTERRUPT.set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        talk = self.conversation()
+        began = time.monotonic()
+        result = self.turn(talk, max_tool_rounds=4, approve=lambda n, a: "yes")
+        took = time.monotonic() - began
+        self.assertLessEqual(took, 1.0 + 3.0, "the Stop took %.1f s" % took)
+        self.assertEqual(len(self.bodies), 1, "a request went out after Stop")
+        self.assertTrue(result.stopped)
+        self.assertIn("interrupted", self.events.names)
+        self.assertFalse(crow_core.INTERRUPT.is_set(), "the turn did not consume its flag")
+        tools = [m["content"] for m in talk.payload() if m["role"] == "tool"]
+        self.assertEqual(len(tools), 2, tools)
+        self.assertTrue(tools[0].startswith("error: stopped by the user after "), tools[0])
+        self.assertEqual(tools[1], crow_core.STOPPED + crow_core.STOPPED_NOT_RUN)
+        self.assertFalse(os.path.exists(marker), "the call after the Stop ran")
+        self.assertPrefixIsWhole(talk)
+        self.assertEqual((result.cost.tool_errors, result.cost.tool_declined), (0, 2),
+                         "a Stop was booked as a failure")
+        self.assertTrue(any("stop pressed during run_command" in t for _k, t in self.notes),
+                        self.notes)
 
 
 class TheLoopLeftTheReplTests(unittest.TestCase):
@@ -18386,6 +18441,10 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="crow-218-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self._saved = (crow_core.COMMAND_CAPTURE_BYTES, crow_core.COMMAND_TIMEOUT)
+        # #309: a job another test left in the background is not this one's.
+        jobs = getattr(crow_core, "_BACKGROUND_JOBS", [])
+        jobs.clear()
+        self.addCleanup(jobs.clear)
         for name in ("CROW_COMMAND_MEMORY_MAX", "CROW_COMMAND_SCOPE"):
             self._env(name, "")
         self.stray = []
@@ -18562,6 +18621,86 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         pid = self._pid("bg.pid")
         self.assertFalse(_gone(pid, 0.3), "a finished command's background was killed")
 
+    # ---- #310: Stop
+
+    def _stopped_after(self, command, after=1.0):
+        """`command` through run_command on a thread; Stop (INTERRUPT) after
+        `after` s. Returns (result, seconds from the Stop to the return)."""
+        self.addCleanup(crow_core.INTERRUPT.clear)
+        crow_core.INTERRUPT.clear()
+        box = {}
+
+        def call():
+            box["out"] = crow_core.tool_run_command(command, cwd=self.dir)
+            box["end"] = time.monotonic()
+
+        worker = threading.Thread(target=call, daemon=True)
+        worker.start()
+        time.sleep(after)
+        crow_core.INTERRUPT.set()
+        pressed = time.monotonic()
+        worker.join(60)
+        self.assertFalse(worker.is_alive(), "run_command did not return")
+        return box["out"], box["end"] - pressed
+
+    def test_stop_ends_a_running_command_and_what_it_started(self):
+        """#310: Stop pressed during `sleep 30` ends it within 3 s (the
+        ticket's threshold), the result says the user stopped it and keeps
+        what was printed, and the call's own background dies with it."""
+        out, took = self._stopped_after(
+            "echo started; sleep 300 & echo $! > bg.pid; sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(out.startswith("error: stopped by the user after "), out)
+        self.assertIn("\nstarted", out)
+        self.assertTrue(_gone(self._pid("bg.pid")),
+                        "the stopped call's own background outlived the Stop")
+
+    def test_stop_ends_it_without_a_scope_too(self):
+        """The process group alone, as on a machine without systemd-run."""
+        self._env("CROW_COMMAND_SCOPE", "0")
+        out, took = self._stopped_after("sleep 300 & echo $! > bg.pid; sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(out.startswith("error: stopped by the user after "), out)
+        self.assertTrue(_gone(self._pid("bg.pid")))
+
+    def test_stop_asks_politely_first(self):
+        """SIGTERM before SIGKILL (openai/codex#22729): a command that
+        cleans up on TERM gets to."""
+        out, took = self._stopped_after(
+            "trap 'echo cleaned > term.txt; exit 0' TERM; sleep 30 & wait")
+        self.assertLessEqual(took, 3.0, out)
+        with open(os.path.join(self.dir, "term.txt")) as fh:
+            self.assertEqual(fh.read().strip(), "cleaned")
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_stop_empties_the_calls_scope(self):
+        """#310 expected result 4: the stopped call's unit is gone, and a
+        descendant that left the group by setsid with it."""
+        units = []
+        real = crow_platform.command_scope_prefix
+        self.addCleanup(setattr, crow_platform, "command_scope_prefix", real)
+        crow_platform.command_scope_prefix = lambda unit: units.append(unit) or real(unit)
+        out, took = self._stopped_after(
+            "setsid sleep 300 & echo $! > esc.pid; sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(_gone(self._pid("esc.pid")), "the setsid child outlived Stop")
+        state = subprocess.run(["systemctl", "--user", "is-active", units[0] + ".scope"],
+                               capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(state, "active", self._witnesses())
+
+    def test_stop_leaves_the_background_of_an_earlier_call(self):
+        """#310, the contract above: a job an EARLIER call put in the
+        background was detached on purpose; Stop of a later call ends that
+        call only."""
+        first = crow_core.tool_run_command(
+            "nohup sleep 600 >/dev/null 2>&1 & echo $! > bg.pid", cwd=self.dir)
+        self.assertEqual(first, "[exit 0]")
+        out, took = self._stopped_after("sleep 30")
+        self.assertLessEqual(took, 3.0, out)
+        self.assertTrue(out.startswith("error: stopped by the user after "), out)
+        self.assertFalse(_gone(self._pid("bg.pid"), 0.3),
+                         "Stop killed an earlier call's background job")
+
     # ---- the fallback
 
     def test_without_systemd_run_the_shell_runs_as_before(self):
@@ -18599,7 +18738,7 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         self.assertIn("--expand-environment=no", prefix)
         props = [prefix[i + 1] for i, a in enumerate(prefix) if a == "-p"]
         self.assertEqual(sorted(props), ["CollectMode=inactive-or-failed",
-                                         "MemoryHigh=7G", "MemoryMax=8G",
+                                         "MemoryMax=8G",
                                          "MemorySwapMax=0", "OOMPolicy=kill"])
         self.assertEqual(prefix[-1], "--")
         crow_platform._SYSTEMD_VERSIONS["/usr/bin/systemd-run"] = 253
@@ -18609,12 +18748,52 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
 
     def test_the_ceiling_moves_with_its_variable(self):
         self.assertEqual(crow_platform.command_memory_bounds(),
-                         {"MemorySwapMax": "0", "MemoryHigh": "7G", "MemoryMax": "8G"})
+                         {"MemorySwapMax": "0", "MemoryMax": "8G"})
         self._env("CROW_COMMAND_MEMORY_MAX", "12G")
         self.assertEqual(crow_platform.command_memory_bounds(),
                          {"MemorySwapMax": "0", "MemoryMax": "12G"})
         self._env("CROW_COMMAND_MEMORY_MAX", "none")
         self.assertEqual(crow_platform.command_memory_bounds(), {"MemorySwapMax": "0"})
+
+    # ---- #309: the ceiling kills, and what outlives the call is looked at again
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_the_default_scope_has_no_throttle_below_the_ceiling(self):
+        """#309, 2026-09-27: under MemoryHigh=7G a Qwen-Image load sat at
+        7.40 GiB for 10 min 47 s, full avg60=88.13, never reaching the 8G
+        kill. The kernel's own files for the default scope: memory.high is
+        `max`, memory.max the ceiling."""
+        out = crow_core.tool_run_command(
+            'd=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); '
+            'cat "$d/memory.high" "$d/memory.max"', cwd=self.dir)
+        self.assertEqual(out, "[exit 0]\nmax\n%d" % (8 << 30))
+
+    def _poll(self, command):
+        crow_core._SEEN.clear()
+        out, _ = crow_core.run_tool_cached(
+            "run_command", json.dumps({"command": command, "cwd": self.dir}))
+        return out
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_a_background_job_killed_at_its_ceiling_is_named_in_the_next_result(self):
+        """#309: the measured launch returned `[exit 0]`, and every later poll
+        read "RUNNING" or "GONE". The kill of a job that outlived its call is
+        now a note at the head of the next result -- once, and only for it."""
+        self._env("CROW_COMMAND_MEMORY_MAX", "100M")
+        launch = self._poll("nohup sh -c 'sleep 1; %s' > hog.log 2>&1 &"
+                            % self._hog().replace("'", ""))
+        self.assertEqual(launch, "[exit 0]")
+        out = self._poll("sleep 4; echo polled")
+        self.assertTrue(out.startswith(
+            "note: the background job from `nohup sh -c 'sleep 1; "), out + "\n" + self._witnesses())
+        self.assertIn("was killed at its memory ceiling (MemoryMax=100M, no swap)", out)
+        self.assertTrue(out.endswith("\n[exit 0]\npolled"), out)
+        self.assertEqual(out.count("note: "), 1)
+        # said once; and a background job that ends by itself says nothing
+        self.assertEqual(self._poll("sleep 1 >/dev/null 2>&1 & echo polled"),
+                         "[exit 0]\npolled")
+        self.assertEqual(self._poll("sleep 2; echo polled"), "[exit 0]\npolled")
+        self.assertEqual(getattr(crow_core, "_BACKGROUND_JOBS", None), [])
 
     # ---- the note
 
@@ -18649,6 +18828,135 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
                                          cwd=self.dir)
         self.assertTrue(out.startswith("[exit 0]\nchromium --headless=new"), out)
         self.assertIn("\nnote: render_page takes this screenshot", out)
+
+
+class BackgroundJobsAreLookedAtAgainTests(unittest.TestCase):
+    """#309: a job that outlives its run_command call is read again -- its
+    scope's memory.pressure and whether it died at the ceiling -- and what
+    the model cannot see from inside the scope comes back as a note.
+
+    A fake cgroup tree stands in for /sys/fs/cgroup, with the numbers the
+    lead read off crow-cmd-548410-bcdb59bc.scope on 2026-09-27."""
+
+    UNIT = "crow-cmd-548410-bcdb59bc"
+    SD_CLI = ("nohup ~/.local/share/crow/bin/sd-cli --diffusion-model "
+              "transformer/ --max-vram 7 > gen.log 2>&1 &")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="crow-309-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.scope = os.path.join(self.root, "slice", self.UNIT + ".scope")
+        os.makedirs(self.scope)
+        self.kills = [3]
+        for patch in (mock.patch.object(crow_platform, "_CGROUP_ROOT", self.root,
+                                        create=True),
+                      mock.patch.object(crow_platform, "_SLICE_CGROUP", ["/slice"]),
+                      mock.patch.object(crow_platform, "IS_WINDOWS", False),
+                      mock.patch.object(crow_platform, "session_oom_kills",
+                                        side_effect=lambda: self.kills[0]),
+                      mock.patch.dict(os.environ, {"CROW_COMMAND_MEMORY_MAX": ""})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        jobs = getattr(crow_core, "_BACKGROUND_JOBS", [])
+        jobs.clear()
+        self.addCleanup(jobs.clear)
+        self._write(procs="550628\n550629\n", current=7950123008, high="max",
+                    maximum=8589934592, full=88.13)
+
+    def _write(self, procs, current=0, high="max", maximum=8589934592, full=0.0):
+        files = {"cgroup.procs": procs, "memory.current": "%d\n" % current,
+                 "memory.high": high + "\n", "memory.max": "%d\n" % maximum,
+                 "memory.pressure": "some avg10=95.00 avg60=94.10 avg300=40.00 total=1\n"
+                                    "full avg10=89.01 avg60=%.2f avg300=38.00 total=1\n" % full}
+        for name, text in files.items():
+            with open(os.path.join(self.scope, name), "w") as fh:
+                fh.write(text)
+
+    def test_the_scope_state_is_read_from_its_cgroup_files(self):
+        state = crow_platform.scope_memory_state(self.UNIT)
+        self.assertEqual(state, {"procs": 2, "current": 7950123008,
+                                 "max": 8589934592, "full_avg60": 88.13})
+        self._write(procs="")
+        self.assertIsNone(crow_platform.scope_memory_state(self.UNIT))
+        self.assertIsNone(crow_platform.scope_memory_state("crow-cmd-1-gone"))
+
+    def test_the_measured_thrash_becomes_a_note_at_the_head_of_the_next_result(self):
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self.assertEqual(len(crow_core._BACKGROUND_JOBS), 1)
+        with mock.patch.object(crow_core, "run_tool", return_value="[exit 0]\nRUNNING"):
+            out, _ = crow_core.run_tool_cached("run_command", '{"command": "pgrep sd-cli"}')
+        first, _, rest = out.partition("\n")
+        self.assertEqual(rest, "[exit 0]\nRUNNING")
+        self.assertTrue(first.startswith("note: the background job from `nohup "
+                                         "~/.local/share/crow/bin/sd-cli"), first)
+        self.assertIn("(%s) has been stalled on memory 88%% of the last 60 s at 7.4 GiB "
+                      "of its 8.0 GiB ceiling (no swap): it is thrashing, not progressing"
+                      % self.UNIT, first)
+        self.assertIn("systemctl --user stop %s.scope" % self.UNIT, first)
+        self.assertIn("CROW_COMMAND_MEMORY_MAX in Crow's own environment -- a command "
+                      "cannot raise it", first)
+        # an error stays an error: the note goes after its first line
+        with mock.patch.object(crow_core, "run_tool", return_value="error: no such file: x"):
+            out, _ = crow_core.run_tool_cached("read_file", '{"path": "x"}')
+        self.assertTrue(out.startswith("error: no such file: x\nnote: the background job"), out)
+
+    def test_below_the_threshold_nothing_is_said(self):
+        """NEGATIVPROBE, and the threshold #309 fixed: full avg60 >= 50."""
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self._write(procs="550628\n", current=6 << 30, full=49.99)
+        self.assertEqual(crow_core.background_job_notes(), "")
+        self._write(procs="550628\n", current=6 << 30, full=50.0)
+        self.assertIn("stalled on memory 50%", crow_core.background_job_notes())
+
+    def test_a_vanished_scope_with_a_risen_count_was_killed_at_the_ceiling(self):
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self._write(procs="")
+        self.kills[0] = 4
+        self.assertEqual(
+            crow_core.background_job_notes(),
+            "note: the background job from `%s` (%s) was killed at its memory ceiling "
+            "(MemoryMax=8G, no swap), with everything it started." % (self.SD_CLI, self.UNIT))
+        self.assertEqual(crow_core._BACKGROUND_JOBS, [])
+        self.assertEqual(crow_core.background_job_notes(), "")
+
+    def test_a_foreground_kill_is_not_blamed_on_a_job_that_ended_by_itself(self):
+        """NEGATIVPROBE. The count is the whole slice's: a kill run_command
+        already named in its own result re-bases the jobs still alive."""
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        self._write(procs="550628\n", full=0.0)
+        self.kills[0] = 4                       # the foreground call's own kill
+        crow_core._rebase_background_jobs()
+        self._write(procs="")                   # then the job ends by itself
+        self.assertEqual(crow_core.background_job_notes(), "")
+
+    def test_several_vanishing_at_one_kill_are_named_as_candidates(self):
+        crow_core._record_background_job(self.UNIT, self.SD_CLI)
+        other = os.path.join(self.root, "slice", "crow-cmd-548410-00000000.scope")
+        os.makedirs(other)
+        with open(os.path.join(other, "cgroup.procs"), "w") as fh:
+            fh.write("1\n")
+        crow_core._record_background_job("crow-cmd-548410-00000000", "make -j32 &")
+        self._write(procs="")
+        os.unlink(os.path.join(other, "cgroup.procs"))
+        self.kills[0] = 4
+        note = crow_core.background_job_notes()
+        self.assertTrue(note.startswith("note: these background jobs ended while a "
+                                        "memory-ceiling kill was counted"), note)
+        self.assertIn(self.UNIT, note)
+        self.assertIn("crow-cmd-548410-00000000", note)
+        self.assertNotIn("was killed at", note)
+
+    def test_windows_records_nothing_and_says_nothing(self):
+        """The platform switch: run_command has no scope on Windows
+        (command_scope_prefix is []), and nothing there reads a cgroup."""
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(crow_platform.command_scope_prefix(self.UNIT), [])
+            self.assertIsNone(crow_platform.scope_memory_state(self.UNIT))
+            crow_core._record_background_job(self.UNIT, self.SD_CLI)
+            self.assertEqual(crow_core._BACKGROUND_JOBS, [])
+            self.assertEqual(crow_core.background_job_notes(), "")
+        # the same files on Linux are read
+        self.assertIsNotNone(crow_platform.scope_memory_state(self.UNIT))
 
 
 class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):
@@ -23725,6 +24033,34 @@ const d0 = Date.now(), p0 = performance.now(), r = [Math.random(), Math.random()
         self.assertNotEqual(a["r"][0], a["r"][1])
 
 
+
+class TheImageModelIsFoundBesideTheLinkedTreeTests(unittest.TestCase):
+    """install.sh links <install>/models to ONE model's tree; Qwen-Image lies
+    beside that tree (robin's machine, 2026-09-27). Without the variable the
+    image tools must still find it, and the plain place still wins."""
+
+    def test_beside_the_link_target_and_inside_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = os.path.join(tmp, "models", "text-model")
+            beside = os.path.join(tmp, "models", crow_core.IMAGE_MODEL_NAME)
+            os.makedirs(tree)
+            os.makedirs(beside)
+            link = os.path.join(tmp, "install-models")
+            os.symlink(tree, link)
+            before = (os.environ.pop(crow_core.IMAGE_MODEL_DIR_ENV, None),
+                      crow_core.crow_platform.models_dir)
+            self.addCleanup(lambda: (os.environ.__setitem__(crow_core.IMAGE_MODEL_DIR_ENV, before[0])
+                                     if before[0] is not None else None,
+                                     setattr(crow_core.crow_platform, "models_dir", before[1])))
+            crow_core.crow_platform.models_dir = lambda *a, **k: link
+            self.assertEqual(crow_core.image_model_dir(), beside)
+            inside = os.path.join(tree, crow_core.IMAGE_MODEL_NAME)
+            os.makedirs(inside)
+            self.assertEqual(crow_core.image_model_dir(), os.path.join(link, crow_core.IMAGE_MODEL_NAME))
+            os.environ[crow_core.IMAGE_MODEL_DIR_ENV] = "/elsewhere/q"
+            self.assertEqual(crow_core.image_model_dir(), "/elsewhere/q")
+            del os.environ[crow_core.IMAGE_MODEL_DIR_ENV]
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
@@ -23794,3 +24130,935 @@ class RenderWaitCapForPathTracedPages(unittest.TestCase):
     def test_the_clamp_uses_the_page_ceiling(self):
         src = inspect.getsource(crow_core._render_page)
         self.assertIn("_render_wait_cap(page_file)", src)
+
+
+# ---------------------------------------------- #300 phase 3, #308, #311 ---
+# THE IMAGE TOOLS, WITH NO GPU AND NO REAL SERVER. The server is a fake that
+# speaks the sdcpp job API (img_gen, jobs, cancel, capabilities) and writes
+# the lines of a real sd-server log into a file while its job "runs" -- the
+# same file the tool tails. The lines are G1's (2026-09-27, 2752x1536, 40
+# steps, beside the 27B serve), trimmed: the text-encoder load, the
+# condition, one streamed DiT segment, all 40 sampling bars, the VAE load and
+# five of its 220 tiles. Paths are shortened to ~/models.
+
+SD_SERVER_LOG_G1 = (
+    b'[INFO   ] image.cpp:809  - generate_image 2752x1536\n'
+    b'[INFO   ] request.cpp:420  - sampling using Euler method\n'
+    b'[VERBOSE] model_loader.cpp:1105 - loading 38/40 tensors from'
+    b' ~/models/qwen-image-2.1/text_encoder_sdcli/model-00004-of-0'
+    b'0004.safetensors\n'
+    b'\r  |##                                                | 11/3'
+    b'97 - 0.00MB/s\x1b[K'
+    b'\r  |#####                                             | 38/3'
+    b'97 - 6.76GB/s\x1b[K\n'
+    b'[VERBOSE] model_loader.cpp:1105 - loading 75/426 tensors fro'
+    b'm ~/models/qwen-image-2.1/text_encoder_sdcli/model-00001-of-'
+    b'00004.safetensors\n'
+    b'\r  |#######                                           | 49/3'
+    b'97 - 6.73GB/s\x1b[K'
+    b'\r  |############                                      | 92/3'
+    b'97 - 5.95GB/s\x1b[K'
+    b'\r  |###############                                   | 113/'
+    b'397 - 5.32GB/s\x1b[K\n'
+    b'[VERBOSE] model_loader.cpp:1105 - loading 142/142 tensors fr'
+    b'om ~/models/qwen-image-2.1/text_encoder_sdcli/model-00002-of'
+    b'-00004.safetensors\n'
+    b'\r  |################                                  | 125/'
+    b'397 - 5.32GB/s\x1b[K'
+    b'\r  |#####################                             | 159/'
+    b'397 - 4.92GB/s\x1b[K'
+    b'\r  |#########################                         | 198/'
+    b'397 - 5.21GB/s\x1b[K'
+    b'\r  |##############################                    | 236/'
+    b'397 - 5.28GB/s\x1b[K'
+    b'\r  |#################################                 | 255/'
+    b'397 - 5.50GB/s\x1b[K\n'
+    b'[VERBOSE] model_loader.cpp:1105 - loading 142/142 tensors fr'
+    b'om ~/models/qwen-image-2.1/text_encoder_sdcli/model-00003-of'
+    b'-00004.safetensors\n'
+    b'\r  |##################################                | 267/'
+    b'397 - 5.50GB/s\x1b[K'
+    b'\r  |######################################            | 301/'
+    b'397 - 5.33GB/s\x1b[K'
+    b'\r  |###########################################       | 337/'
+    b'397 - 5.35GB/s\x1b[K'
+    b'\r  |###############################################   | 373/'
+    b'397 - 5.40GB/s\x1b[K'
+    b'\r  |##################################################| 397/'
+    b'397 - 5.57GB/s\x1b[K\n'
+    b'[INFO   ] model_loader.cpp:1375 - loading tensors completed,'
+    b' taking 2.53s (read: 2.07s, memcpy: 0.00s, convert: 0.00s, c'
+    b'opy_to_backend: 0.00s)\n'
+    b'[INFO   ] image.cpp:524  - get_learned_condition completed, '
+    b'taking 15.14s\n'
+    b'[INFO   ] image.cpp:861  - generating image: 1/1 - seed 7\n'
+    b'[VERBOSE] model_loader.cpp:1105 - loading 4/211 tensors from'
+    b' ~/models/qwen-image-2.1/transformer/diffusion_pytorch_model'
+    b'-00001-of-00002.safetensors\n'
+    b'\r  |######################################            | 3/4 '
+    b'- 0.00MB/s\x1b[K'
+    b'\r  |##################################################| 4/4 '
+    b'- 5.73GB/s\x1b[K\n'
+    b'[INFO   ] model_loader.cpp:1375 - loading tensors completed,'
+    b' taking 0.01s (read: 0.01s, memcpy: 0.00s, convert: 0.00s, c'
+    b'opy_to_backend: 0.00s)\n'
+    b'\r  |=>                                                | 1/40'
+    b' - 8.27s/it\x1b[K'
+    b'[INFO   ] ggml_graph_cut.cpp:1032 - qwen_image_2_1 build cac'
+    b'hed graph cut plan done (taking 2 ms)\n'
+    b'\r  |==>                                               | 2/40'
+    b' - 3.54s/it\x1b[K'
+    b'[VERBOSE] ggml_runner.cpp:1019 - qwen_image_2_1 compute buff'
+    b'er size: 2338.38 MB(VRAM) on CUDA0 (peak across 34 segments)\n'
+    b'\r  |===>                                              | 3/40'
+    b' - 3.54s/it\x1b[K'
+    b'\r  |=====>                                            | 4/40'
+    b' - 3.54s/it\x1b[K'
+    b'\r  |======>                                           | 5/40'
+    b' - 3.54s/it\x1b[K'
+    b'\r  |=======>                                          | 6/40'
+    b' - 3.54s/it\x1b[K'
+    b'\r  |========>                                         | 7/40'
+    b' - 3.54s/it\x1b[K'
+    b'\r  |==========>                                       | 8/40'
+    b' - 3.55s/it\x1b[K'
+    b'\r  |===========>                                      | 9/40'
+    b' - 3.55s/it\x1b[K'
+    b'\r  |============>                                     | 10/4'
+    b'0 - 3.55s/it\x1b[K'
+    b'\r  |=============>                                    | 11/4'
+    b'0 - 3.55s/it\x1b[K'
+    b'\r  |===============>                                  | 12/4'
+    b'0 - 3.55s/it\x1b[K'
+    b'\r  |================>                                 | 13/4'
+    b'0 - 3.55s/it\x1b[K'
+    b'\r  |=================>                                | 14/4'
+    b'0 - 3.55s/it\x1b[K'
+    b'\r  |==================>                               | 15/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |====================>                             | 16/4'
+    b'0 - 3.55s/it\x1b[K'
+    b'\r  |=====================>                            | 17/4'
+    b'0 - 3.55s/it\x1b[K'
+    b'\r  |======================>                           | 18/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |=======================>                          | 19/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |=========================>                        | 20/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |==========================>                       | 21/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |===========================>                      | 22/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |============================>                     | 23/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |==============================>                   | 24/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |===============================>                  | 25/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |================================>                 | 26/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |=================================>                | 27/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |===================================>              | 28/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |====================================>             | 29/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |=====================================>            | 30/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |======================================>           | 31/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |========================================>         | 32/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |=========================================>        | 33/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |==========================================>       | 34/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |===========================================>      | 35/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |=============================================>    | 36/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |==============================================>   | 37/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |===============================================>  | 38/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |================================================> | 39/4'
+    b'0 - 3.56s/it\x1b[K'
+    b'\r  |==================================================| 40/4'
+    b'0 - 3.56s/it\x1b[K\n'
+    b'[INFO   ] image.cpp:894  - sampling completed, taking 146.96'
+    b's\n'
+    b'[INFO   ] image.cpp:906  - generating 1 latent images comple'
+    b'ted, taking 146.96s\n'
+    b'[INFO   ] image.cpp:549  - decoding 1 latents\n'
+    b'[VERBOSE] model_loader.cpp:1105 - loading 128/238 tensors fr'
+    b'om ~/models/qwen-image-2.1/vae/diffusion_pytorch_model.safet'
+    b'ensors\n'
+    b'\r  |######                                            | 15/1'
+    b'28 - 0.00MB/s\x1b[K'
+    b'\r  |##################################################| 128/'
+    b'128 - 4.71GB/s\x1b[K\n'
+    b'[INFO   ] model_loader.cpp:1375 - loading tensors completed,'
+    b' taking 0.20s (read: 0.08s, memcpy: 0.00s, convert: 0.04s, c'
+    b'opy_to_backend: 0.00s)\n'
+    b'\r  |>                                                 | 1/22'
+    b'0 - 2.40it/s\x1b[K'
+    b'\r  |>                                                 | 2/22'
+    b'0 - 17.24it/s\x1b[K'
+    b'\r  |>                                                 | 3/22'
+    b'0 - 17.54it/s\x1b[K'
+    b'\r  |>                                                 | 4/22'
+    b'0 - 17.24it/s\x1b[K'
+    b'\r  |==================================================| 220/'
+    b'220 - 17.54it/s\x1b[K\n'
+    b'[INFO   ] image.cpp:615  - latent 1 decoded, taking 12.37s\n'
+    b'[INFO   ] image.cpp:619  - decode_first_stage completed, tak'
+    b'ing 12.37s\n'
+    b'[INFO   ] image.cpp:1045 - generate_image completed in 174.5'
+    b'0s\n'
+)
+
+
+def _gray_png(width: int, height: int) -> bytes:
+    """A real 8-bit greyscale PNG of any size, all black -- written here, not
+    with crow_core's encoder, so the header reader is checked against an
+    independent file."""
+    import zlib
+
+    def chunk(kind, body):
+        return (len(body).to_bytes(4, "big") + kind + body
+                + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+    raw = (b"\x00" * (width + 1)) * height
+    head = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([8, 0, 0, 0, 0])
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+            + chunk(b"IDAT", zlib.compress(raw, 1)) + chunk(b"IEND", b""))
+
+
+class _FakeSdServer:
+    """sd-server 2f88688's native job API, as far as the tools use it.
+
+    Each job answers `queued` on its first poll, then `generating` while it
+    appends `per_poll` fixture lines to the log per poll, then `completed`
+    with a black PNG of the requested size. `mode` bends the ending:
+    "fail" answers `failed`, "stuck" stays `generating`, "die" drops the
+    connection on the third poll. `on_poll(job, polls)` runs before each
+    answer -- the stop case sets INTERRUPT from there.
+    """
+
+    def __init__(self, log_path: str, lines=SD_SERVER_LOG_G1, per_poll: int = 8):
+        self.log_path = log_path
+        self.lines = [x for x in lines.split(b"\n") if x]
+        self.per_poll = per_poll
+        self.bodies: list[dict] = []
+        self.cancels: list[tuple] = []
+        self.jobs: dict = {}
+        self.mode = "ok"
+        self.on_poll = None
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, code, doc):
+                data = json.dumps(doc).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.path == "/sdcpp/v1/capabilities":
+                    return self._send(200, {"supported_modes": ["img_gen"]})
+                if self.path.startswith("/sdcpp/v1/jobs/"):
+                    return fake._poll(self, self.path.rsplit("/", 1)[1])
+                return self._send(404, {})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                if self.path == "/sdcpp/v1/img_gen":
+                    ident = "job_%d" % (len(fake.bodies) + 1)
+                    fake.bodies.append(body)
+                    fake.jobs[ident] = {"polls": 0, "status": "queued",
+                                        "fed": 0, "body": body}
+                    return self._send(202, {"id": ident, "status": "queued"})
+                if self.path.endswith("/cancel"):
+                    ident = self.path.split("/")[-2]
+                    status = fake.jobs.get(ident, {}).get("status")
+                    fake.cancels.append((ident, status))
+                    if status == "generating":
+                        return self._send(409, {"error": "cannot be interrupted yet"})
+                    return self._send(200, {"id": ident, "status": "cancelled"})
+                return self._send(404, {})
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = "http://127.0.0.1:%d" % self.httpd.server_address[1]
+
+    def _poll(self, handler, ident):
+        job = self.jobs.get(ident)
+        if job is None:
+            return handler._send(404, {})
+        job["polls"] += 1
+        if self.on_poll is not None:
+            self.on_poll(job, job["polls"])
+        if self.mode == "die" and job["polls"] >= 3:
+            handler.close_connection = True
+            return None
+        if job["polls"] == 1:
+            return handler._send(200, {"id": ident, "status": "queued",
+                                       "queue_position": 0})
+        job["status"] = "generating"
+        if job["fed"] < len(self.lines):
+            chunk = self.lines[job["fed"]:job["fed"] + self.per_poll]
+            job["fed"] += len(chunk)
+            with open(self.log_path, "ab") as fh:
+                fh.write(b"\n".join(chunk) + b"\n")
+            return handler._send(200, {"id": ident, "status": "generating"})
+        if self.mode == "stuck":
+            return handler._send(200, {"id": ident, "status": "generating"})
+        if self.mode == "fail":
+            job["status"] = "failed"
+            return handler._send(200, {"id": ident, "status": "failed",
+                                       "error": {"message": "CUDA out of memory"}})
+        import base64
+        body = job["body"]
+        png = _gray_png(body["width"], body["height"])
+        job["status"] = "completed"
+        return handler._send(200, {"id": ident, "status": "completed", "result": {
+            "images": [{"index": 0, "b64_json": base64.b64encode(png).decode()}]}})
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class _ImageRecorder(_TurnRecorder):
+    """_TurnRecorder plus the two image events."""
+
+    def tool_progress(self, name, state):
+        self.log.append(("progress", name, dict(state)))
+        self.threads = getattr(self, "threads", set()) | {threading.get_ident()}
+
+    def image_created(self, path, source, job=""):
+        self.log.append(("image", path, source, job))
+
+
+class _ImageServerCase(unittest.TestCase):
+    """A working area, a fake image server on a free port, and the tool
+    module pointed at both. Nothing here starts a process."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-image-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.work = os.path.join(self.dir, "work")
+        os.makedirs(self.work)
+        self.log = os.path.join(self.dir, "sd-server-8097.log")
+        open(self.log, "wb").close()
+        self.fake = _FakeSdServer(self.log)
+        self.addCleanup(self.fake.close)
+        root_before = crow_core.get_root()
+        self.addCleanup(crow_core.set_root, root_before)
+        crow_core.set_root(self.work)
+        for name, value in (("IMAGE_SERVER_URL", self.fake.url),
+                            ("IMAGE_POLL_S", 0.005), ("_IMAGE_PROC", None)):
+            self.addCleanup(setattr, crow_core, name, getattr(crow_core, name))
+            setattr(crow_core, name, value)
+        patcher = mock.patch.object(crow_core, "image_server_log", return_value=self.log)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        crow_core.INTERRUPT.clear()
+        self.addCleanup(crow_core.INTERRUPT.clear)
+        crow_core.take_image_ride()
+        self.addCleanup(crow_core.take_image_ride)
+        crow_core.take_announced_images()
+        self.addCleanup(crow_core.take_announced_images)
+        # Never the real approvals.json: robin's holds ("outside", "/").
+        self.addCleanup(setattr, crow_core, "APPROVALS_FILE", crow_core.APPROVALS_FILE)
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", None)
+        crow_core.APPROVALS_FILE = os.path.join(self.dir, "approvals.json")
+        crow_core._STORED_APPROVALS = None
+        self.states: list[dict] = []
+        crow_core._TURN_LOCAL.progress = self.states.append
+        self.addCleanup(setattr, crow_core._TURN_LOCAL, "progress", None)
+
+    def picture(self, name: str, width: int, height: int) -> str:
+        path = os.path.join(self.work, name)
+        with open(path, "wb") as fh:
+            fh.write(_gray_png(width, height))
+        return path
+
+    def phases(self) -> list[str]:
+        out = []
+        for state in self.states:
+            if not out or out[-1] != state["phase"]:
+                out.append(state["phase"])
+        return out
+
+
+class SdProgressReadsTheServersConsoleTests(unittest.TestCase):
+    """#308's table, on the G1 log. Every expectation below is a number that
+    stands in the log itself."""
+
+    def _feed(self, data: bytes, step: int = 0) -> "list[dict]":
+        parser = crow_core.SdProgress()
+        if not step:
+            return parser.feed(data)
+        out = []
+        for k in range(0, len(data), step):
+            out += parser.feed(data[k:k + step])
+        return out
+
+    def test_the_phases_come_in_the_logs_order(self):
+        states = self._feed(SD_SERVER_LOG_G1)
+        order = []
+        for state in states:
+            if not order or order[-1] != state["phase"]:
+                order.append(state["phase"])
+        self.assertEqual(order, ["loading", "encoding", "sampling", "decoding",
+                                 "saved"])
+
+    def test_loading_counts_the_tensors_and_ends_at_397(self):
+        loading = [s for s in self._feed(SD_SERVER_LOG_G1) if s["phase"] == "loading"
+                   and s["i"] is not None]
+        self.assertEqual((loading[0]["i"], loading[0]["n"]), (11, 397))
+        self.assertEqual((loading[-1]["i"], loading[-1]["n"]), (397, 397))
+        self.assertIn("GB/s", loading[-1]["line"])
+
+    def test_sampling_counts_every_step_with_the_logs_rate(self):
+        steps = [s for s in self._feed(SD_SERVER_LOG_G1) if s["phase"] == "sampling"
+                 and s["i"]]
+        self.assertEqual([s["i"] for s in steps], list(range(1, 41)))
+        self.assertTrue(all(s["n"] == 40 for s in steps))
+        self.assertIn("8.27 s/it", steps[0]["line"])
+        self.assertIn("3.54 s/it", steps[1]["line"])
+
+    def test_the_eta_leaves_out_step_one(self):
+        """Step 1 measured 8.27 s against 3.54 s after it: it holds the segment
+        loads. After step 1 alone there is no ETA; after step 2 it is 38 x 3.54."""
+        steps = [s for s in self._feed(SD_SERVER_LOG_G1) if s["phase"] == "sampling"
+                 and s["i"]]
+        self.assertIsNone(steps[0]["eta_s"])
+        self.assertAlmostEqual(steps[1]["eta_s"], 38 * 3.54, places=1)
+        self.assertEqual(steps[-1]["eta_s"], 0.0)
+
+    def test_the_streamed_dit_bars_do_not_move_the_step(self):
+        """A `#` bar inside sampling is a segment load, not a phase."""
+        parser = crow_core.SdProgress()
+        parser.feed(b"[INFO   ] image.cpp:861  - generating image: 1/1 - seed 7\n"
+                    b"\r  |=>   | 3/40 - 3.54s/it\x1b[K")
+        said = parser.feed(b"\r  |#####| 9/9 - 6.10GB/s\x1b[K\n")
+        self.assertEqual(said, [])
+        self.assertEqual((parser.phase, parser.i, parser.n), ("sampling", 3, 40))
+
+    def test_decoding_counts_the_tiles(self):
+        tiles = [s for s in self._feed(SD_SERVER_LOG_G1) if s["phase"] == "decoding"
+                 and s["i"]]
+        self.assertEqual(tiles[0]["n"], 220)
+        self.assertIn("decoding (VAE)", tiles[0]["line"])
+
+    def test_the_end_says_the_logs_time(self):
+        last = self._feed(SD_SERVER_LOG_G1)[-1]
+        self.assertEqual(last["phase"], "saved")
+        self.assertIn("174.50", last["line"])
+
+    def test_any_cut_gives_the_same_states(self):
+        """The file is read while the server writes it: a read ends anywhere,
+        inside a bar or inside a UTF-8 sequence."""
+        whole = self._feed(SD_SERVER_LOG_G1)
+        for step in (1, 7, 61, 997):
+            self.assertEqual(self._feed(SD_SERVER_LOG_G1, step), whole, step)
+
+    def test_a_cut_line_waits_and_never_raises(self):
+        parser = crow_core.SdProgress()
+        cut = SD_SERVER_LOG_G1[:SD_SERVER_LOG_G1.index(b"get_learned_condition") + 5]
+        parser.feed(cut)
+        self.assertEqual(parser.phase, "encoding")
+        self.assertEqual(parser.line, "encoding prompt (CPU)")
+
+    def test_an_unknown_line_changes_nothing(self):
+        parser = crow_core.SdProgress()
+        parser.feed(SD_SERVER_LOG_G1[:SD_SERVER_LOG_G1.index(b"generating image")])
+        before = parser.state()
+        said = parser.feed(b"[INFO   ] something.cpp:1 - a line nobody wrote a rule for\n"
+                           b"garbage without a level\n")
+        self.assertEqual(said, [])
+        self.assertEqual(parser.state(), before)
+
+    def test_a_log_line_glued_to_a_bar_is_still_read(self):
+        """sd-server3.log: `| 2/25 - 3.56s/it^[[K[VERBOSE] ggml_runner...` --
+        a bar and a log line share one physical line, so ESC[K separates."""
+        parser = crow_core.SdProgress()
+        parser.feed(b"[INFO   ] image.cpp:861  - generating image: 1/1 - seed 7\n"
+                    b"\r  |==>   | 2/40 - 3.54s/it\x1b[K[ERROR  ] ggml_cuda.cpp:1 - "
+                    b"CUDA error: out of memory\n")
+        self.assertEqual((parser.phase, parser.error),
+                         ("error", "CUDA error: out of memory"))
+
+    def test_an_error_line_is_held_with_its_text(self):
+        parser = crow_core.SdProgress()
+        said = parser.feed(b"[ERROR  ] ggml_cuda.cpp:1 - CUDA error: out of memory\n")
+        self.assertEqual(said[-1]["phase"], "error")
+        self.assertEqual(parser.error, "CUDA error: out of memory")
+
+    def test_a_new_job_starts_from_loading(self):
+        """The log is one file across jobs; a warm-up's end is not ours."""
+        parser = crow_core.SdProgress()
+        parser.feed(SD_SERVER_LOG_G1)
+        parser.feed(b"[INFO   ] image.cpp:809  - generate_image 1376x768\n")
+        self.assertEqual((parser.phase, parser.i, parser.error), ("loading", None, None))
+
+
+class ImageHeadersAndSizesTests(unittest.TestCase):
+    """No Pillow here: sizes come from the header, shapes from the card's table."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-imgsize-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _write(self, name, data):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return path
+
+    def test_png_jpeg_webp_and_gif_headers(self):
+        png = self._write("a.png", _gray_png(33, 17))
+        self.assertEqual(crow_core.image_dimensions(png), (33, 17))
+        jpeg = self._write("a.jpg", b"\xff\xd8" + b"\xff\xe0" + struct.pack(">H", 16)
+                           + b"JFIF\x00" + b"\x00" * 9
+                           + b"\xff\xc0" + struct.pack(">HBHH", 17, 8, 768, 1376)
+                           + b"\x03" + b"\x00" * 9 + b"\xff\xd9")
+        self.assertEqual(crow_core.image_dimensions(jpeg), (1376, 768))
+        vp8x = self._write("a.webp", b"RIFF" + b"\x00" * 4 + b"WEBPVP8X"
+                           + b"\x0a\x00\x00\x00" + b"\x00" * 4
+                           + (2751).to_bytes(3, "little") + (1535).to_bytes(3, "little"))
+        self.assertEqual(crow_core.image_dimensions(vp8x), (2752, 1536))
+        gif = self._write("a.gif", b"GIF89a" + struct.pack("<HH", 640, 480) + b"\x00" * 8)
+        self.assertEqual(crow_core.image_dimensions(gif), (640, 480))
+        self.assertIsNone(crow_core.image_dimensions(self._write("a.txt", b"hello")))
+
+    def test_the_stage_one_size_is_the_pipelines(self):
+        """diffusers calculate_dimensions(1024*1024, ratio): 16:9 -> 1376x768,
+        the size E3 was measured at."""
+        self.assertEqual(crow_core.one_megapixel(2752 / 1536), (1376, 768))
+        self.assertEqual(crow_core.one_megapixel(1.0), (1024, 1024))
+
+    def test_a_shape_snaps_to_the_nearest_row_of_the_table(self):
+        self.assertEqual(crow_core.snap_aspect(2752, 1536), "16:9")
+        self.assertEqual(crow_core.snap_aspect(1920, 1080), "16:9")
+        self.assertEqual(crow_core.snap_aspect(1000, 1010), "1:1")
+        self.assertEqual(crow_core.snap_aspect(1200, 800), "3:2")
+        self.assertEqual(crow_core.snap_aspect(800, 1200), "2:3")
+        self.assertEqual(crow_core.snap_aspect(1024, 768), "4:3")
+        self.assertEqual(crow_core.snap_aspect(720, 1280), "9:16")
+
+
+class TheImageToolsAreDeclaredTests(unittest.TestCase):
+    """Both tools stand in the shipped table, run unasked only where
+    executing does, and never answer from the repeat cache."""
+
+    def test_declared_built_in_classed_and_never_cached(self):
+        builtin = [t["function"]["name"] for t in crow_core.BUILTIN_TOOLS]
+        for name in ("generate_image", "edit_image"):
+            self.assertIn(name, builtin)
+            self.assertIn(name, crow_core.TOOL_IMPL)
+            self.assertEqual(crow_core.TOOL_CLASS[name], "executing")
+            self.assertIn(name, crow_core.NEVER_CACHED)
+
+    def test_the_descriptions_say_where_files_go_and_what_stage_two_needs(self):
+        text = {t["function"]["name"]: t["function"]["description"]
+                for t in crow_core.TOOLS}
+        for name in ("generate_image", "edit_image"):
+            self.assertIn("<working root>/images/", text[name])
+        self.assertIn("description", text["edit_image"])
+        self.assertIn("whole FINAL", text["edit_image"])
+
+    def test_the_seam_has_the_two_events(self):
+        self.assertTrue(callable(crow_core.TurnEvents.tool_progress))
+        self.assertTrue(callable(crow_core.TurnEvents.image_created))
+        crow_core.TurnEvents().tool_progress("generate_image", {})
+        crow_core.TurnEvents().image_created("/x.png", "generate_image", "j")
+
+    def test_progress_outside_a_turn_goes_nowhere_and_stays_on_its_thread(self):
+        crow_core._TURN_LOCAL.progress = None
+        crow_core.report_progress(phase="loading")          # no sink: no-op
+        seen = []
+        crow_core._TURN_LOCAL.progress = seen.append
+        try:
+            other = threading.Thread(target=crow_core.report_progress,
+                                     kwargs={"phase": "sampling"})
+            other.start()
+            other.join(5)
+            crow_core.report_progress(phase="decoding")
+        finally:
+            crow_core._TURN_LOCAL.progress = None
+        self.assertEqual(seen, [{"phase": "decoding"}],
+                         "a subtask thread's progress reached another turn")
+
+
+class GenerateImageRunsOnTheImageServerTests(_ImageServerCase):
+    """The whole path of one generate_image call against the fake server."""
+
+    def test_the_request_is_the_measured_one(self):
+        said = crow_core.tool_generate_image("a crow on a nest", seed=7)
+        self.assertFalse(said.startswith("error:"), said)
+        body = self.fake.bodies[0]
+        self.assertEqual((body["width"], body["height"], body["seed"]), (2752, 1536, 7))
+        self.assertEqual(body["sample_params"], {"sample_steps": 40,
+                                                 "sample_method": "euler",
+                                                 "guidance": {"txt_cfg": 1.0}})
+        self.assertNotIn("vae_tiling_params", body)
+        self.assertNotIn("ref_images", body)
+
+    def test_progress_first_has_the_size_then_the_logs_phases(self):
+        crow_core.tool_generate_image("a crow on a nest", aspect_ratio="9:16", seed=1)
+        first = self.states[0]
+        self.assertEqual((first["width"], first["height"]), (1536, 2752))
+        self.assertIn(first["phase"], ("queued", "loading"))
+        self.assertEqual(set(first), {"job", "kind", "phase", "stage", "i", "n",
+                                      "eta_s", "line", "width", "height"})
+        self.assertEqual(self.phases()[-5:],
+                         ["loading", "encoding", "sampling", "decoding", "saved"])
+        self.assertEqual({s["job"] for s in self.states}, {first["job"]})
+        self.assertTrue(all(s["kind"] == "generate" and s["stage"] == ""
+                            for s in self.states))
+
+    def test_the_file_lands_in_images_and_the_result_names_it(self):
+        said = crow_core.tool_generate_image("A crow, on a nest!", seed=7)
+        folder = os.path.join(self.work, "images")
+        names = os.listdir(folder)
+        self.assertEqual(len(names), 1)
+        self.assertRegex(names[0], r"^\d{8}-\d{6}-a-crow-on-a-nest\.png$")
+        path = os.path.join(folder, names[0])
+        self.assertEqual(crow_core.image_dimensions(path), (2752, 1536))
+        self.assertIn("images/" + names[0], said)
+        self.assertIn("2752x1536", said)
+        self.assertIn("seed 7", said)
+        self.assertIn("{:,} bytes".format(os.path.getsize(path)), said)
+        self.assertEqual(self.states[-1]["phase"], "saved")
+        self.assertEqual(self.states[-1]["line"], path)
+        made = crow_core.take_announced_images()
+        self.assertEqual(made, [{"path": path, "source": "generate_image",
+                                 "job": self.states[0]["job"]}])
+        ride = crow_core.take_image_ride()
+        self.assertEqual(len(ride), 1)
+        self.assertTrue(ride[0]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_a_second_picture_never_overwrites_the_first(self):
+        first = crow_core._save_image(b"one", "same words")
+        second = crow_core._save_image(b"two", "same words")
+        self.assertNotEqual(first, second)
+        with open(first, "rb") as fh:
+            self.assertEqual(fh.read(), b"one")
+
+    def test_a_bad_shape_is_refused_before_the_server_is_asked(self):
+        said = crow_core.tool_generate_image("x", aspect_ratio="5:4")
+        self.assertTrue(said.startswith("error: aspect_ratio must be one of"), said)
+        self.assertEqual(self.fake.bodies, [])
+
+
+class EditImageRunsInTwoStagesTests(_ImageServerCase):
+    """B5, robin's choice: the edit at ~1 MP, then img2img to the full size
+    with the description and no references -- in one call."""
+
+    def test_stage_one_edits_at_one_megapixel_with_the_references(self):
+        src = self.picture("night.png", 2752, 1536)
+        said = crow_core.tool_edit_image([src], "make it daytime",
+                                         "a crow on a nest in bright daylight")
+        self.assertFalse(said.startswith("error:"), said)
+        first = self.fake.bodies[0]
+        self.assertEqual((first["width"], first["height"]), (1376, 768))
+        self.assertEqual(first["prompt"], "make it daytime")
+        self.assertEqual(first["ref_image_args"], "vae_input_max_pixels=1048576")
+        self.assertEqual(first["image_preprocess"], [
+            "target=ref,index=0,mode=stretch,width=1376,height=768,filter=lanczos"])
+        self.assertEqual(len(first["ref_images"]), 1)
+        self.assertTrue(first["ref_images"][0].startswith("data:image/png;base64,"))
+        self.assertNotIn("init_image", first)
+
+    def test_stage_two_refines_the_stage_one_picture_without_references(self):
+        import base64
+        src = self.picture("night.png", 2752, 1536)
+        crow_core.tool_edit_image([src], "make it daytime",
+                                  "a crow on a nest in bright daylight")
+        second = self.fake.bodies[1]
+        self.assertEqual((second["width"], second["height"]), (2752, 1536))
+        self.assertEqual(second["prompt"], "a crow on a nest in bright daylight")
+        self.assertEqual(second["strength"], 0.25)
+        self.assertNotIn("ref_images", second)
+        self.assertNotIn("ref_image_args", second)
+        self.assertEqual(second["image_preprocess"],
+                         "target=init,mode=stretch,width=2752,height=1536,filter=lanczos")
+        init = base64.b64decode(second["init_image"].split(",", 1)[1])
+        self.assertEqual(struct.unpack(">II", init[16:24]), (1376, 768),
+                         "stage 2 must start from stage 1's picture")
+        self.assertEqual(second["seed"], self.fake.bodies[0]["seed"])
+
+    def test_one_job_two_stages_final_size_throughout(self):
+        src = self.picture("night.png", 2752, 1536)
+        said = crow_core.tool_edit_image([src], "make it daytime", "a daylight crow")
+        self.assertEqual({s["job"] for s in self.states}, {self.states[0]["job"]})
+        self.assertTrue(all((s["width"], s["height"]) == (2752, 1536)
+                            and s["kind"] == "edit" for s in self.states))
+        stages = [s["stage"] for s in self.states]
+        self.assertEqual(stages[0], "1/2")
+        self.assertEqual(stages[-1], "2/2")
+        one = [s["phase"] for s in self.states if s["stage"] == "1/2"]
+        two = [s["phase"] for s in self.states if s["stage"] == "2/2"]
+        self.assertIn("sampling", one)
+        self.assertNotIn("saved", one, "stage 1's end is not the picture")
+        self.assertIn("refining", two)
+        self.assertNotIn("sampling", two)
+        self.assertRegex(said, r"stage 1 edit at 1376x768: [\d.]+ s, stage 2 refine "
+                               r"at 2752x1536: [\d.]+ s")
+        self.assertIn("2752x1536", said)
+
+    def test_the_default_shape_is_the_last_images_snapped(self):
+        a = self.picture("a.png", 1920, 1080)
+        b = self.picture("b.png", 1000, 1010)
+        crow_core.tool_edit_image([a, b], "merge them", "two crows side by side")
+        self.assertEqual((self.fake.bodies[1]["width"], self.fake.bodies[1]["height"]),
+                         (2048, 2048))
+        self.assertEqual((self.fake.bodies[0]["width"], self.fake.bodies[0]["height"]),
+                         (1024, 1024))
+        self.assertEqual(self.fake.bodies[0]["image_preprocess"], [
+            "target=ref,index=0,mode=stretch,width=1376,height=768,filter=lanczos",
+            "target=ref,index=1,mode=stretch,width=1024,height=1024,filter=lanczos"])
+
+    def test_an_asked_shape_wins(self):
+        a = self.picture("a.png", 1920, 1080)
+        crow_core.tool_edit_image([a], "turn it", "a tall crow", aspect_ratio="9:16")
+        self.assertEqual((self.fake.bodies[1]["width"], self.fake.bodies[1]["height"]),
+                         (1536, 2752))
+
+    def test_a_picture_outside_the_working_area_is_refused(self):
+        outside = os.path.join(self.dir, "elsewhere.png")
+        with open(outside, "wb") as fh:
+            fh.write(_gray_png(64, 36))
+        said = crow_core.tool_edit_image([outside], "x", "y")
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertIn("outside the working area", said)
+        self.assertEqual(self.fake.bodies, [], "nothing may leave for the server")
+
+    def test_an_outside_path_the_user_released_is_read(self):
+        outside = os.path.join(self.dir, "released")
+        os.makedirs(outside)
+        path = os.path.join(outside, "ok.png")
+        with open(path, "wb") as fh:
+            fh.write(_gray_png(64, 36))
+        scope = ("outside", os.path.normcase(outside))
+        crow_core._ALLOWED.add(scope)
+        self.addCleanup(crow_core._ALLOWED.discard, scope)
+        said = crow_core.tool_edit_image([path], "x", "y")
+        self.assertFalse(said.startswith("error:"), said)
+
+    def test_a_release_that_holds_the_working_area_releases_nothing(self):
+        """The store on robin's machine holds ("outside", "/"), read out of
+        shell text; "at or below /" would be every file on the disk."""
+        outside = os.path.join(self.dir, "elsewhere.png")
+        with open(outside, "wb") as fh:
+            fh.write(_gray_png(64, 36))
+        for broad in (os.path.normcase(os.path.abspath(os.sep)),
+                      os.path.normcase(self.dir)):
+            scope = ("outside", broad)
+            crow_core._ALLOWED.add(scope)
+            self.addCleanup(crow_core._ALLOWED.discard, scope)
+        said = crow_core.tool_edit_image([outside], "x", "y")
+        self.assertIn("outside the working area", said)
+        self.assertEqual(self.fake.bodies, [])
+
+    def test_a_text_file_named_png_is_refused(self):
+        fake = os.path.join(self.work, "notes.png")
+        with open(fake, "w", encoding="utf-8") as fh:
+            fh.write("not a picture")
+        said = crow_core.tool_edit_image(["notes.png"], "x", "y")
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertIn("its bytes are", said)
+        self.assertEqual(self.fake.bodies, [])
+
+    def test_an_empty_description_is_refused(self):
+        src = self.picture("a.png", 64, 36)
+        said = crow_core.tool_edit_image([src], "make it day", "")
+        self.assertIn("describe the whole final image", said)
+        self.assertEqual(self.fake.bodies, [])
+
+
+class AnImageJobThatDoesNotFinishSaysWhyTests(_ImageServerCase):
+    """Stop, failure, a dead server and the clock: every one a result, none a hang."""
+
+    def test_stop_while_generating_abandons_the_wait_and_says_so(self):
+        def press_stop(job, polls):
+            if polls == 3:
+                crow_core.INTERRUPT.set()
+        self.fake.on_poll = press_stop
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertTrue(said.startswith(crow_core.STOPPED), said)
+        self.assertIn("in the background", said)
+        self.assertEqual(self.fake.cancels, [("job_1", "generating")])
+        self.assertEqual(self.states[-1]["phase"], "stopped")
+        self.assertFalse(os.path.isdir(os.path.join(self.work, "images")))
+        self.assertEqual(crow_core.take_announced_images(), [])
+
+    def test_a_failed_job_is_an_error_with_the_servers_reason(self):
+        self.fake.mode = "fail"
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertTrue(said.startswith("error: the image job failed"), said)
+        self.assertIn("CUDA out of memory", said)
+        self.assertEqual(self.states[-1]["phase"], "error")
+
+    def test_a_server_that_stops_answering_is_an_error_with_its_last_lines(self):
+        self.fake.mode = "die"
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertTrue(said.startswith("error: the image server stopped answering"), said)
+        self.assertIn("loading 38/40 tensors", said, "the log's last lines are the evidence")
+        self.assertEqual(self.states[-1]["phase"], "error")
+
+    def test_a_job_that_never_ends_is_ended_by_the_clock(self):
+        self.fake.mode = "stuck"
+        self.addCleanup(setattr, crow_core, "IMAGE_JOB_TIMEOUT", crow_core.IMAGE_JOB_TIMEOUT)
+        crow_core.IMAGE_JOB_TIMEOUT = 0.5
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertTrue(said.startswith("error: the image job job_1 gave no result"), said)
+
+    def test_no_server_and_no_binary_is_a_sentence_not_a_hang(self):
+        crow_core.IMAGE_SERVER_URL = "http://127.0.0.1:9"
+        with mock.patch.object(crow_core.crow_platform, "server_search_dirs",
+                               return_value=[self.dir]):
+            said = crow_core.tool_generate_image("a crow")
+            # INSIDE the patch: outside it this machine's real install answers
+            # (sd-server in ~/.local/share/crow/bin, the model beside the tree)
+            self.assertFalse(crow_core.image_tools_available())
+        self.assertTrue(said.startswith("error: the image server is not installed"), said)
+        self.assertEqual(self.states[-1]["phase"], "error")
+
+    def test_a_missing_model_names_the_variable(self):
+        with mock.patch.dict(os.environ, {crow_core.IMAGE_MODEL_DIR_ENV: self.dir}), \
+             mock.patch.object(crow_core, "image_server_binary",
+                               return_value=os.path.join(self.dir, "sd-server")):
+            why = crow_core.image_tools_unavailable()
+        self.assertIn(crow_core.IMAGE_MODEL_DIR_ENV, why)
+        self.assertIn("transformer", why)
+
+
+class TheImageToolsReachTheTurnsEventsTests(TurnLoopCase):
+    """Through run_turn: the progress sink armed around the call, the image
+    announced after its result, the picture on the ride."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = os.path.join(self.dir, "sd-server-8097.log")
+        open(self.log, "wb").close()
+        self.fake = _FakeSdServer(self.log)
+        self.addCleanup(self.fake.close)
+        root_before = crow_core.get_root()
+        self.addCleanup(crow_core.set_root, root_before)
+        crow_core.set_root(self.work)
+        for name, value in (("IMAGE_SERVER_URL", self.fake.url),
+                            ("IMAGE_POLL_S", 0.005), ("_IMAGE_PROC", None)):
+            self.addCleanup(setattr, crow_core, name, getattr(crow_core, name))
+            setattr(crow_core, name, value)
+        for target, value in (("image_server_log", self.log), ("refuse_images", None)):
+            patcher = mock.patch.object(crow_core, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.events = _ImageRecorder()
+
+    def _generate(self):
+        args = json.dumps({"prompt": "a crow on a nest", "seed": 7})
+        self.serve([_call_delta("generate_image", args)])
+        self.serve([{"content": "done"}])
+        talk = self.conversation("draw a crow")
+        self.turn(talk)
+        return talk
+
+    def test_the_order_is_start_progress_done_result_image(self):
+        self._generate()
+        names = [e[0] for e in self.events.log if e[0] != "round"]
+        start = names.index("tool_start")
+        first = names.index("progress")
+        done = names.index("tool_done")
+        result = names.index("tool_result")
+        image = names.index("image")
+        self.assertLess(start, first)
+        self.assertLess(first, done)
+        self.assertLess(done, result)
+        self.assertLess(result, image)
+        self.assertNotIn("progress", names[done:], "progress after the call closed")
+        progress = [e for e in self.events.log if e[0] == "progress"]
+        self.assertEqual(progress[0][1], "generate_image")
+        self.assertEqual((progress[0][2]["width"], progress[0][2]["height"]), (2752, 1536))
+        image_event = next(e for e in self.events.log if e[0] == "image")
+        self.assertTrue(image_event[1].startswith(os.path.join(self.work, "images")))
+        self.assertEqual(image_event[2:], ("generate_image", progress[0][2]["job"]))
+        self.assertIsNone(getattr(crow_core._TURN_LOCAL, "progress", None),
+                          "the sink stayed armed after the call")
+
+    def test_progress_is_told_on_the_turns_own_thread(self):
+        """The window routes a push from a worker thread to every client (the
+        phone mirror, #249); only the turn's thread reaches the live chat. So
+        no log tailer or poller of its own may call the seam."""
+        self._generate()
+        self.assertEqual(self.events.threads, {threading.get_ident()})
+        phases = {e[2]["phase"] for e in self.events.log if e[0] == "progress"}
+        self.assertTrue({"loading", "encoding", "sampling", "decoding",
+                         "saved"} <= phases, phases)
+
+    def test_the_model_gets_the_picture_with_the_text(self):
+        talk = self._generate()
+        tool = next(m for m in talk.payload() if m["role"] == "tool")
+        self.assertIsInstance(tool["content"], list)
+        self.assertIn("seed 7", tool["content"][0]["text"])
+        self.assertEqual(tool["content"][1]["type"], "image_url")
+
+    def test_a_blind_server_keeps_the_result_and_loses_only_the_picture(self):
+        crow_core.refuse_images.return_value = crow_core.BLIND_SERVER_HINT
+        talk = self._generate()
+        tool = next(m for m in talk.payload() if m["role"] == "tool")
+        self.assertIsInstance(tool["content"], str)
+        self.assertFalse(tool["content"].startswith("error:"), tool["content"])
+        self.assertIn("not shown to you", tool["content"])
+        self.assertNotIn(crow_core.IMAGE_HANDED, tool["content"])
+        self.assertIn("image", [e[0] for e in self.events.log])
+        self.assertNotIn("tool_failed", [e[0] for e in self.events.log])
+
+
+class ImageNotesKeepFactsNeverPixelsTests(unittest.TestCase):
+    """#311: the card comes back after a restart from its facts alone."""
+
+    def test_an_image_note_keeps_its_fields_and_drops_the_rest(self):
+        kept = crow_core.clean_notes([{
+            "k": "image", "at": 4, "t": "", "path": "/w/images/a.png", "name": "a.png",
+            "w": 2752, "h": 1536, "bytes": 7519446, "source": "generate_image",
+            "job": "img-1", "src": "data:image/png;base64,AAAA", "thumb": "xyz",
+            "mtime": 3.5}])
+        self.assertEqual(kept, [{
+            "k": "image", "at": 4, "t": "", "path": "/w/images/a.png", "name": "a.png",
+            "w": 2752, "h": 1536, "bytes": 7519446, "source": "generate_image",
+            "job": "img-1"}])
+
+    def test_a_wrong_type_is_dropped_not_converted(self):
+        kept = crow_core.clean_notes([{"k": "image", "at": 1, "w": "2752",
+                                       "h": True, "path": 5}])
+        self.assertEqual(kept, [{"k": "image", "at": 1, "t": ""}])
+
+    def test_an_image_job_mark_keeps_its_state_and_drops_the_rest(self):
+        """#308: the window's one mark per job; a restart draws an unfinished
+        one as interrupted from these fields alone."""
+        kept = crow_core.clean_notes([{
+            "k": "imgjob", "at": 6, "t": "", "job": "img-2", "kind": "edit",
+            "phase": "sampling", "stage": "1/2", "w": 2752, "h": 1536,
+            "line": "sampling 12/40", "i": 12, "n": 40, "eta_s": 99.0,
+            "src": "data:image/png;base64,AAAA"}])
+        self.assertEqual(kept, [{
+            "k": "imgjob", "at": 6, "t": "", "job": "img-2", "kind": "edit",
+            "phase": "sampling", "stage": "1/2", "w": 2752, "h": 1536,
+            "line": "sampling 12/40"}])
+
+    def test_other_kinds_carry_no_image_fields(self):
+        kept = crow_core.clean_notes([{"k": "note", "at": 1, "t": "x", "path": "/a"}])
+        self.assertEqual(kept, [{"k": "note", "at": 1, "t": "x"}])

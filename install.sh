@@ -55,6 +55,9 @@
 #   bash install.sh --tailscale          also the phone over HTTPS: what is missing
 #                                        for Tailscale, as commands (never sudo)
 #   bash install.sh --build-engine       build llama-server now (~20 min)
+#   bash install.sh --build-image-server build sd-server + sd-cli now, the image
+#                                        tools' server (~3 min with the CUDA
+#                                        toolkit of --build-engine, ~1 GB)
 #   bash install.sh --pathtracer         also switch on the voxel-diorama skill: the
 #                                        model path-traces voxel scenes with the kit
 #                                        in kits/pathtracer (three.js, shipped always)
@@ -65,6 +68,7 @@
 #   CROW_MODELS        override the model root for one shell; --models makes the link
 #   CROW_REF           branch or tag to fetch when there is no checkout (main)
 #   CROW_BUILD_ENGINE  1 is --build-engine
+#   CROW_BUILD_IMAGE_SERVER  1 is --build-image-server
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -826,6 +830,32 @@ FAKE
               "first '$first', second '$second'"
     fi
 
+    # --build-image-server (#314). The builder SOURCES build-llama-server.sh for
+    # its CUDA toolkit logic, so sourcing that file must define and run nothing
+    # -- a guard that broke would start a 20-minute llama.cpp build instead of
+    # sd-server's. Driven against an empty CROW_HOME: nothing may appear in it.
+    if [ -n "$REPO" ]; then
+        check "image server: --help lists --build-image-server and CROW_BUILD_IMAGE_SERVER" \
+              "$(sed -n '/^# USAGE/,/^# ---/p' "$REPO/install.sh" | grep -q -- '--build-image-server' \
+                 && sed -n '/^# USAGE/,/^# ---/p' "$REPO/install.sh" | grep -q 'CROW_BUILD_IMAGE_SERVER' \
+                 && echo 0 || echo 1)"
+        check "image server: the payload ships the builder and the file it sources" \
+              "$(payload_paths "$REPO" | grep -qx 'tools/build-sd-server.sh' \
+                 && payload_paths "$REPO" | grep -qx 'tools/build-llama-server.sh' && echo 0 || echo 1)"
+        mkdir -p "$tmp/sdhome"
+        out="$(CROW_HOME="$tmp/sdhome" bash -c '. "$1" && type ensure_cuda >/dev/null && type ensure_cmake_ninja >/dev/null && echo sourced' \
+               _ "$REPO/tools/build-llama-server.sh" 2>&1)"
+        check "NEGATIVE: sourcing build-llama-server.sh defines its functions and builds nothing" \
+              "$([ "$out" = sourced ] && [ -z "$(ls -A "$tmp/sdhome")" ] && echo 0 || echo 1)" \
+              "$out | $(find "$tmp/sdhome" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"
+        check "image server: the builder pins 2f88688 and its four submodules" \
+              "$(for s in 2f886889e6e8b78738d6b87f7191f6018557c551 4bf5f6000653b7881d00963cd6ddb665ccd62a8d \
+                          0c9546f7efc61eac7f79ae115c3f99c91c21c443 5bf12267eea773a32fcf4949de52b0add158a8d5 \
+                          dd74a8e808aaa8b26124217424b23058935184de; do
+                     grep -q "^[^#]*$s" "$REPO/tools/build-sd-server.sh" || { echo 1; exit; }
+                 done; echo 0)"
+    fi
+
     printf '\n%s%d checks, %d failed%s\n' "$B" "$((pass + fail))" "$fail" "$Z"
     [ "$fail" -eq 0 ] || return 1
     printf 'RESULT: PASS\n'
@@ -1084,6 +1114,49 @@ install_engine() {
     note "It is built here, from llama.cpp pin 6c84c7d5d + PR #27880 + PR #28040, with a"
     note "CUDA toolkit unpacked under \$CROW_HOME -- no root, ~20 minutes, ~8 GB:"
     cmd "CROW_HOME=$CROW_HOME bash $builder"
+}
+
+# --build-image-server (#314): sd-server and sd-cli from stable-diffusion.cpp
+# 2f88688, the binaries generate_image/edit_image run. Unlike the engine, the
+# builder runs whenever the flag is given, even over an existing sd-server: it
+# is idempotent (~1.4 s when nothing changed, measured), it replaces a
+# hand-copied binary and keeps one of another commit as sd-server-<commit>.
+# After that the one thing still missing is the model, so the core is asked
+# where it looks -- after link_models, because that is where it looks first.
+install_image_server() {
+    local builder="$CROW_HOME/tools/build-sd-server.sh" where why
+    if [ "$BUILD_IMAGE_SERVER" = 1 ]; then
+        ok "building sd-server + sd-cli -- about 3 minutes with the CUDA toolkit in place"
+        CROW_HOME="$CROW_HOME" bash "$builder" \
+            || die "tools/build-sd-server.sh failed. Its output above says where."
+    elif [ ! -f "$CROW_HOME/bin/sd-server" ]; then
+        note "no image server at $CROW_HOME/bin/sd-server: generate_image/edit_image stay off."
+        note "Built here from stable-diffusion.cpp 2f88688 with the engine's CUDA toolkit,"
+        note "no root, ~3 minutes and ~1 GB (plus the toolkit download if it is not there):"
+        cmd "CROW_HOME=$CROW_HOME bash $builder"
+        return 0
+    fi
+    ok "image server: $CROW_HOME/bin/sd-server"
+    where="$("$CROW_HOME/venv/bin/python" - "$CROW_HOME/cli" <<'EOF' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import crow_core
+print(crow_core.image_model_dir())
+print(crow_core.image_tools_unavailable() or "")
+EOF
+)"
+    why="$(printf '%s\n' "$where" | sed -n 2p)"
+    where="$(printf '%s\n' "$where" | sed -n 1p)"
+    if [ -n "$where" ] && [ -z "$why" ]; then
+        ok "image tools: Qwen-Image 2.1 at $where"
+        return 0
+    fi
+    warn "image tools: the server is there, the Qwen-Image 2.1 model directory is not"
+    note "generate_image/edit_image read it from \$CROW_IMAGE_MODEL_DIR, else"
+    note "<models>/qwen-image-2.1, else qwen-image-2.1 beside the tree <install>/models"
+    note "links to (crow_core.image_model_dir())."
+    [ -n "$why" ] && note "now: $why"
+    return 0
 }
 
 # --pathtracer (#298): verify the kit, switch its skill on, say whether
@@ -1454,6 +1527,7 @@ usage() {
 CROW_HOME="${CROW_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/crow}"
 CROW_REF="${CROW_REF:-main}"
 BUILD_ENGINE="${CROW_BUILD_ENGINE:-0}"
+BUILD_IMAGE_SERVER="${CROW_BUILD_IMAGE_SERVER:-0}"
 WITH_VOICE=0
 WITH_TAILSCALE=0
 WITH_PATHTRACER=0
@@ -1477,6 +1551,7 @@ while [ $# -gt 0 ]; do
         --tailscale)    WITH_TAILSCALE=1; shift ;;
         --pathtracer)   WITH_PATHTRACER=1; shift ;;
         --build-engine) BUILD_ENGINE=1; shift ;;
+        --build-image-server) BUILD_IMAGE_SERVER=1; shift ;;
         --no-engine)    WITH_ENGINE=0; shift ;;
         --no-desktop)   WITH_DESKTOP=0; shift ;;
         --selftest)     SELFTEST=1; shift ;;
@@ -1528,6 +1603,7 @@ install_venv
 install_pathtracer
 write_launcher
 link_models
+install_image_server
 install_desktop
 install_hyprland
 

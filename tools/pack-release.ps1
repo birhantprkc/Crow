@@ -15,6 +15,14 @@ also in the package, or to a Windows system library. Anything else is a file the
 user will be missing, and the tool refuses to write an archive rather than ship one
 that fails on somebody else's machine.
 
+.PARAMETER SdBuildDir
+Optional. The bin directory of a Windows stable-diffusion.cpp build (pin 2f88688,
+CUDA 13, -DSD_CUDA=ON; recipe in docs/user-guide/install.md). sd-server.exe and
+sd-cli.exe from it go into bin\ beside llama-server.exe, the image server of
+generate_image/edit_image (#314). Their DLLs are resolved exactly like
+llama-server's, so cublas64_13.dll and cublasLt64_13.dll ship once. Without it the
+package has no image server and says so when it is packed.
+
 .PARAMETER Selftest
 Run the checks against synthetic cases, including ones that must fail, and exit.
 #>
@@ -24,6 +32,7 @@ param(
     [string] $CudaBin   = "",
     [string] $OutDir    = "",
     [string] $Version   = "",
+    [string] $SdBuildDir = "",
     [switch] $Selftest
 )
 
@@ -123,6 +132,50 @@ function Test-PackageComplete {
         }
     }
     return $missing
+}
+
+<#
+    THE IMAGE SERVER'S TWO EXECUTABLES, AND ONLY THOSE (#314).
+
+    SD_BUILD_SHARED_LIBS is OFF by default, so ggml and stable-diffusion are
+    linked INTO each exe and the only DLLs they need are CUDA's and the MSVC
+    runtime, which the resolver below finds exactly as it does for llama-server.
+    Taking the whole directory instead would bring a ggml*.dll of ANOTHER build
+    under the same name as llama-server's own -- one of them would silently
+    overwrite the other in bin\. So the two names are asked for, and a missing
+    one is an error rather than a smaller package.
+#>
+$SD_BINARIES = @('sd-server.exe', 'sd-cli.exe')
+
+function Get-SdBinaries {
+    param([string] $Dir)
+    if (-not (Test-Path -LiteralPath $Dir)) { throw "-SdBuildDir not found: $Dir" }
+    $out = @()
+    foreach ($n in $SD_BINARIES) {
+        $p = Join-Path $Dir $n
+        if (-not (Test-Path -LiteralPath $p)) { throw "$n missing from -SdBuildDir $Dir" }
+        $out += $p
+    }
+    return ,@($out)
+}
+
+<#
+    Which of the incoming files would REPLACE a different file of the same name
+    already in $Dest. The same bytes under the same name is not a clash -- that is
+    cublas64_13.dll from the one CUDA 13 toolkit both builds use, and it is kept
+    once. Different bytes is: two builds disagree about a file only one can win.
+#>
+function Get-NameClashes {
+    param([string] $Dest, [string[]] $Incoming)
+    $clash = @()
+    foreach ($f in $Incoming) {
+        $d = Join-Path $Dest ([IO.Path]::GetFileName($f))
+        if ((Test-Path -LiteralPath $d) -and
+            ((Get-FileHash -LiteralPath $d -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash)) {
+            $clash += [IO.Path]::GetFileName($f)
+        }
+    }
+    return ,@($clash)
 }
 
 $script:selftestOk  = 0
@@ -283,6 +336,31 @@ function Invoke-Selftest {
     Check "the gate's default list names check_shared_core.py"     ($gateBody -match 'check_shared_core\.py')
     Check "the gate's default list names check_operating_point.py" ($gateBody -match 'check_operating_point\.py')
 
+    # The image server (#314): which files are taken, and when two builds clash.
+    # Synthetic files -- no Windows toolchain is needed to answer either question.
+    $sdDir = Join-Path ([IO.Path]::GetTempPath()) ("crow-sd-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path (Join-Path $sdDir 'build'), (Join-Path $sdDir 'stage'), (Join-Path $sdDir 'half') | Out-Null
+    try {
+        foreach ($n in @('sd-server.exe', 'sd-cli.exe', 'ggml-base.dll', 'stable-diffusion.lib')) {
+            Set-Content -LiteralPath (Join-Path $sdDir "build\$n") -Value $n
+        }
+        $sd = Get-SdBinaries -Dir (Join-Path $sdDir 'build')
+        Check "-SdBuildDir yields sd-server.exe and sd-cli.exe"   ($sd.Count -eq 2 -and ($sd | Split-Path -Leaf) -contains 'sd-server.exe' -and ($sd | Split-Path -Leaf) -contains 'sd-cli.exe')
+        Check "NEGATIVE: and not a ggml DLL of its own build"      (($sd | Split-Path -Leaf) -notcontains 'ggml-base.dll')
+        Set-Content -LiteralPath (Join-Path $sdDir 'half\sd-server.exe') -Value 'x'
+        $threw = $false
+        try { Get-SdBinaries -Dir (Join-Path $sdDir 'half') | Out-Null } catch { $threw = $_.Exception.Message -like '*sd-cli.exe*' }
+        Check "NEGATIVE: a build without sd-cli.exe is refused, and named" $threw
+        Set-Content -LiteralPath (Join-Path $sdDir 'stage\cublas64_13.dll') -Value 'same'
+        Set-Content -LiteralPath (Join-Path $sdDir 'build\cublas64_13.dll') -Value 'same'
+        Check "a shared cublas64_13.dll with the same bytes is not a clash" ((Get-NameClashes -Dest (Join-Path $sdDir 'stage') -Incoming @((Join-Path $sdDir 'build\cublas64_13.dll'))).Count -eq 0)
+        Set-Content -LiteralPath (Join-Path $sdDir 'build\cublas64_13.dll') -Value 'other'
+        $c = Get-NameClashes -Dest (Join-Path $sdDir 'stage') -Incoming @((Join-Path $sdDir 'build\cublas64_13.dll'), (Join-Path $sdDir 'build\sd-cli.exe'))
+        Check "NEGATIVE: the same name with other bytes is a clash, and only that one" ($c.Count -eq 1 -and $c[0] -eq 'cublas64_13.dll')
+    } finally {
+        Remove-Item $sdDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     $dumpbin = Find-Dumpbin
     Check "dumpbin located" ([bool]$dumpbin)
 
@@ -291,6 +369,10 @@ function Invoke-Selftest {
     # check cannot see the problem it was built to catch.
     if (Test-Path $BuildDir) {
         $built  = (Get-ChildItem $BuildDir -File | Where-Object { $_.Extension -in '.dll', '.exe' }).FullName
+        # With -SdBuildDir the image server is part of the set from the start, so
+        # the closure below is the one the real package gets.
+        $sdBins = @()
+        if ($SdBuildDir) { $sdBins = Get-SdBinaries -Dir $SdBuildDir; $built = @($built) + $sdBins }
         $bare   = Test-PackageComplete -Dumpbin $dumpbin -Files $built
         Check "bin\Release alone is incomplete (the #57 finding)" ($bare.Count -gt 0)
         $names  = ($bare.Needs | Sort-Object -Unique)
@@ -327,6 +409,15 @@ function Invoke-Selftest {
         foreach ($e in $extra) { Write-Host ("         " + [IO.Path]::GetFileName($e)) }
         if ($final.Count -gt 0) {
             Write-Host ("       STILL MISSING: " + (($final.Needs | Sort-Object -Unique) -join ', ')) -ForegroundColor Red
+        }
+        if ($sdBins.Count -gt 0) {
+            $sdNeeds = @()
+            foreach ($b in $sdBins) { $sdNeeds += (Get-Imports -Dumpbin $dumpbin -Path $b) | ForEach-Object { $_.ToLowerInvariant() } }
+            Check "sd-server.exe imports cublas64_13.dll, as llama-server does" ($sdNeeds -contains 'cublas64_13.dll')
+            $extraNames = @($extra | ForEach-Object { [IO.Path]::GetFileName($_).ToLowerInvariant() })
+            Check "NEGATIVE: no runtime library is added twice with the image server" (($extraNames | Sort-Object -Unique).Count -eq $extraNames.Count)
+        } else {
+            Write-Host "  skip image-server closure -- no -SdBuildDir" -ForegroundColor Yellow
         }
     } else {
         Write-Host "  skip build-tree cases -- $BuildDir not present" -ForegroundColor Yellow
@@ -404,6 +495,22 @@ foreach ($f in Get-ChildItem $BuildDir -File) {
     $built += (Join-Path $binOut $f.Name)
 }
 Write-Host ("  copied $($built.Count) build files")
+
+# 1b - the image server (#314), two executables beside llama-server.exe. Step 2
+#      resolves their DLLs with llama-server's: a name already staged is not
+#      copied again, so the shared cublas64_13.dll/cublasLt64_13.dll ship once.
+if ($SdBuildDir) {
+    $sdBins = Get-SdBinaries -Dir $SdBuildDir
+    $clash  = Get-NameClashes -Dest $binOut -Incoming $sdBins
+    if ($clash.Count -gt 0) { throw ("-SdBuildDir would replace a different file of the same name: " + ($clash -join ', ')) }
+    foreach ($b in $sdBins) {
+        Copy-Item -LiteralPath $b -Destination $binOut
+        $built += (Join-Path $binOut ([IO.Path]::GetFileName($b)))
+    }
+    Write-Host "  image server: sd-server.exe, sd-cli.exe from $SdBuildDir"
+} else {
+    Write-Host "  image server: none (no -SdBuildDir) -- generate_image/edit_image will answer 'the image server is not installed'" -ForegroundColor Yellow
+}
 
 # 2 - every runtime library they need, resolved transitively
 $extra  = @()

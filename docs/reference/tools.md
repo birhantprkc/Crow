@@ -2,13 +2,13 @@
 
 ## Tools
 
-28 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
+30 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
 them in either surface, derived from the declarations themselves rather than written beside them.
 
 `read_file` `read_image` `render_page` `write_file` `append_file` `edit_file` `list_dir` `find_files`
 `search_text` `run_command` `build_bundle` `web_search` `fetch_url` `memory` `skill` `session_search`
 `delegate` `subtasks` `collect` `goal_set` `goal_step` `judge` `git_status` `git_diff` `git_log`
-`git_commit` `git_push` `github_connect`.
+`git_commit` `git_push` `github_connect` `generate_image` `edit_image`.
 
 An MCP tool joins the same list as `mcp_<server>_<tool>`, above the built-ins, and carries its
 own class.
@@ -86,7 +86,7 @@ In goal mode, a run of `render_page` captures of one page that come back blank o
 is counted: after 3 the next nudge says to bisect, and after 6 the context rolls over with a list
 of what was tried (#268, see [goals and subagents](../user-guide/goals-and-subagents.md)).
 
-### `run_command` (#207, #218)
+### `run_command` (#207, #218, #309, #310)
 
 `run_command(command, cwd=<working area>)` — one shell line, bash on Linux, cmd.exe on
 Windows, stdin closed.
@@ -97,13 +97,15 @@ Windows, stdin closed.
 | clock | `COMMAND_TIMEOUT` = 120 s |
 | `cwd` (#221) | resolved against the working area, `~` expanded. A `cwd` that is not an existing directory runs nothing and asks nobody -- it is refused before the approval card: `error: no such directory: … -- the command did not run.` (or `cwd is a file, not a directory`), with the working area and a near miss found on disk (per path component, edit distance 1-2 against the existing siblings, the unique best match, case-insensitive on Windows only): `'nibor11896' is 'nibor1896' here`. `read_file` (missing parent), `list_dir` and the outside-root write refusal carry the same hint. Measured over every stored session (2026-09-22): 5 of 18 distinct `cwd` calls named a home that does not exist, and each cost a `pwd` round after a bare Errno 2 |
 | capture | 32 MiB per stream in the reader threads (#207); 16 KB of it reach the model |
-| memory (Linux) | its own user scope per call, `crow-cmd-<pid>-<hex>.scope` in `session.slice`: `MemoryMax=8G`, `MemoryHigh=7G`, `MemorySwapMax=0`, `OOMPolicy=kill` (#218). `CROW_COMMAND_MEMORY_MAX` moves the kill bound (any systemd size), `none` keeps only the swap cap; `CROW_COMMAND_SCOPE=0` runs the shell bare |
+| memory (Linux) | its own user scope per call, `crow-cmd-<pid>-<hex>.scope` in `session.slice`: `MemoryMax=8G`, `MemorySwapMax=0`, `OOMPolicy=kill` (#218), no `MemoryHigh`: memory.high throttles and never kills, so a command over budget sat at 7G instead of dying at 8G (#309). `CROW_COMMAND_MEMORY_MAX` moves the kill bound (any systemd size), `none` keeps only the swap cap; `CROW_COMMAND_SCOPE=0` runs the shell bare |
 | why 8G | measured 2026-09-22 as each scope's `memory.peak`: diorama three.js esbuild bundle 106 MiB, `npm ls --all` 46 MiB, node importing three 21 MiB, gcc 9 MiB, `test_crow` 60 MiB, `test_crow_core` 109 MiB. 8G stops the 54 GiB software-WebGL runaway a seventh of the way and leaves a node build room up to V8's own ~4 GiB heap |
 | at the ceiling | the kernel kills every process in the scope at once (`OOMPolicy=kill` = `memory.oom.group`); the result reads `error: command exceeded its memory ceiling (MemoryMax=8G, no swap) and was killed, with everything it started: <command>` followed by the output up to the kill. The reason comes from the unit's `Result=oom-kill`, not from the exit code — `kill -9 $$` stays `[exit -9]`. The failed unit is reset |
 | kill | the clock and the capture cap SIGKILL the shell's whole process group (`start_new_session`, `killpg`), then the scope (`systemctl --user kill`), which also takes a descendant that left the group with `setsid`. A command that ends by itself keeps what it put in the background (`server &`); that process stays in its scope and under its ceiling |
+| Stop (#310) | Stop during a running command ends it within ~2 s: SIGTERM to the shell's group and its scope, up to 2 s (`STOP_GRACE`) for a cleanup, then the same SIGKILL sweep as the clock. The result reads `error: stopped by the user after <N>s -- the command and everything it started in this call were ended: <command>` followed by the output up to the Stop, and it is counted like a declined call, not a failed one. Every call of the round after it does not run (`error: stopped by the user -- not run`), and no further request goes to the server. A job an **earlier** call left in the background (`nohup … &`) is not touched. `build_bundle` and the syntax check stop the same way |
+| background jobs (#309) | a scope that still holds a process when the call returns is recorded. Every later tool result reads each recorded scope once and starts with a `note:` (after the first line of an `error:` result) when the job was killed at its ceiling — `` note: the background job from `<command>` (<unit>) was killed at its memory ceiling (MemoryMax=8G, no swap), with everything it started. `` — or when its `memory.pressure` reads `full avg60` ≥ 50: `… has been stalled on memory N% of the last 60 s at X GiB of its 8.0 GiB ceiling (no swap): it is thrashing, not progressing.` The kill's witness is `session.slice`'s kernel `oom_kill` count rising while the scope vanished; several scopes vanishing at one kill are named together as candidates. Nothing is recorded on Windows or without a scope |
 | literal | `--expand-environment=no` on systemd ≥ 254: systemd-run expands `${VAR}` and `$$` in its own command line (measured on 261: `${X}` came out empty) |
 | without systemd | no `systemd-run` or no reachable user manager (container, CI, SSH without a session): no scope, no ceiling; the process-group kill still holds |
-| Windows | no scope and no group: the clock kills `cmd.exe` by its handle, and what it started can outlive it — a Job Object would be the fix, not built |
+| Windows | no scope and no group: the clock, the cap and Stop end `cmd.exe` and its children with `taskkill /T /F` (#310; not measured on Windows). A child whose parent already exited can outlive it — a Job Object would be the fix, not built |
 | headless browser | a browser name and `--headless`/`--screenshot` in the line add `note: render_page takes this screenshot inside the render's own memory ceiling …` to the result. A note, not a refusal: the browser is bounded here too, a headless browser has uses `render_page` does not cover (`--dump-dom`, `--print-to-pdf`), and a refused line comes back as a script file no pattern sees |
 | background output | a process left in the background that still holds stdout keeps its reader: the runner waits 0.25 s (`BOUNDED_RUN_SETTLE`) and returns without what it prints later. Redirect it (`server >log 2>&1 &`) and read the file |
 
@@ -186,6 +188,50 @@ Measured 2026-09-24 on the 62 renders of the 2026-09-23 diorama run (the served 
 cover 7.0–22.2 % (`render-20260923-232855.png`: box x 512–768, y 224–512, 8.0 %, ~72 tokens;
 crop x 471–809, y 180–556 at 2.7× → 920×1024), blank captures give no box, a page drawn edge to
 edge gives no crop. Decode plus detection: 0.03–0.23 s per render.
+
+### `generate_image` and `edit_image` (#300, #308, #311)
+
+`generate_image(prompt, aspect_ratio="16:9", seed=None)` makes a new picture.
+`edit_image(images, instruction, description, aspect_ratio=None)` changes 1–10 pictures.
+Both use Qwen-Image 2.1 on a resident `sd-server`.
+
+| | |
+|---|---|
+| class | `executing`: they start a process, hold the GPU for minutes and write a file. Never answered from the repeat cache |
+| server | `sd-server` (stable-diffusion.cpp 2f88688) from `<install>/bin`, on `127.0.0.1:8097`. Linux builds it with `tools/build-sd-server.sh` or `install.sh --build-image-server` ([Linux](../user-guide/linux.md#image-server)); the Windows package carries `sd-server.exe` when it was packed with `pack-release.ps1 -SdBuildDir` ([Install](../user-guide/install.md#image-server-windows)). Without it both tools answer `the image server is not installed`. It starts on the first call if nothing answers `GET /sdcpp/v1/capabilities` and then stays loaded. Linux adds `LD_LIBRARY_PATH=<data>/cuda/lib`. It is detached, in its own user scope like `llama-server`, and stopped when Crow exits (by handle; a server someone else started is used, never stopped). `crow_core.image_server_warm()` starts it and sends a 256×256, 1-step job so the first real job does not pay the weight load |
+| argv | `--diffusion-model <M>/transformer/…index.json --llm <M>/text_encoder_sdcli/…index.json --vae <M>/vae/…safetensors --backend te=cpu --diffusion-fa --max-vram 7 --vae-tiling --model-args qwen_image_2_1_prefix_cache_type=q8_0 --listen-port 8097 -v` |
+| model | `M` = `$CROW_IMAGE_MODEL_DIR`, else `<models_dir()>/qwen-image-2.1`. On a Linux install `models_dir()` is a link to one text model's tree, so the variable is how a models root elsewhere is found |
+| log | the server's stdout and stderr in `<log_dir>/sd-server-8097.log`, rewritten per start, the previous one kept as `.prev.log` |
+| API | `POST /sdcpp/v1/img_gen` (202 + job id), then `GET /sdcpp/v1/jobs/{id}` every 0.5 s until `completed`, `failed` or `cancelled`. Body: `prompt`, `width`, `height`, `seed`, `sample_params {sample_steps 40, euler, txt_cfg 1.0}`. `vae_tiling_params` is never sent |
+| sizes | the model card's table: 1:1 2048×2048, 4:3 2400×1792, 3:4 1792×2400, 3:2 2528×1696, 2:3 1696×2528, 16:9 2752×1536 (default), 9:16 1536×2752 |
+| edit, stage 1 | the edit at ~1 MP. Each reference is resized by the server (`image_preprocess` `target=ref,index=k,mode=stretch,width,height,filter=lanczos`) to diffusers' `calculate_dimensions(1024², its ratio)` rounded to /32. The output uses the target shape's 1 MP size (16:9 → 1376×768). `ref_image_args` is `vae_input_max_pixels=1048576` and the prompt is `instruction` |
+| edit, stage 2 | img2img at the full size with **no references**: `init_image` = the stage-1 PNG (the server stretches it: `target=init,mode=stretch,…,filter=lanczos`), `strength` 0.25, prompt = `description`. The model sees only this text and that picture, so `description` has to describe the whole final image |
+| edit shape | `aspect_ratio`, else the last image's width:height snapped to the nearest table row (by log ratio). Sizes come from the file header (PNG, JPEG, WebP, GIF); Crow has no Pillow |
+| inputs | `read_image`'s checks (working-area path, the `IMAGE_TYPES` table, 32 MiB) plus magic bytes. A path outside the working area is refused unless the user named it or released it with "always". A release that contains the working area itself (`/`, `/home`) releases nothing here |
+| output | `<root>/images/<YYYYmmdd-HHMMSS>-<slug>.png`, created exclusively and never overwritten (`-2`, `-3`, …). The result names the path, W×H, bytes, seconds and seed (edit: both stage times), and the PNG goes on `read_image`'s ride so the model sees it. On a server without a projector the result stays a success and says the picture is not shown |
+| progress | `TurnEvents.tool_progress(name, state)` while the call runs. `state` has `job`, `kind`, `phase` (queued, loading, encoding, sampling, decoding, refining, saved, error, stopped), `stage` (`1/2`, `2/2` or empty), `i`, `n`, `eta_s`, `line`, and the final `width`/`height` from the first event. The phases come from the server's log (`SdProgress`, #308's table). ETA = remaining steps × median of the last ≤ 5 step times, step 1 excluded. After the result, `image_created(path, source, job)`. The terminal redraws its one open line with `\r` and prints `image: <path> (W×H, N KB)` |
+| stop | `sd-server` cancels only a queued job (409 while generating). Stop ends the wait, the result says the server finishes the job in the background, and nothing is saved |
+| failures | a missing binary or model, a server that exits or stops answering (with its last log lines), a `failed` job (with its message), or 20 minutes without a result per job. Each is an `error:` result, never a hang |
+| notes | a chat's `image` notes keep only `path`, `name`, `w`, `h`, `bytes`, `source` and `job`, never pixels. `imgjob` notes (one per job, kept current by the window) keep `job`, `kind`, `phase`, `stage`, `w`, `h` and `line`, so a restart can show an unfinished job as interrupted |
+| thread | `tool_progress` is always called on the turn's own thread: the tool polls the job and reads the log in its own loop, and the sink is thread-local, so a helper thread's `report_progress` reaches nothing |
+
+Measured 2026-09-27, RTX 5090 beside the 27B serve (8.15 GiB free after its load), 62 GiB host,
+sd-server 2f88688 with the argv above, 40 steps (crow-nest `decode_out/p3-img`, RESULTS.md):
+
+| job | wall clock | result |
+|---|---|---|
+| generate 2752×1536, cold (first job loads the weights) | 175.3 s | clean; card peak 31,322 MiB |
+| generate 2752×1536, warm | 155.2 s | clean; no text-encoder reload |
+| edit at 4 MP (ref 2752×1536, out 2752×1536) | 697.2 s | grain over the whole frame, edit not applied |
+| edit, ref 1376×768, out 2752×1536 | 251.4 s | frame-wide grain |
+| edit stage 1 (E3): ref 1376×768, out 1376×768 | 105.7 s | clean, edit applied |
+| stage 2 (B5): E3 to 2752×1536, strength 0.25 | 55.3 s | clean, closest to E3 |
+
+The two-stage edit is therefore about 161 s, close to one warm generation.
+Both tools ran end to end in the window on 2026-09-27 (robin's live check, #308/#311): generate 162.2 s and 163.6 s, edit 109.4 s + 60.3 s at 2752×1536 (`sd-server-8097.log`); the table's numbers come from the measurement script's requests.
+One difference: B5's init was E3 upscaled beforehand (`E3-up.png`), while the tool lets the
+server stretch it (`image_preprocess`); the live edit on 2026-09-27 came out clean at 2752×1536
+this way (looked at, not measured against B5).
 
 ### Delegation (#143)
 

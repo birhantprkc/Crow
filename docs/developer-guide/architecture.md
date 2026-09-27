@@ -51,7 +51,10 @@ Every child a tool starts goes through `_bounded_run` in `crow_core.py` (#207, #
 `run_command`'s shell, every esbuild call of `build_bundle` including its `--version` probes,
 and the `node --check` of `write_file`/`append_file` (#251). It owns the one deadline, the
 capture cap in the reader threads and the kill of the child's whole process group; on Linux
-`run_command` adds its own systemd user scope around it. A goal's acceptance check (#250) runs
+`run_command` adds its own systemd user scope around it (`MemoryMax` only, no `MemoryHigh`,
+#309), and records a scope that still holds a process after the call returned: `run_tool_cached`
+prefixes every later tool result with a note when that job was killed at its ceiling or is
+stalled on memory (`_BACKGROUND_JOBS`, `crow_platform.scope_memory_state`). A goal's acceptance check (#250) runs
 through `run_command`, so it gets the same clock, cap and scope. `render_page` is the one
 exception: it drives its browser over its own DevTools pipe under its own scope (#213).
 

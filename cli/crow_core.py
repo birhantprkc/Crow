@@ -1304,6 +1304,50 @@ TOOLS = [
                   "description": "1-based goal step the verdict belongs to. "
                                  "Default: the running step."}},
         []),
+    # #300 phase 3. THE MODEL'S OWN IMAGE MODEL, so a picture is no longer a
+    # detached sd-cli plus sleep-polling (#308 msgs 16-44). Both run on the
+    # resident sd-server and report their phases while they run.
+    _fn("generate_image",
+        "Create a new picture with the local image model (Qwen-Image 2.1). "
+        "Write the prompt as a full description of the whole picture: "
+        "subject, composition, style, light, colours, any text in it. Takes "
+        "about 3 minutes; progress shows while it runs. The PNG is saved in "
+        "<working root>/images/ and handed back to you as an image, so you "
+        "can check it.",
+        {"prompt": dict(_STR, description="The full description of the "
+                                          "picture."),
+         "aspect_ratio": dict(_STR, description="1:1, 4:3, 3:4, 3:2, 2:3, "
+                                                "16:9 or 9:16, each at the "
+                                                "model's full size (16:9 is "
+                                                "2752x1536). Default 16:9."),
+         "seed": {"type": "integer",
+                  "description": "Fixed seed to repeat a result. Default: "
+                                 "random, named in the result."}},
+        ["prompt"]),
+    _fn("edit_image",
+        "Change existing pictures with the local image model: 1-10 input "
+        "images plus an instruction. Runs two stages in this one call: the "
+        "edit at about 1 megapixel following `instruction`, then a "
+        "refinement to full size that sees only `description` and the "
+        "stage-1 picture -- so `description` must describe the whole FINAL "
+        "picture in full (subject, composition, style, light, colours), not "
+        "just the change. About 3 minutes. The PNG is saved in <working "
+        "root>/images/ and handed back to you as an image. For a picture "
+        "from nothing use generate_image.",
+        {"images": {"type": "array", "items": _STR,
+                    "description": "1-10 image paths in the working area; "
+                                   "the last one sets the default shape."},
+         "instruction": dict(_STR, description="What to change, e.g. 'make "
+                                               "it a bright daytime scene, "
+                                               "keep everything else'."),
+         "description": dict(_STR, description="The full description of "
+                                               "the final picture, for "
+                                               "stage 2."),
+         "aspect_ratio": dict(_STR, description="1:1, 4:3, 3:4, 3:2, 2:3, "
+                                                "16:9 or 9:16. Default: the "
+                                                "last image's shape, snapped "
+                                                "to that list.")},
+        ["images", "instruction", "description"]),
 ]
 
 # THE BUILT-INS AS SHIPPED -- twelve until #143 added the delegation three --
@@ -2528,7 +2572,19 @@ SESSION_NOTES_KEY = "notes"
 # Was ueberhaupt eine Marke ist. Drei Arten, und alle drei zeichnen eine eigene
 # Zeile in den Verlauf; alles andere gehoert zu einem Zug (Kostenzeile, Werkzeug)
 # oder zum Fensterzustand und wird beim Zeichnen ohnehin neu erzeugt.
-SESSION_NOTE_KINDS = ("note", "memory", "alarm")
+# #311: "image" is the fourth -- a picture a tool created, drawn at its place
+# in the chat after a restart. It carries the file's facts, NEVER its pixels
+# (SESSION_NOTE_FIELDS): an 8 MB PNG in session.json would be read and
+# rewritten on every save. #308: "imgjob" is the fifth -- the window keeps one
+# mark per image job, updated as it runs, so a restart draws a job that never
+# finished as interrupted instead of a running animation.
+SESSION_NOTE_KINDS = ("note", "memory", "alarm", "image", "imgjob")
+SESSION_NOTE_FIELDS = {
+    "image": {"path": str, "name": str, "w": int, "h": int, "bytes": int,
+              "source": str, "job": str},
+    "imgjob": {"job": str, "kind": str, "phase": str, "stage": str, "w": int,
+               "h": int, "line": str},
+}
 # Kein Band ohne Grenze: ein Chat, der stundenlang Moduswechsel sammelt, soll
 # seine Datei nicht damit fuellen. Die aeltesten fallen zuerst.
 SESSION_NOTES_MAX = 400
@@ -3178,8 +3234,15 @@ def clean_notes(notes: "list | None") -> list:
                 "t": str(note.get("t") or "")}
         # `memory` traegt eine Zahl, die anderen nicht -- mitgeschrieben nur,
         # wenn sie da ist, damit die Zeile beim Zeichnen dieselbe bleibt.
-        if isinstance(note.get("n"), int):
+        if isinstance(note.get("n"), int) and kind not in SESSION_NOTE_FIELDS:
             keep["n"] = note["n"]
+        # #311, #308: an image card's or job's facts, each field typed;
+        # anything else the page put on it -- a data URL above all -- stays
+        # in the page.
+        for name, typ in SESSION_NOTE_FIELDS.get(kind, {}).items():
+            value = note.get(name)
+            if isinstance(value, typ) and not isinstance(value, bool):
+                keep[name] = value
         out.append(keep)
     return out[-SESSION_NOTES_MAX:]
 
@@ -12045,6 +12108,1005 @@ def tool_read_image(path: str, **_) -> str:
     return said
 
 
+# ------------------------------------------ #300 phase 3, #308, #311 -----
+# IMAGE TOOLS: generate_image and edit_image over a RESIDENT sd-server.
+#
+# WHY A SERVER AND NOT sd-cli PER CALL. #300 phase 3 A measured what a cold
+# sd-cli pays per image: 397 text-encoder tensors plus 14.27 s of CPU text
+# encoding BEFORE the first step, and on 2026-09-27 a detached sd-cli inside
+# run_command's 8G scope never got past that load in 10 min 47 s (#308). The
+# resident server pays the load once: G1 175.3 s cold, G2 155.2 s warm at
+# 2752x1536, 40 steps, beside the 27B serve (crow-nest decode_out/p3-img,
+# RESULTS.md). So the server is started on the first call and kept.
+#
+# WHY THE LOG AND NOT AN API FOR PROGRESS. sd-server 2f88688 has none: the job
+# JSON carries a status and no step, there is no SSE and no websocket (#308
+# Research 2; upstream PR #1884 is open). Its bars go to its own stdout, which
+# Crow owns because Crow started it -- so the tool tails that file.
+IMAGE_SERVER_URL = "http://127.0.0.1:8097"
+IMAGE_MODEL_NAME = "qwen-image-2.1"
+IMAGE_MODEL_DIR_ENV = "CROW_IMAGE_MODEL_DIR"
+IMAGE_TOOL_NAMES = ("generate_image", "edit_image")
+IMAGE_HANDED = " It is handed to you as an image below."
+
+# ONE JOB MAY TAKE 20 MINUTES, AND NOT ONE SECOND MORE. The slowest measured
+# job was E1, a 4 MP edit: 697.2 s. Twice that is still a job that ends; a
+# server that holds a job longer is stuck, and a tool that waits for it is
+# the hang this ticket exists to end.
+IMAGE_JOB_TIMEOUT = 20 * 60
+IMAGE_POLL_S = 0.5
+# `capabilities` answers once the arguments are parsed -- the weights load
+# lazily with the first job ("weights will be prepared lazily", sd-server.log).
+IMAGE_BOOT_WAIT = 180.0
+
+# THE MODEL CARD'S TABLE, not a formula: each is the size Qwen-Image 2.1 was
+# trained at for that shape. 16:9 is the default because every measured run
+# (G1, G2, E1-E3, B4, B5) used it.
+IMAGE_SIZES = {
+    "1:1": (2048, 2048),
+    "4:3": (2400, 1792),
+    "3:4": (1792, 2400),
+    "3:2": (2528, 1696),
+    "2:3": (1696, 2528),
+    "16:9": (2752, 1536),
+    "9:16": (1536, 2752),
+}
+IMAGE_DEFAULT_ASPECT = "16:9"
+IMAGE_STEPS = 40
+IMAGE_MAX_INPUTS = 10
+
+# THE EDIT RUNS TWICE, and robin chose it on the pictures (2026-09-27). A 4 MP
+# edit OUTPUT is grainy whatever the reference size: E1 (4 MP ref, 4 MP out)
+# and E2 (1 MP ref, 4 MP out) both show frame-wide grain, E3 (1 MP ref, 1 MP
+# out, the diffusers pipeline's own output_resolution=1024) is clean. B5 then
+# takes E3 to 2752x1536 by img2img at strength 0.25 with a full description
+# and no reference: clean, closest to E3. E3 105.7 s + B5 55.3 s.
+EDIT_STAGE1_PIXELS = 1024 * 1024
+EDIT_REF_ARGS = "vae_input_max_pixels=1048576"
+EDIT_REFINE_STRENGTH = 0.25
+
+# Per turn thread, like the INTERRUPT flag's owner: subtasks run their turns
+# on threads of their own (Subtask), and one's progress must never draw on
+# another's tile. `progress` is the sink run_turn arms around ONE call,
+# `images` what that call announced.
+_TURN_LOCAL = threading.local()
+
+_IMAGE_LOCK = threading.Lock()
+# The sd-server THIS process started: (Popen, log path). None when the server
+# on the port is somebody else's -- that one is used, never stopped.
+_IMAGE_PROC: "tuple | None" = None
+
+
+def report_progress(**state) -> None:
+    """#308. A running tool says where it is. A no-op outside a turn.
+
+    THE SINK IS THE TURN'S, NOT THE TOOL'S. The tool knows its phase and has
+    no wire to any screen; run_turn has the wire and arms it around the one
+    call it is running (`_TURN_LOCAL.progress`), so a tool called from a test,
+    a probe or a warm-up reports into nothing, as it should.
+    """
+    sink = getattr(_TURN_LOCAL, "progress", None)
+    if sink is not None:
+        try:
+            sink(dict(state))
+        except Exception:                  # noqa: BLE001 - a screen never fails a tool
+            pass
+
+
+def announce_image(path: str, source: str, job: str = "") -> None:
+    """#311. A tool wrote an image the user should see.
+
+    A RIDE LIKE _RENDER_RIDE: the tool has no wire to the window, the loop
+    does, and emits `image_created` after the call's `tool_result`. The path is
+    made absolute here, where the tool's working directory is still the one
+    that named it.
+    """
+    ride = getattr(_TURN_LOCAL, "images", None)
+    if ride is None:
+        ride = _TURN_LOCAL.images = []
+    ride.append({"path": os.path.abspath(path), "source": str(source),
+                 "job": str(job or "")})
+
+
+def take_announced_images() -> "list[dict]":
+    """What this thread's calls announced since the last take, exactly once."""
+    ride = getattr(_TURN_LOCAL, "images", None) or []
+    _TURN_LOCAL.images = []
+    return ride
+
+
+def image_model_dir() -> str:
+    """Where Qwen-Image 2.1 lies: $CROW_IMAGE_MODEL_DIR, else beside the text
+    models under `crow_platform.models_dir()`.
+
+    THE VARIABLE IS NOT A NICETY ON THIS MACHINE. install.sh links
+    `<install>/models` to ONE model's tree (here qwen3.8-flash-next), so the
+    sibling `qwen-image-2.1` is not under it; the image model sits in the
+    models root beside that tree. One variable says where, as $CROW_MODELS
+    does for the text models.
+    """
+    raw = (os.environ.get(IMAGE_MODEL_DIR_ENV) or "").strip()
+    if raw:
+        return os.path.expanduser(raw)
+    root = crow_platform.models_dir()
+    inside = os.path.join(root, IMAGE_MODEL_NAME)
+    # BESIDE THE LINKED TREE, the layout install.sh makes: `<install>/models`
+    # -> ~/Projects/models/qwen3.8-flash-next, the image model at
+    # ~/Projects/models/qwen-image-2.1 (robin's machine, 2026-09-27). Asked
+    # only when the plain place has nothing, so an install that keeps the
+    # image model inside the models root is read exactly as before.
+    beside = os.path.join(os.path.dirname(os.path.realpath(root)), IMAGE_MODEL_NAME)
+    if not os.path.isdir(inside) and os.path.isdir(beside):
+        return beside
+    return inside
+
+
+def _image_model_files(model: str) -> "list[str]":
+    """The three files the measured argv names, in argv order."""
+    return [os.path.join(model, "transformer",
+                         "diffusion_pytorch_model.safetensors.index.json"),
+            os.path.join(model, "text_encoder_sdcli",
+                         "model.safetensors.index.json"),
+            os.path.join(model, "vae", "diffusion_pytorch_model.safetensors")]
+
+
+def image_server_binary() -> "str | None":
+    """sd-server where Crow's own binaries live (`server_search_dirs`), or None."""
+    name = "sd-server.exe" if crow_platform.IS_WINDOWS else "sd-server"
+    for folder in crow_platform.server_search_dirs():
+        candidate = os.path.join(folder, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def image_tools_unavailable() -> "str | None":
+    """Why the image tools cannot run here, one sentence, or None when they can."""
+    if image_server_binary() is None:
+        return ("the image server is not installed: no sd-server in %s"
+                % " or ".join(crow_platform.server_search_dirs()))
+    model = image_model_dir()
+    missing = [p for p in _image_model_files(model) if not os.path.isfile(p)]
+    if missing:
+        return ("the image model is not on disk: %s is missing -- set %s to "
+                "the qwen-image-2.1 folder" % (missing[0], IMAGE_MODEL_DIR_ENV))
+    return None
+
+
+def image_tools_available() -> bool:
+    """Binary and model on disk -- what a surface asks before warming up."""
+    return image_tools_unavailable() is None
+
+
+def image_server_command(port: int) -> "list[str]":
+    """The argv measured on 2026-09-27 beside the 27B serve (8.15 GiB free).
+
+    `--max-vram 7` and `te=cpu` are what keeps it beside the language model:
+    card peak 31,322-31,566 MiB of 32,127 over every arm. The q8_0 prefix
+    cache is the measured line's; E1's grain was NOT traced to it (E3 is
+    clean with it). No `vae_tiling_params` is ever sent per request -- the
+    server's own `--vae-tiling` is the measured setting.
+    """
+    transformer, encoder, vae = _image_model_files(image_model_dir())
+    return [image_server_binary() or "sd-server",
+            "--diffusion-model", transformer, "--llm", encoder, "--vae", vae,
+            "--backend", "te=cpu", "--diffusion-fa", "--max-vram", "7",
+            "--vae-tiling",
+            "--model-args", "qwen_image_2_1_prefix_cache_type=q8_0",
+            "--listen-port", str(port), "-v"]
+
+
+def _image_server_env() -> dict:
+    """The process environment plus the CUDA runtime Crow ships (Linux).
+
+    sd-server links libcudart/libcublas from `<data>/cuda/lib`, which is on
+    no loader path; measured 2026-09-27, it starts only with
+    LD_LIBRARY_PATH set to that folder.
+    """
+    env = dict(os.environ)
+    lib = os.path.join(crow_platform.data_dir(), "cuda", "lib")
+    if not crow_platform.IS_WINDOWS and os.path.isdir(lib):
+        have = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = lib + (os.pathsep + have if have else "")
+    return env
+
+
+def _image_port() -> int:
+    return urllib.parse.urlsplit(IMAGE_SERVER_URL).port or 8097
+
+
+def image_server_log() -> str:
+    """sd-server's stdout+stderr, one file per port, in Crow's log directory."""
+    return os.path.join(crow_platform.log_dir(),
+                        "sd-server-%d.log" % _image_port())
+
+
+def _image_request(path: str, body: "dict | None" = None,
+                   timeout: float = 60.0) -> dict:
+    """One JSON request to the image server. Raises on transport or HTTP errors."""
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(IMAGE_SERVER_URL + path, data=data,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
+
+
+def _image_server_answers(timeout: float = 2.0) -> bool:
+    try:
+        _image_request("/sdcpp/v1/capabilities", timeout=timeout)
+        return True
+    except Exception:                      # noqa: BLE001 - not answering is the answer
+        return False
+
+
+# One pattern for every line the server redraws: `\r`, `\n` and the `ESC[K`
+# that ends each bar. The bar and a log line can share one physical line --
+# sd-server3.log: `| 2/25 - 3.56s/it^[[K[VERBOSE] ggml_runner...` -- so the
+# escape has to be a separator, not only something to strip.
+_SD_SPLIT = re.compile(rb"\r|\n|\x1b\[K")
+_SD_BAR = re.compile(r"^\|([#=> ]*)\|\s*(\d+)/(\d+)\s*-\s*([\d.]+)\s*"
+                     r"(s/it|it/s|GB/s|MB/s|KB/s|B/s)")
+_SD_LOG = re.compile(r"^\[(INFO|VERBOSE|DEBUG|WARN|ERROR)\s*\][^-]*-\s(.*)$")
+
+
+def _image_log_tail(path: str, lines: int = 6) -> str:
+    """The server's last log lines, bars dropped -- evidence for an error."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 65536))
+            raw = fh.read()
+    except OSError:
+        return "(no server log at %s)" % path
+    kept = []
+    for seg in _SD_SPLIT.split(raw):
+        text = seg.decode("utf-8", "replace").strip()
+        if text and not _SD_BAR.match(text):
+            kept.append(text)
+    return "\n".join(kept[-lines:]) if kept else "(the server printed nothing)"
+
+
+def _image_proc_alive() -> bool:
+    return _IMAGE_PROC is not None and _IMAGE_PROC[0].poll() is None
+
+
+def image_server_start() -> "str | None":
+    """Make sure an image server answers on IMAGE_SERVER_URL. None, or the error.
+
+    SOMEBODY ELSE'S SERVER IS USED, NOT REPLACED -- start_server's rule: a
+    second sd-server beside the first would load 29.8 GB of weights twice
+    into RAM ("total params memory size = 29751.86MB", sd-server.log).
+
+    DETACHED LIKE start_server'S BOOT (#158): its own session and, on Linux,
+    its own user scope outside app.slice, so a Ctrl+C or an oomd kill of the
+    window's scope does not take it along, and it does not take the window.
+    One log per port, the previous generation kept (#166).
+    """
+    global _IMAGE_PROC
+    with _IMAGE_LOCK:
+        if _image_server_answers():
+            return None
+        why = image_tools_unavailable()
+        if why:
+            return why
+        if _IMAGE_PROC is not None:
+            crow_platform.terminate_tree(_IMAGE_PROC[0])
+            _IMAGE_PROC = None
+        log = image_server_log()
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        _keep_previous_log(log)
+        try:
+            with open(log, "wb") as sink:
+                proc = subprocess.Popen(
+                    crow_platform.server_scope_prefix()
+                    + image_server_command(_image_port()),
+                    stdout=sink, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, env=_image_server_env(),
+                    **crow_platform.spawn_kwargs(detached=True))
+        except OSError as exc:
+            return "the image server could not be started: %s" % exc
+        _IMAGE_PROC = (proc, log)
+        deadline = time.monotonic() + IMAGE_BOOT_WAIT
+        while time.monotonic() < deadline:
+            code = proc.poll()
+            if code is not None:
+                _IMAGE_PROC = None
+                return ("the image server exited with %s before it answered. "
+                        "Its last lines:\n%s" % (code, _image_log_tail(log)))
+            if _image_server_answers():
+                log_note("image server started (pid %d, log %s)"
+                         % (proc.pid, log), "image")
+                return None
+            if INTERRUPT.is_set():
+                return STOPPED + " while the image server was starting"
+            time.sleep(IMAGE_POLL_S)
+        return ("the image server did not answer within %.0f s. Its last "
+                "lines:\n%s" % (IMAGE_BOOT_WAIT, _image_log_tail(log)))
+
+
+def image_server_stop() -> None:
+    """End the sd-server THIS process started. Called at exit.
+
+    THE HANDLE, NEVER A NAME (terminate_tree, #158): a server somebody else
+    started on the port keeps running.
+    """
+    global _IMAGE_PROC
+    with _IMAGE_LOCK:
+        held, _IMAGE_PROC = _IMAGE_PROC, None
+    if held is not None:
+        crow_platform.terminate_tree(held[0])
+
+
+atexit.register(image_server_stop)
+
+
+def image_server_warm() -> "threading.Thread | None":
+    """Start the image server and send it one tiny job, in a daemon thread.
+
+    THE FIRST REAL JOB SHOULD NOT PAY THE LOAD. G1 (cold) took 175.3 s and
+    G2 (warm) 155.2 s; the difference is the lazy weight load, which any
+    job triggers. 256x256 at one step is the smallest job that loads every
+    part. Nothing is saved and nothing is reported: a surface calls this at
+    start when `image_tools_available()`, and a failure shows up again, with
+    its reason, on the first real call.
+    """
+    if not image_tools_available():
+        return None
+
+    def warm() -> None:
+        if image_server_start() is not None:
+            return
+        try:
+            _image_request("/sdcpp/v1/img_gen", {
+                "prompt": "a plain grey square", "width": 256, "height": 256,
+                "seed": 1, "sample_params": {
+                    "sample_steps": 1, "sample_method": "euler",
+                    "guidance": {"txt_cfg": 1.0}}}, timeout=30)
+        except Exception:                  # noqa: BLE001 - a warm-up is best effort
+            return
+
+    thread = threading.Thread(target=warm, name="crow-image-warm", daemon=True)
+    thread.start()
+    return thread
+
+
+class SdProgress:
+    """#308. sd-server's console, read as phases. Bytes in, states out.
+
+    THE TABLE IS #308's, matched on MESSAGE TEXT, never on `file:line` -- the
+    installed binary logs image.cpp:805 where the checkout says :809.
+
+      `#` bar before the condition is done   loading   i/N tensors
+      the rest before it                     encoding  (CPU text encoder;
+                                                        `=` bars: VAE tiles)
+      `generating image:` then `=` bars      sampling  i/N, s/it, ETA
+      `#` bars inside sampling               sampling  (streamed DiT, no change)
+      `decoding N latents` then `=` bars     decoding  tile i/N
+      `generate_image completed in`          saved
+      `[ERROR`                               error     that line
+
+    A line it does not know changes nothing: a verbose log is mostly such
+    lines, and a parser that raised on one would end the job it watches.
+    `generate_image WxH` starts a job and resets the state -- the log is one
+    file across jobs, and a warm-up may still be running when a job is sent.
+
+    ETA = (N - i) x the median of the last <= 5 step times, step 1 excluded:
+    it measured 8.81 s against ~3.57 s later (gen2.log), because it holds the
+    segment loads.
+    """
+
+    def __init__(self) -> None:
+        self._rest = b""
+        self.reset()
+
+    def reset(self) -> None:
+        self.phase = "loading"
+        self.i: "int | None" = None
+        self.n: "int | None" = None
+        self.eta_s: "float | None" = None
+        self.line = "loading weights"
+        self.error: "str | None" = None
+        self._conditioned = False
+        self._steps: "list[float]" = []
+
+    def state(self) -> dict:
+        return {"phase": self.phase, "i": self.i, "n": self.n,
+                "eta_s": self.eta_s, "line": self.line}
+
+    def feed(self, data: bytes) -> "list[dict]":
+        """The states the new bytes produced, in order. A cut line waits."""
+        chunks = _SD_SPLIT.split(self._rest + (data or b""))
+        self._rest = chunks.pop()
+        out = []
+        for raw in chunks:
+            text = raw.decode("utf-8", "replace").strip()
+            if text and self._take(text):
+                out.append(self.state())
+        return out
+
+    def _take(self, text: str) -> bool:
+        bar = _SD_BAR.match(text)
+        if bar:
+            return self._bar(bar)
+        log = _SD_LOG.match(text)
+        if not log:
+            return False
+        level, msg = log.group(1), log.group(2).strip()
+        if level == "ERROR":
+            self.phase, self.i, self.n, self.eta_s = "error", None, None, None
+            self.error = self.line = msg
+            return True
+        if msg.startswith("generate_image completed"):
+            took = re.search(r"in ([\d.]+)s", msg)
+            self.phase, self.i, self.n, self.eta_s = "saved", None, None, 0.0
+            self.line = "done in %s s" % took.group(1) if took else "done"
+            return True
+        if re.match(r"generate_image \d+x\d+", msg):
+            self.reset()
+            return True
+        if msg.startswith("loading tensors completed") and not self._conditioned:
+            if self.phase == "loading":
+                self.phase, self.i, self.n = "encoding", None, None
+                self.line = "encoding prompt (CPU)"
+                return True
+            return False
+        if msg.startswith("get_learned_condition completed"):
+            self._conditioned = True
+            self.phase, self.i, self.n = "encoding", None, None
+            self.line = "prompt encoded"
+            return True
+        if msg.startswith("generating image:"):
+            self._conditioned = True
+            self.phase, self.i, self.n, self.eta_s = "sampling", 0, None, None
+            self._steps = []
+            self.line = "sampling"
+            return True
+        if msg.startswith("decoding ") and "latent" in msg:
+            self.phase, self.i, self.n, self.eta_s = "decoding", None, None, None
+            self.line = "decoding (VAE)"
+            return True
+        return False
+
+    def _bar(self, bar) -> bool:
+        i, n = int(bar.group(2)), int(bar.group(3))
+        rate, unit = float(bar.group(4)), bar.group(5)
+        bytes_bar = unit.endswith("B/s")
+        if self.phase in ("sampling", "decoding"):
+            if bytes_bar:
+                return False                   # streamed DiT / VAE segments
+            if self.phase == "decoding":
+                self.i, self.n = i, n
+                self.line = "decoding (VAE) %d/%d" % (i, n)
+                return True
+            per_step = rate if unit == "s/it" else (1.0 / rate if rate else 0.0)
+            if i >= 2 and (self.i is None or i > self.i):
+                self._steps.append(per_step)
+            self.i, self.n = i, n
+            recent = sorted(self._steps[-5:])
+            if recent:
+                mid = len(recent) // 2
+                median = (recent[mid] if len(recent) % 2
+                          else (recent[mid - 1] + recent[mid]) / 2)
+                self.eta_s = round((n - i) * median, 1)
+            else:
+                self.eta_s = None
+            self.line = "sampling %d/%d · %.2f s/it" % (i, n, per_step)
+            if self.eta_s is not None:
+                self.line += " · ETA %s" % format_clock(self.eta_s)
+            return True
+        if self.phase in ("saved", "error"):
+            return False
+        if bytes_bar:
+            self.phase, self.i, self.n = "loading", i, n
+            self.line = "loading weights %d/%d · %s %s" % (i, n, bar.group(4), unit)
+            return True
+        self.phase, self.i, self.n = "encoding", i, n
+        self.line = "encoding image %d/%d" % (i, n)
+        return True
+
+
+def image_dimensions(path: str) -> "tuple[int, int] | None":
+    """(width, height) from the file header: PNG IHDR, JPEG SOFn, WebP
+    VP8/VP8L/VP8X, GIF. None for anything else. Pure Python -- Crow's venv
+    has no Pillow, and a header is all a size needs."""
+    import struct
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(64)
+            if head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR":
+                return struct.unpack(">II", head[16:24])
+            if head[:6] in (b"GIF87a", b"GIF89a"):
+                return struct.unpack("<HH", head[6:10])
+            if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                kind = head[12:16]
+                if kind == b"VP8X":
+                    w = int.from_bytes(head[24:27], "little") + 1
+                    h = int.from_bytes(head[27:30], "little") + 1
+                    return w, h
+                if kind == b"VP8L":
+                    bits = int.from_bytes(head[21:25], "little")
+                    return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+                if kind == b"VP8 ":
+                    w, h = struct.unpack("<HH", head[26:30])
+                    return w & 0x3FFF, h & 0x3FFF
+                return None
+            if not head.startswith(b"\xff\xd8"):
+                return None
+            # JPEG: walk the markers to the first SOFn (C0-CF but C4, C8, CC).
+            fh.seek(2)
+            while True:
+                mark = fh.read(2)
+                while mark[:1] == b"\xff" and mark[1:2] == b"\xff":
+                    mark = mark[1:] + fh.read(1)       # fill bytes
+                if len(mark) < 2 or mark[0] != 0xFF:
+                    return None
+                code = mark[1]
+                if code in (0xD8, 0x01) or 0xD0 <= code <= 0xD7:
+                    continue
+                size = fh.read(2)
+                if len(size) < 2:
+                    return None
+                length = struct.unpack(">H", size)[0]
+                if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+                    body = fh.read(5)
+                    if len(body) < 5:
+                        return None
+                    h, w = struct.unpack(">HH", body[1:5])
+                    return w, h
+                fh.seek(length - 2, os.SEEK_CUR)
+    except (OSError, struct.error):
+        return None
+
+
+def snap_aspect(width: int, height: int) -> str:
+    """The IMAGE_SIZES key nearest to width:height, by log ratio."""
+    ratio = math.log(max(1, width) / max(1, height))
+    return min(IMAGE_SIZES, key=lambda k: abs(
+        math.log(IMAGE_SIZES[k][0] / IMAGE_SIZES[k][1]) - ratio))
+
+
+def one_megapixel(ratio: float) -> "tuple[int, int]":
+    """diffusers `calculate_dimensions(1024*1024, ratio)`: ~1 MP, both /32.
+
+    The QwenImage21Pipeline sizes every condition image and the edit output
+    this way (output_resolution=1024); 16:9 gives 1376x768, the E3 size.
+    """
+    width = math.sqrt(EDIT_STAGE1_PIXELS * ratio)
+    height = width / ratio
+    return int(round(width / 32) * 32), int(round(height / 32) * 32)
+
+
+def _image_input(raw) -> "tuple[str | None, str | None]":
+    """(absolute path, None) for an image an edit may read, else (None, error).
+
+    READ_IMAGE'S CHECKS (`_rooted`, #177; the IMAGE_TYPES table; the
+    IMAGE_MAX_BYTES bound, #207) plus the magic bytes (#301's `_binary_kind`),
+    because these bytes leave for another process and a text file named .png
+    is a failed job three minutes later instead of a refusal now. And the
+    working area (#144): a picture outside it is read only when the user
+    named that path (_MANDATED) or released it with "always" -- the edit
+    reads it without asking, so the ask has to have happened already.
+    """
+    text = str(raw or "").strip().strip("'\"")
+    if not text:
+        return None, "error: an empty image path"
+    path = os.path.abspath(_rooted(os.path.expanduser(text)))
+    if not os.path.isfile(path):
+        return None, "error: no such image: %s" % path
+    if os.path.splitext(path)[1].lower() not in IMAGE_TYPES:
+        return None, ("error: not an image this tool takes: %s. It takes: %s"
+                      % (path, " ".join(sorted(IMAGE_TYPES))))
+    if os.path.getsize(path) > IMAGE_MAX_BYTES:
+        return None, ("error: image is over %d MiB: %s"
+                      % (IMAGE_MAX_BYTES >> 20, path))
+    try:
+        with open(path, "rb") as fh:
+            found = _binary_kind(fh.read(_SNIFF_BYTES))
+    except OSError as exc:
+        return None, "error: cannot read image %s: %s" % (path, exc)
+    if found is None or found[1] is None:
+        return None, ("error: %s is named like an image but its bytes are %s"
+                      % (path, found[0] if found else "text"))
+    root = get_root()
+    if root and not _inside(root, path) \
+            and not any(_inside(m, path) for m in _MANDATED):
+        # A RELEASE THAT HOLDS THE WORKING AREA RELEASES NOTHING HERE. The
+        # store on this machine (2026-09-27) carries ("outside", "/") and
+        # ("outside", "/home") -- paths the #144 extractor read out of shell
+        # text -- and "at or below" either is every file on the disk. An
+        # outside release is by its own name about a place beside the area.
+        released = _ALLOWED | _approvals_stored()
+        if not any(kind == "outside" and where and _inside(where, path)
+                   and not _inside(where, root) for kind, where in released):
+            return None, ("error: %s is outside the working area (%s). Copy "
+                          "it in with run_command first, or have the user "
+                          "name it." % (path, root))
+    return path, None
+
+
+def _image_slug(text: str) -> str:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    slug = ""
+    for word in words:
+        if len(slug) + len(word) + 1 > 40:
+            break
+        slug = word if not slug else slug + "-" + word
+    return slug or "image"
+
+
+def _save_image(png: bytes, about: str) -> str:
+    """Write the PNG as <root>/images/<YYYYmmdd-HHMMSS>-<slug>.png. NEVER
+    OVERWRITES: an existing name gets -2, -3, ... and the write itself is
+    exclusive ("xb"), so two calls in one second cannot race onto one file."""
+    folder = os.path.join(get_root() or os.getcwd(), "images")
+    os.makedirs(folder, exist_ok=True)
+    stem = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), _image_slug(about))
+    for n in range(1, 1000):
+        path = os.path.join(folder, stem + (".png" if n == 1 else "-%d.png" % n))
+        try:
+            with open(path, "xb") as fh:
+                fh.write(png)
+            return path
+        except FileExistsError:
+            continue
+    raise OSError("no free file name for %s in %s" % (stem, folder))
+
+
+def _run_image_job(body: dict, base: dict, refine: bool = False
+                   ) -> "tuple[bytes | None, float, str | None]":
+    """Submit one job, report it until it ends. (png, seconds, None) or
+    (None, seconds, the error or STOPPED line).
+
+    THE JOB ENDPOINT DECIDES, THE LOG DESCRIBES. `GET /sdcpp/v1/jobs/{id}`
+    is the authority for done and failed; the log only names the phase, and
+    an `[ERROR` line there is held as the reason, not as the verdict.
+
+    STOP ENDS THE WAIT, NOT THE JOB. The server cancels a job only while it
+    is queued (409 "cannot be interrupted yet" while generating, #308
+    Research 2), so the cancel is tried once and the answer says the server
+    finishes the job in the background.
+    """
+    began = time.monotonic()
+    last: "dict | None" = None
+
+    def emit(**state) -> None:
+        nonlocal last
+        full = dict(base, stage=base.get("stage", ""), i=None, n=None,
+                    eta_s=None, line="")
+        full.update(state)
+        if refine and full["phase"] == "sampling":
+            full["phase"] = "refining"
+            full["line"] = full["line"].replace("sampling", "refining", 1)
+        if full != last:
+            last = full
+            report_progress(**full)
+
+    log = image_server_log()
+    try:
+        offset = os.path.getsize(log)
+    except OSError:
+        offset = 0
+    try:
+        accepted = _image_request("/sdcpp/v1/img_gen", body, timeout=120)
+    except urllib.error.HTTPError as exc:
+        try:
+            said = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:                  # noqa: BLE001
+            said = ""
+        exc.close()
+        return None, time.monotonic() - began, (
+            "error: the image server refused the job (HTTP %s): %s"
+            % (exc.code, said))
+    except Exception as exc:               # noqa: BLE001
+        return None, time.monotonic() - began, (
+            "error: the image server could not be reached: %s" % exc)
+    job_id = str(accepted.get("id") or "")
+    if not job_id:
+        return None, time.monotonic() - began, (
+            "error: the image server answered without a job id: %s"
+            % json.dumps(accepted)[:300])
+    parser = SdProgress()
+    emit(phase="queued", line="queued")
+    deadline = began + IMAGE_JOB_TIMEOUT
+    while True:
+        if INTERRUPT.is_set():
+            try:
+                _image_request("/sdcpp/v1/jobs/%s/cancel" % job_id, {},
+                               timeout=5)
+            except urllib.error.HTTPError as exc:
+                exc.close()                    # 409 while generating
+            except Exception:              # noqa: BLE001
+                pass
+            took = time.monotonic() - began
+            emit(phase="stopped", line="stopped -- the server finishes the "
+                 "job in the background")
+            return None, took, (
+                "%s after %.0fs -- the image server cannot interrupt a job it "
+                "has started, so it finishes job %s in the background; its "
+                "picture is not saved" % (STOPPED, took, job_id))
+        if time.monotonic() > deadline:
+            emit(phase="error", line="no result after %d min" % (IMAGE_JOB_TIMEOUT // 60))
+            return None, time.monotonic() - began, (
+                "error: the image job %s gave no result within %d min; the "
+                "server's last lines:\n%s" % (job_id, IMAGE_JOB_TIMEOUT // 60,
+                                              _image_log_tail(log)))
+        if _IMAGE_PROC is not None and not _image_proc_alive():
+            code = _IMAGE_PROC[0].poll()
+            emit(phase="error", line="the image server exited (%s)" % code)
+            return None, time.monotonic() - began, (
+                "error: the image server exited with %s during the job; its "
+                "last lines:\n%s" % (code, _image_log_tail(log)))
+        try:
+            job = _image_request("/sdcpp/v1/jobs/%s" % job_id, timeout=30)
+        except Exception as exc:           # noqa: BLE001
+            emit(phase="error", line="the image server stopped answering")
+            return None, time.monotonic() - began, (
+                "error: the image server stopped answering (%s); its last "
+                "lines:\n%s" % (exc, _image_log_tail(log)))
+        try:
+            with open(log, "rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                if size < offset:
+                    offset = 0                 # a restarted server's new file
+                fh.seek(offset)
+                fresh = fh.read()
+                offset += len(fresh)
+        except OSError:
+            fresh = b""
+        states = parser.feed(fresh)
+        status = job.get("status")
+        if status == "queued":
+            pos = job.get("queue_position")
+            emit(phase="queued", line="queued" + (
+                " (%s ahead)" % pos if isinstance(pos, int) and pos > 0 else ""))
+        elif status == "generating":
+            # One event per phase the new bytes passed through, the last
+            # state of each: a fast phase is not skipped, a slow one does not
+            # flood the seam.
+            for k, state in enumerate(states):
+                nxt = states[k + 1] if k + 1 < len(states) else None
+                if nxt is None or nxt["phase"] != state["phase"]:
+                    if state["phase"] not in ("saved", "error"):
+                        emit(**state)
+        elif status == "completed":
+            try:
+                raw = (job.get("result") or {}).get("images")[0]["b64_json"]
+                import base64
+                png = base64.b64decode(raw)
+            except Exception:              # noqa: BLE001
+                emit(phase="error", line="the job finished without an image")
+                return None, time.monotonic() - began, (
+                    "error: the image job %s completed without an image"
+                    % job_id)
+            return png, time.monotonic() - began, None
+        elif status in ("failed", "cancelled"):
+            err = job.get("error") or {}
+            said = (err.get("message") if isinstance(err, dict) else str(err)) \
+                or parser.error or status
+            emit(phase="error", line=str(said)[:200])
+            return None, time.monotonic() - began, (
+                "error: the image job %s: %s%s" % (
+                    status, said,
+                    ("\nlog: " + parser.error) if parser.error
+                    and parser.error != said else ""))
+        time.sleep(IMAGE_POLL_S)
+
+
+def _image_result(path: str, png: bytes, seconds: float, seed: int,
+                  extra: str = "") -> str:
+    """The tool's answer, and the picture on the image ride for the model.
+
+    THE SAME RIDE AS read_image (#170), and the same bound: the file travels
+    as it is on disk, and the server caps it at --image-max-tokens. A blind
+    server is caught in run_turn, where the image tools keep their result and
+    only lose the picture.
+    """
+    size = image_dimensions(path) or (0, 0)
+    shown = path
+    root = get_root()
+    if root and _inside(root, path):
+        # FORWARD SLASHES on every platform: the model hands this path back to
+        # edit_image/read_image, which take "/" on Windows too, and one
+        # spelling keeps the transcript the same everywhere (Windows CI, 2026-09-27).
+        shown = os.path.relpath(path, root).replace(os.sep, "/")
+    said = "saved %s (%s) -- %dx%d, %s bytes, %.1f s%s, seed %d." % (
+        shown, path, size[0], size[1], "{:,}".format(len(png)), seconds,
+        extra, seed)
+    if len(png) <= IMAGE_MAX_BYTES:
+        try:
+            _IMAGE_RIDE.clear()
+            _IMAGE_RIDE.append([image_part(path)])
+            said += IMAGE_HANDED
+        except CrowError:
+            pass
+    return said
+
+
+def _image_seed(seed) -> "tuple[int | None, str | None]":
+    if seed is None or seed == "":
+        return random.SystemRandom().randrange(2 ** 31), None
+    try:
+        value = int(seed)
+    except (TypeError, ValueError):
+        return None, "error: seed must be an integer, got %r" % (seed,)
+    if value < 0:
+        return None, "error: seed must be 0 or more, got %d" % value
+    return value, None
+
+
+def _image_aspect(aspect_ratio) -> "tuple[str | None, str | None]":
+    key = str(aspect_ratio or "").replace(" ", "")
+    if key in IMAGE_SIZES:
+        return key, None
+    return None, ("error: aspect_ratio must be one of %s, got %r"
+                  % (", ".join(IMAGE_SIZES), aspect_ratio))
+
+
+def _image_sample_params() -> dict:
+    """The measured sampler: 40 Euler steps, txt_cfg 1.0 (the pipeline's
+    `true_cfg_scale` default -- "meant to be sampled without guidance")."""
+    return {"sample_steps": IMAGE_STEPS, "sample_method": "euler",
+            "guidance": {"txt_cfg": 1.0}}
+
+
+def _image_start(kind: str, width: int, height: int, stage: str
+                 ) -> "tuple[dict, str | None]":
+    """The call's identity, its first progress event, and the server.
+
+    THE FIRST EVENT GOES OUT BEFORE ANYTHING SLOW (#308 acceptance: the tile
+    within 2 s): it carries the final width and height, so a placeholder has
+    its shape before the server is even asked.
+    """
+    import uuid
+    base = {"job": "img-" + uuid.uuid4().hex[:12], "kind": kind,
+            "stage": stage, "width": width, "height": height}
+    up = _image_server_answers(timeout=0.5)
+    report_progress(**dict(base, phase="queued" if up else "loading",
+                           i=None, n=None, eta_s=None,
+                           line="sending the job" if up
+                           else "starting the image server"))
+    why = None if up else image_server_start()
+    if why is not None:
+        report_progress(**dict(base, phase="stopped" if why.startswith(STOPPED)
+                               else "error", i=None, n=None, eta_s=None,
+                               line=why.splitlines()[0][:200]))
+        if not why.startswith(STOPPED) and not why.startswith("error: "):
+            why = "error: " + why
+    return base, why
+
+
+def tool_generate_image(prompt: str, aspect_ratio: str = IMAGE_DEFAULT_ASPECT,
+                        seed=None, **_) -> str:
+    """#300 phase 3. A new picture from a prompt, saved under <root>/images/.
+
+    ONE CALL, ONE PICTURE, AND THE CALL WAITS FOR IT. The model's own
+    workaround before this tool -- `nohup sd-cli ... &` plus sleep-polling --
+    cost eight poll calls and two wrong readings of the log (#308 msgs
+    20-44). Here the wait is the tool's, and the progress is the window's.
+    """
+    if not str(prompt or "").strip():
+        return "error: prompt is empty -- describe the whole picture"
+    aspect, bad = _image_aspect(aspect_ratio or IMAGE_DEFAULT_ASPECT)
+    if bad:
+        return bad
+    value, bad = _image_seed(seed)
+    if bad:
+        return bad
+    width, height = IMAGE_SIZES[aspect]
+    base, why = _image_start("generate", width, height, "")
+    if why is not None:
+        return why
+    png, took, err = _run_image_job({
+        "prompt": str(prompt), "width": width, "height": height,
+        "seed": value, "sample_params": _image_sample_params()}, base)
+    if err is not None:
+        return err
+    try:
+        path = _save_image(png, str(prompt))
+    except OSError as exc:
+        report_progress(**dict(base, phase="error", i=None, n=None,
+                               eta_s=None, line=str(exc)[:200]))
+        return "error: the picture could not be saved: %s" % exc
+    report_progress(**dict(base, phase="saved", i=None, n=None, eta_s=0.0,
+                           line=path))
+    announce_image(path, "generate_image", base["job"])
+    return _image_result(path, png, took, value)
+
+
+def tool_edit_image(images=None, instruction: str = "", description: str = "",
+                    aspect_ratio=None, **_) -> str:
+    """#300 phase 3. Change 1-10 pictures in TWO STAGES, one call.
+
+    Stage 1 edits at ~1 MP: every reference resized by the server
+    (`image_preprocess`, no Pillow here) to its own one_megapixel size, the
+    output at the target shape's one_megapixel size (16:9: 1376x768),
+    `ref_image_args` vae_input_max_pixels=1048576 -- E3, clean in 105.7 s.
+    Stage 2 is img2img at the full size WITHOUT references: the stage-1 PNG
+    as init, stretched by the server, strength 0.25, prompt = the full
+    description of the final picture -- B5, 55.3 s. The instruction alone
+    cannot be stage 2's prompt: without references the model sees only the
+    init image and that text, and "make it daytime" describes no picture.
+    """
+    items = images if isinstance(images, (list, tuple)) \
+        else [p for p in re.split(r"[,\n]", str(images or "")) if p.strip()]
+    if not items:
+        return "error: images is empty -- pass 1 to %d paths" % IMAGE_MAX_INPUTS
+    if len(items) > IMAGE_MAX_INPUTS:
+        return ("error: %d images -- edit_image takes at most %d"
+                % (len(items), IMAGE_MAX_INPUTS))
+    if not str(instruction or "").strip():
+        return "error: instruction is empty -- say what to change"
+    if not str(description or "").strip():
+        return ("error: description is empty -- stage 2 sees only this text "
+                "and the stage-1 picture, so describe the whole final image")
+    paths, sizes = [], []
+    for item in items:
+        path, bad = _image_input(item)
+        if bad:
+            return bad
+        dims = image_dimensions(path)
+        if not dims or not all(dims):
+            return "error: cannot read the size of %s" % path
+        paths.append(path)
+        sizes.append(dims)
+    if aspect_ratio:
+        aspect, bad = _image_aspect(aspect_ratio)
+        if bad:
+            return bad
+    else:
+        aspect = snap_aspect(*sizes[-1])
+    width, height = IMAGE_SIZES[aspect]
+    value, _bad = _image_seed(None)
+    small_w, small_h = one_megapixel(width / height)
+    rules = []
+    refs = []
+    for k, (path, (w, h)) in enumerate(zip(paths, sizes)):
+        rw, rh = one_megapixel(w / h)
+        rules.append("target=ref,index=%d,mode=stretch,width=%d,height=%d,"
+                     "filter=lanczos" % (k, rw, rh))
+        try:
+            refs.append(image_part(path)["image_url"]["url"])
+        except CrowError as exc:
+            return "error: %s" % exc
+    base, why = _image_start("edit", width, height, "1/2")
+    if why is not None:
+        return why
+    first, took1, err = _run_image_job({
+        "prompt": str(instruction), "width": small_w, "height": small_h,
+        "seed": value, "sample_params": _image_sample_params(),
+        "ref_images": refs, "ref_image_args": EDIT_REF_ARGS,
+        "image_preprocess": rules}, base)
+    if err is not None:
+        return err
+    import base64
+    base = dict(base, stage="2/2")
+    final, took2, err = _run_image_job({
+        "prompt": str(description), "width": width, "height": height,
+        "seed": value, "sample_params": _image_sample_params(),
+        "init_image": "data:image/png;base64,"
+                      + base64.b64encode(first).decode("ascii"),
+        "strength": EDIT_REFINE_STRENGTH,
+        "image_preprocess": "target=init,mode=stretch,width=%d,height=%d,"
+                            "filter=lanczos" % (width, height)},
+        base, refine=True)
+    if err is not None:
+        return err
+    try:
+        path = _save_image(final, str(instruction))
+    except OSError as exc:
+        report_progress(**dict(base, phase="error", i=None, n=None,
+                               eta_s=None, line=str(exc)[:200]))
+        return "error: the picture could not be saved: %s" % exc
+    report_progress(**dict(base, phase="saved", i=None, n=None, eta_s=0.0,
+                           line=path))
+    announce_image(path, "edit_image", base["job"])
+    return _image_result(
+        path, final, took1 + took2, value,
+        " (stage 1 edit at %dx%d: %.1f s, stage 2 refine at %dx%d: %.1f s)"
+        % (small_w, small_h, took1, width, height, took2))
+
+
 # #301. A TEXT READER THAT MEETS BYTES SAYS SO. read_file opened every file as
 # UTF-8 with errors="replace", so a PNG came back as 16,000 characters of
 # mojibake: the 2026-09-25 lighthouse run read reference/island.png that way,
@@ -12407,6 +13469,8 @@ def _configured_check(path: str, argv: "list[str]") -> str:
             cmd, os.path.dirname(os.path.abspath(path)), deadline)
     except OSError as exc:
         return "\nsyntax check (%s): could not run -- %s" % (what, exc)
+    if stopped == "user":
+        return "\nsyntax check (%s): stopped by the user -- not checked" % what
     if stopped:
         return ("\nsyntax check (%s): not finished within %gs -- not checked"
                 % (what, SYNTAX_CHECK_SECONDS))
@@ -12462,6 +13526,9 @@ def syntax_check(path: str) -> str:
         for argv, stdin_text in jobs[:SYNTAX_CHECK_SCRIPTS]:
             code, _out, err, stopped = _bounded_run(argv, cwd, deadline,
                                                     stdin_text)
+            if stopped == "user":
+                return ("\nsyntax check (%s): stopped by the user -- not "
+                        "checked" % what)
             if stopped:
                 return ("\nsyntax check (%s): not finished within %gs -- not "
                         "checked" % (what, SYNTAX_CHECK_SECONDS))
@@ -13089,6 +14156,10 @@ def _child_env() -> "dict[str, str]":
 # is short and a reader still blocked is left behind as the daemon it is.
 BOUNDED_RUN_SETTLE = 0.25
 
+# #310. How long a Stop gives the running command after its SIGTERM before
+# the SIGKILL sweep -- the "wait briefly for cleanup" of openai/codex#22729.
+STOP_GRACE = 2.0
+
 
 def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
                  stdin_text: str | None = None, *, shell: bool = False,
@@ -13098,8 +14169,10 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
 
     `stopped` is "" when the child ended by itself, "clock" when `deadline`
     (a time.monotonic() value) passed, "cap" when one stream went over
-    COMMAND_CAPTURE_BYTES; the code is None then, and the caller says which
-    in its own words. A child that cannot be started raises OSError.
+    COMMAND_CAPTURE_BYTES, "user" when Stop set INTERRUPT (#310: SIGTERM,
+    STOP_GRACE, then the same SIGKILL sweep; the output so far is kept); the
+    code is None then, and the caller says which in its own words. A child
+    that cannot be started raises OSError.
 
     #212 FOLLOW-UP: ONE RUNNER, NOT TWO. run_command (#207) and build_bundle
     (#212) each carried this reader-thread loop, and the copies had already
@@ -13141,8 +14214,8 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
     itself. Codex had the same hang (openai/codex#4337, "only kills the shell
     wrapper") and the same remedy. A child that exits by itself is left
     alone, and so is whatever it put in the background -- `server &` is a
-    thing a command may mean. Windows keeps `proc.kill()`: cmd.exe's children
-    survive it there, as they always did.
+    thing a command may mean. Windows: `proc.kill()` left cmd.exe's children
+    running; since #310 the kill is `taskkill /T /F` on the tree (kill_tree).
     """
     argv = cmd
     if prefix:
@@ -13160,13 +14233,33 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
     def _kill() -> None:
         try:
             if crow_platform.IS_WINDOWS:
-                proc.kill()
+                # #310: THE TREE, NOT cmd.exe ALONE -- `taskkill /T /F`.
+                if not crow_platform.kill_tree(proc.pid):
+                    proc.kill()
             else:
                 os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             pass                           # the group is already gone
         if unit:
             crow_platform.kill_scope(unit)
+
+    def _term_then_kill(grace: float) -> None:
+        """#310: Stop ends the call GRACEFULLY FIRST -- SIGTERM to the group
+        and the scope, up to `grace` seconds, then the SIGKILL sweep above
+        (openai/codex#22729's sequence). Windows has no SIGTERM for a console
+        child: the tree kill directly."""
+        if not crow_platform.IS_WINDOWS:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            if unit:
+                crow_platform.kill_scope(unit, "SIGTERM")
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+        _kill()
 
     def _drain(which: str) -> None:
         pipe = proc.stdout if which == "out" else proc.stderr
@@ -13202,7 +14295,13 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
         except OSError:
             pass
     timed_out = False
+    user_stop = False
     while proc.poll() is None and not drained["over"]:
+        # #310: STOP IS THE THIRD REASON, beside the clock and the cap. Read,
+        # never cleared here (#143: the flag belongs to the turn).
+        if INTERRUPT.is_set():
+            user_stop = True
+            break
         left = deadline - time.monotonic()
         if left <= 0:
             timed_out = True
@@ -13211,7 +14310,9 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
             proc.wait(timeout=min(left, 0.25))
         except subprocess.TimeoutExpired:
             pass
-    if timed_out or drained["over"]:
+    if user_stop:
+        _term_then_kill(STOP_GRACE)
+    elif timed_out or drained["over"]:
         _kill()
     proc.wait()
     settle = time.monotonic() + BOUNDED_RUN_SETTLE
@@ -13222,7 +14323,11 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
                 pipe.close()
             except OSError:
                 pass
-    stopped = "clock" if timed_out else "cap" if drained["over"] else ""
+    stopped = ("user" if user_stop else "clock" if timed_out
+               else "cap" if drained["over"] else "")
+    if stopped == "user":
+        # What it printed up to the Stop stays: it says how far it got.
+        return None, "".join(drained["out"]), "".join(drained["err"]), stopped
     if stopped:
         return None, "", "", stopped
     return proc.returncode, "".join(drained["out"]), "".join(drained["err"]), ""
@@ -13290,12 +14395,20 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         unit = "crow-cmd-%d-%s" % (os.getpid(), os.urandom(4).hex())
         prefix = crow_platform.command_scope_prefix(unit)
         oom_before = crow_platform.session_oom_kills() if prefix else None
+        began = time.monotonic()
         code, out, err, stopped = _bounded_run(
             command, cwd, time.monotonic() + COMMAND_TIMEOUT, shell=True,
             prefix=prefix, unit=unit if prefix else None)
     except OSError as exc:
         return f"error: could not run: {exc}"
     note = _headless_browser_note(command, bool(prefix))
+    if stopped == "user":
+        # #310: the model hears WHY -- not an unexplained `[exit -15]`.
+        return _clip(
+            "%s after %.0fs -- the command and everything it started in this "
+            "call were ended: %s" % (STOPPED, time.monotonic() - began, command)
+            + (f"\n{out}".rstrip())
+            + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
     if stopped == "clock":
         return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}" + note
     if stopped == "cap":
@@ -13319,10 +14432,135 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         head = ("error: command exceeded its memory ceiling (%sno swap) and was "
                 "killed, with everything it started: %s"
                 % ("MemoryMax=%s, " % cap if cap else "", command))
+        _rebase_background_jobs()   # #309: this kill is this call's, not theirs
         return _clip(head + (f"\n{out}".rstrip())
                      + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
+    if prefix and code is not None:
+        _record_background_job(unit, command)   # #309: what outlived the call
     return _clip(f"[exit {code}]\n{out}".rstrip()
                  + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
+
+
+# #309. A JOB THAT OUTLIVES ITS run_command CALL IS LOOKED AT AGAIN. It stays in
+# the call's scope, under the call's ceiling (_bounded_run leaves a finished
+# command's background alone on purpose), and until this registry nothing read
+# that scope after the call returned. Measured 2026-09-27: a backgrounded
+# sd-cli load sat at its memory bound for 10 min 47 s in D state, and 7 polls
+# read "RUNNING" -- from inside the scope throttling and slow progress look
+# the same. Every later tool result the model gets (run_tool_cached) reads each
+# recorded scope once and says, in a note before the result, what the model
+# cannot see: the job was killed at its ceiling, or it is stalled on memory.
+#
+# THE KILL'S WITNESS IS THE KERNEL'S COUNT, as in #218's CI fix: the scope is
+# collected at once (CollectMode=inactive-or-failed), so its Result= is gone
+# with it. session.slice's oom_kill rose while the recorded scope vanished.
+# Several vanishing between two reads are named together as candidates, never
+# one guessed; a foreground ceiling kill re-bases the count first.
+#
+# THE PRESSURE THRESHOLD, fixed in #309 before any after-measurement: full
+# avg60 >= 50 % -- below systemd-oomd's 60 % default, at Omarchy's app.slice
+# 50 %. The measured case read 88.13.
+BACKGROUND_PRESSURE_FULL_AVG60 = 50.0
+_BACKGROUND_JOBS: "list[dict]" = []
+
+
+def _record_background_job(unit: str, command: str) -> None:
+    """Keep `unit` when its scope still holds a process after the call returned.
+
+    The count is read BEFORE the scope: a job killed in between is then gone
+    here and never recorded, instead of recorded with its own kill counted."""
+    oom = crow_platform.session_oom_kills()
+    if crow_platform.scope_memory_state(unit) is None:
+        return
+    _BACKGROUND_JOBS.append({
+        "unit": unit, "command": " ".join(command.split()),
+        "cap": crow_platform.command_memory_bounds().get("MemoryMax"),
+        "oom": oom, "shared": False})
+
+
+def _rebase_background_jobs() -> None:
+    """A foreground kill this call already named moved the slice's count: the
+    jobs still alive did not cause it. One already gone might have -- or might
+    have ended by itself -- so it can only be named as a candidate."""
+    if not _BACKGROUND_JOBS:
+        return
+    now = crow_platform.session_oom_kills()
+    for job in _BACKGROUND_JOBS:
+        if crow_platform.scope_memory_state(job["unit"]) is not None:
+            job["oom"] = now
+        else:
+            job["shared"] = True
+
+
+def _gib(size: "int | None") -> str:
+    return "?" if size is None else "%.1f GiB" % (size / float(1 << 30))
+
+
+def _clip_line(text: str, limit: int = 120) -> str:
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def background_job_notes() -> str:
+    """The note lines about recorded background jobs, "" when there is nothing to say.
+
+    TWO READS OF THE COUNT AROUND THE SCOPES. A scope found empty was killed
+    (if at all) before it was read, so `after` holds its kill; a scope found
+    alive is re-based to `before`, so a kill right after its read is counted
+    at the next look instead of being swallowed by this one."""
+    if not _BACKGROUND_JOBS:
+        return ""
+    before = crow_platform.session_oom_kills()
+    notes: "list[str]" = []
+    vanished: "list[dict]" = []
+    for job in list(_BACKGROUND_JOBS):
+        state = crow_platform.scope_memory_state(job["unit"])
+        if state is None:
+            _BACKGROUND_JOBS.remove(job)
+            vanished.append(job)
+            continue
+        job["oom"] = before
+        full = state.get("full_avg60")
+        if full is not None and full >= BACKGROUND_PRESSURE_FULL_AVG60:
+            limit = state.get("max")
+            notes.append(
+                "note: the background job from `%s` (%s) has been stalled on memory "
+                "%d%% of the last 60 s at %s%s: it is thrashing, not progressing. "
+                "Stop it (systemctl --user stop %s.scope) and tell the user; the "
+                "ceiling is CROW_COMMAND_MEMORY_MAX in Crow's own environment -- a "
+                "command cannot raise it."
+                % (_clip_line(job["command"]), job["unit"], round(full),
+                   _gib(state.get("current")),
+                   " of its %s ceiling (no swap)" % _gib(limit) if limit else "",
+                   job["unit"]))
+    after = crow_platform.session_oom_kills() if vanished else before
+    killed = [job for job in vanished
+              if after is not None and job["oom"] is not None and after > job["oom"]]
+    if len(killed) == 1 and not killed[0]["shared"]:
+        job = killed[0]
+        notes.insert(0, "note: the background job from `%s` (%s) was killed at its "
+                        "memory ceiling (%sno swap), with everything it started."
+                     % (_clip_line(job["command"]), job["unit"],
+                        "MemoryMax=%s, " % job["cap"] if job["cap"] else ""))
+    elif killed:
+        notes.insert(0, "note: these background jobs ended while a memory-ceiling "
+                        "kill was counted, and one or more of them may have been "
+                        "it: %s."
+                     % "; ".join("`%s` (%s)" % (_clip_line(job["command"]), job["unit"])
+                                 for job in killed))
+    return "\n".join(notes)
+
+
+def _with_background_notes(result: str) -> str:
+    """The notes go first, so the model reads them before the result -- after
+    the first line when the result is an error, so it still starts "error: "
+    and stays recoverable on every surface."""
+    notes = background_job_notes()
+    if not notes:
+        return result
+    if result.startswith("error: "):
+        head, _, rest = result.partition("\n")
+        return head + "\n" + notes + ("\n" + rest if rest else "")
+    return notes + "\n" + result
 
 
 # #218. THE BOUNDED WAY TO A SCREENSHOT, SAID WHERE THE UNBOUNDED ONE IS TAKEN.
@@ -13592,6 +14830,8 @@ def _bundle_run(argv: "list[str]", cwd: str, deadline: float,
         code, out, err, stopped = _bounded_run(argv, cwd, deadline, stdin_text)
     except OSError as exc:
         return None, "", f"could not start {argv[0]}: {exc}"
+    if stopped == "user":
+        return None, "", "the build was stopped by the user"
     if stopped == "clock":
         return None, "", f"the build exceeded {BUNDLE_TIMEOUT}s and was killed"
     if stopped == "cap":
@@ -15487,6 +16727,8 @@ TOOL_IMPL = {
     "memory": tool_memory,
     "skill": tool_skill,
     "session_search": tool_session_search,
+    "generate_image": tool_generate_image,
+    "edit_image": tool_edit_image,
 }
 
 
@@ -15509,6 +16751,10 @@ TOOL_CLASS = {
     # sich bisher einen Browser gebaut hat: dieselbe Klasse wie vorher, nur mit
     # einem Handle daran.
     "render_page": "executing",
+    # #300 phase 3. render_page's reasoning, twice over: they start a
+    # process (the image server), hold the GPU for minutes and write a file.
+    "generate_image": "executing",
+    "edit_image": "executing",
     "list_dir": "reading",
     "find_files": "reading",
     "search_text": "reading",
@@ -15660,6 +16906,13 @@ DEFAULT_MODE = "auto"
 # broken prefix for every later turn of the session. The model can read this
 # line and try something else; it cannot read a turn that ended.
 DECLINED = "error: declined by the user"
+
+# #310. What a call Stop ended comes back as -- booked like DECLINED (the
+# user's choice, not a failed tool). A call of the round that Stop kept from
+# starting gets STOPPED + STOPPED_NOT_RUN, so every tool_call_id keeps its
+# answer and the prefix stays valid.
+STOPPED = "error: stopped by the user"
+STOPPED_NOT_RUN = " -- not run"
 
 # #203. WHAT A CALL CUT IN HALF BY THE OUTPUT CAP COMES BACK AS -- a tool
 # result for the same three reasons DECLINED is one: the prefix stays valid,
@@ -22657,7 +23910,10 @@ _SEEN: dict[tuple, str] = {}
 NEVER_CACHED = frozenset({"run_command", "memory", "skill",
                           "git_status", "git_diff", "git_log",
                           "git_commit", "git_push", "github_connect",
-                          "build_bundle", "render_page"})
+                          "build_bundle", "render_page",
+                          # #300 phase 3: two calls with one prompt are two
+                          # pictures (a random seed each), never a replay.
+                          "generate_image", "edit_image"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 
@@ -22717,12 +23973,15 @@ def run_tool_cached(name: str, arguments: str) -> tuple[str, bool]:
     """
     key = _cache_key(name, arguments)
     if key is not None and key in _SEEN:
-        return (f"[you already called {name} with these exact arguments this turn. "
-                f"The result was, and still is:]\n{_SEEN[key]}"), True
+        return _with_background_notes(
+            f"[you already called {name} with these exact arguments this turn. "
+            f"The result was, and still is:]\n{_SEEN[key]}"), True
     out = run_tool(name, arguments)
     if key is not None:
         _SEEN[key] = out
-    return out, False
+    # #309: what a job left in the background did since, beside -- never
+    # inside -- the cached answer.
+    return _with_background_notes(out), False
 
 
 # ---------------------------------------------------------------- #196 -----
@@ -23268,6 +24527,32 @@ class TurnEvents:
         shows the page there, and one that has none says nothing.
         """
 
+    def tool_progress(self, name: str, state: dict) -> None:
+        """#308. A RUNNING call says where it is, between `tool_started` and
+        `tool_finished`. Fired from the turn's thread while the call blocks it.
+
+        THE CLOCK (#172) ANSWERS "IS A CALL OUTSTANDING", THIS ANSWERS "HOW
+        FAR". On 2026-09-27 robin watched 10 min 47 s of an image generation
+        with nothing on the screen naming a phase, a step or an error.
+
+        `state` keys, all present on every event:
+          job     str, one id for the whole call (an edit's two stages share it)
+          kind    "generate" | "edit"
+          phase   "queued" | "loading" | "encoding" | "sampling" | "decoding"
+                  | "refining" | "saved" | "error" | "stopped"
+          stage   "1/2", "2/2" for an edit, "" otherwise
+          i, n    int step/tile/tensor counters, or None (indeterminate)
+          eta_s   float seconds left in sampling, or None
+          line    one human line for the phase
+          width, height  the FINAL picture's size, from the first event on --
+                  a placeholder has its shape before the server answers.
+        """
+
+    def image_created(self, path: str, source: str, job: str = "") -> None:
+        """#311. A tool saved a picture the user should see -- fired after the
+        call's `tool_result`, once per picture, with the absolute path, the
+        tool that made it and the `job` its `tool_progress` events carried."""
+
     def tools_finished(self) -> None:
         """Every call of this round has run and been appended."""
 
@@ -23574,6 +24859,15 @@ def run_turn(
                                        remote=remote,
                                        forget_reads=owns_turn_state)
     for round_no in range(budget + 3):
+        # #310: A STOP BETWEEN ROUNDS SENDS NOTHING. Without this the next
+        # request went out and only the stream reader dropped it -- 535
+        # tokens prefilled and 2 generated for nobody (engine.log, 00:27:39).
+        if INTERRUPT.is_set():
+            if owns_turn_state:
+                INTERRUPT.clear()
+            events.turn_interrupted()
+            stopped = True
+            break
         seed = None if remote else draw_seed(avoid=seed)
         try:
             reply, reasoning, timings = stream_reply(
@@ -23899,6 +25193,10 @@ def run_turn(
             # was waiting on -- and the previous round's six figures as the last thing visible.
             events.tool_started(call["name"], call["arguments"])
             started = time.monotonic()
+            # #310: A CALL AFTER A STOP DOES NOT RUN and asks nobody; it
+            # still gets its answer, so the prefix stays valid (DECLINED's
+            # reason).
+            halted = INTERRUPT.is_set()
 
             # #203: A CALL THE OUTPUT CAP CUT IN HALF RUNS NOTHING AND ASKS
             # NOBODY. There is nothing to approve -- the arguments are gone or
@@ -23941,7 +25239,7 @@ def run_turn(
             # predicate: `stops_for` keeps git_push on at every level, lets
             # yolo silence the outside-path ask and the git_commit ask, and
             # leaves every other level exactly where #88 put it.
-            if (cut_why is None and cwd_refused is None
+            if (not halted and cut_why is None and cwd_refused is None
                     and (stops_for(call["name"], mode, bool(outside))
                          and not remembered(call["name"], call["arguments"]))):
                 answer = "no"
@@ -23956,7 +25254,7 @@ def run_turn(
                         ("the user %s run_command for %s, outside the working "
                          "area") % ("declined" if answer not in ("yes", "always")
                                     else "released", ", ".join(outside[:2])))
-            elif outside and mode in RELEASES_ALL:
+            elif not halted and outside and mode in RELEASES_ALL:
                 # YOLO WAS NOT ASKED, SO "THE USER RELEASED" WOULD BE A LIE --
                 # and a silent outside run would be worse (#98: the working
                 # area leaving is the one fact the screen must carry). The
@@ -23966,7 +25264,10 @@ def run_turn(
                     "run_command ran unasked for %s, outside the working "
                     "area (yolo)" % ", ".join(outside[:2]))
 
-            if declined:
+            if halted:
+                result, repeated = STOPPED + STOPPED_NOT_RUN, False
+                declined = True
+            elif declined:
                 # A REFUSAL IS A RESULT. Same shape as a failed call: the text
                 # goes back as the tool message, the round continues, and the
                 # prefix stays valid for every later turn. #88 point 1.
@@ -24020,10 +25321,30 @@ def run_turn(
                                      "limit and did not run" % call["name"])
                 repeated = False
             else:
-                result, repeated = run_tool_cached(call["name"], call["arguments"])
+                # #308: THE SINK IS ARMED AROUND THIS ONE CALL and disarmed in
+                # `finally`, so a tool reporting after its call -- a warm-up
+                # thread, a test -- reports into nothing. Thread-local: a
+                # subtask's turn runs on its own thread with its own events.
+                take_announced_images()
+                progress = getattr(events, "tool_progress", None)
+                _TURN_LOCAL.progress = (
+                    None if progress is None
+                    else (lambda st, n=call["name"]: progress(n, st)))
+                try:
+                    result, repeated = run_tool_cached(call["name"],
+                                                       call["arguments"])
+                finally:
+                    _TURN_LOCAL.progress = None
                 # #288: WHERE A TOOL RESULT IS RECORDED, ITS HOSTS ARE NAMED --
                 # a search in this call releases the fetch in the next one.
                 note_known_hosts(result)
+                # #310: A CALL STOP ENDED IS BOOKED LIKE A REFUSAL -- the
+                # user's choice, not a failed tool, no same-failure streak.
+                if result.startswith(STOPPED):
+                    declined = True
+                    log_note("stop pressed during %s after %.0f s"
+                             % (call["name"], time.monotonic() - started),
+                             "turn")
             took = time.monotonic() - started
             # TWO NAMES FOR WHAT WAS ONE LINE, and #95 is the reason. `errored`
             # is what the MODEL sees: the "error: " prefix that makes a result
@@ -24045,6 +25366,11 @@ def run_turn(
             # `DECLINED` is what the model was told, so it is what the screen
             # has to be able to show.
             events.tool_result(call["name"], result)
+            # #311: AFTER THE RESULT, so the surface has closed the call's
+            # tile before the picture lands where it belongs.
+            for made in take_announced_images():
+                getattr(events, "image_created", lambda *a: None)(
+                    made["path"], made["source"], made["job"])
             # #98: THE USER HEARS THIS FROM CROW, NOT FROM THE MODEL'S APOLOGY.
             # In the measured turn the only notice that the working area had been
             # left came from the model itself, after the fact, phrased as a
@@ -24058,7 +25384,9 @@ def run_turn(
             # condition, not `not errored` -- a shell command that failed on its
             # own terms still reached the shell, and that is the fact being
             # reported.
-            if not declined and escaped_the_working_area(call["name"]):
+            # #310: a call Stop ended DID reach the shell, so it still counts.
+            ran = not declined or (not halted and result.startswith(STOPPED))
+            if ran and escaped_the_working_area(call["name"]):
                 # ONCE PER PATH, NOT PER CALL: the mark is a rare-event
                 # report, and repeating it with unchanged content per shell
                 # call trains the reader to skip it. A call that names
@@ -24101,6 +25429,14 @@ def run_turn(
             ride = take_image_ride()
             if ride is not None:
                 blind = refuse_images(base_url)
+                if blind and call["name"] in IMAGE_TOOL_NAMES:
+                    # #300 phase 3: THE PICTURE EXISTS, only the model cannot
+                    # look at it. An "error: " here would tell it the
+                    # generation failed and send it generating again.
+                    result = (result.replace(IMAGE_HANDED, "")
+                              + " It is not shown to you: " + blind)
+                    conversation.append("tool", result, tool_call_id=call["id"])
+                    continue
                 if blind:
                     result = "error: " + blind
                     events.tool_failed(call["name"], result)
@@ -24112,6 +25448,15 @@ def run_turn(
                 continue
             conversation.append("tool", result, tool_call_id=call["id"])
         events.tools_finished()
+        # #310: THE ROUND IS WHOLE (every call answered), so a Stop ends the
+        # turn HERE -- before the rollover's digest request and before the
+        # next round's, neither of which anyone is waiting for.
+        if INTERRUPT.is_set():
+            if owns_turn_state:
+                INTERRUPT.clear()
+            events.turn_interrupted()
+            stopped = True
+            break
 
         # THE CHECK BELONGS HERE TOO, NOT ONLY BETWEEN TURNS. One tool round
         # has been measured adding 5,253 tokens, and up to MAX_TOOL_ROUNDS of
