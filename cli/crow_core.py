@@ -12906,7 +12906,10 @@ def _image_result(path: str, png: bytes, seconds: float, seed: int,
     shown = path
     root = get_root()
     if root and _inside(root, path):
-        shown = os.path.relpath(path, root)
+        # FORWARD SLASHES on every platform: the model hands this path back to
+        # edit_image/read_image, which take "/" on Windows too, and one
+        # spelling keeps the transcript the same everywhere (Windows CI, 2026-09-27).
+        shown = os.path.relpath(path, root).replace(os.sep, "/")
     said = "saved %s (%s) -- %dx%d, %s bytes, %.1f s%s, seed %d." % (
         shown, path, size[0], size[1], "{:,}".format(len(png)), seconds,
         extra, seed)
