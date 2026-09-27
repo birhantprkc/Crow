@@ -24930,9 +24930,11 @@ class AnImageJobThatDoesNotFinishSaysWhyTests(_ImageServerCase):
         with mock.patch.object(crow_core.crow_platform, "server_search_dirs",
                                return_value=[self.dir]):
             said = crow_core.tool_generate_image("a crow")
+            # INSIDE the patch: outside it this machine's real install answers
+            # (sd-server in ~/.local/share/crow/bin, the model beside the tree)
+            self.assertFalse(crow_core.image_tools_available())
         self.assertTrue(said.startswith("error: the image server is not installed"), said)
         self.assertEqual(self.states[-1]["phase"], "error")
-        self.assertFalse(crow_core.image_tools_available())
 
     def test_a_missing_model_names_the_variable(self):
         with mock.patch.dict(os.environ, {crow_core.IMAGE_MODEL_DIR_ENV: self.dir}), \
