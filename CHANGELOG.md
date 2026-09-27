@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Changed
+
+- **Docs name the image model's licence** (2026-09-27). README, `docs/user-guide/linux.md` and `docs/reference/tools.md` link [`Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1) and say that it is under the Qwen Research License: research and evaluation only, commercial use needs a licence from Qwen. No code change.
+
 ## 2.8.1 — 2026-09-27
 
 **A calmer chat box.** The window's composer no longer wears the banner blue while nobody types in it;
