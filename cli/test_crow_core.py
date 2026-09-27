@@ -4473,6 +4473,12 @@ class AWriteParsesWhatItWroteTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, True)
         crow_core.set_root(self.root)
         self.addCleanup(crow_core.set_root, None)
+        # #319. THE PARSE IS UNDER TEST, NOT THE RUNNER'S NODE START: a cold
+        # first node on a CI runner took over 5 s, 7 red jobs in 55 runs. The
+        # clock path has its own test, test_a_check_past_its_clock_says_so.
+        clock = mock.patch.object(crow_core, "SYNTAX_CHECK_SECONDS", 60.0)
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def at(self, name):
         return os.path.join(self.root, name)
@@ -4541,6 +4547,9 @@ class AnEditIsCheckedAndTheTableIsOneRowPerFormatTests(unittest.TestCase):
         crow_core.set_root(self.root)
         self.addCleanup(crow_core.set_root, None)
         self.addCleanup(crow_core.syntax_checks_set, None)
+        clock = mock.patch.object(crow_core, "SYNTAX_CHECK_SECONDS", 60.0)  # #319
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def at(self, name):
         return os.path.join(self.root, name)
