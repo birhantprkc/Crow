@@ -9121,6 +9121,43 @@ class AnImageIsAnAttachmentTests(ApiCase):
         with open(os.path.join(crow_gui.PASTE_DIR, written[0]), "rb") as fh:
             self.assertEqual(fh.read(), raw)
 
+    def test_a_drop_with_no_files_takes_the_uri_list(self):
+        """#312, MEASURED on robin's retest: WebKitGTK handed the page a drop
+        from the file manager with ZERO files (crow.log 09:38:03, 09:38:47).
+        The page then reads the drag's text/uri-list; `dropUriPaths` turns it
+        into local paths. Run in node when the machine has it."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        fn = source[source.index("function dropUriPaths(text){"):]
+        fn = fn[:fn.index("\n}\n") + 3]
+        cases = ["file:///home/r/Projects/models/crownest-16x9.png\r\n",
+                 "# c\nfile:///home/x/a%20b.png\nfile://localhost/tmp/c.jpg\nhttps://x.org/y.png\n",
+                 "file:///C:/Users/r/x.png", "", "/home/plain/path.png"]
+        script = fn + "\nfor (const c of %s) console.log(JSON.stringify(dropUriPaths(c)));" % json.dumps(cases)
+        out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual([json.loads(line) for line in out.stdout.splitlines()], [
+            ["/home/r/Projects/models/crownest-16x9.png"],
+            ["/home/x/a b.png", "/tmp/c.jpg"],
+            ["C:/Users/r/x.png"], [], []])
+        block = source[source.index("  dropBytes(dt){"):]
+        block = block[:block.index("\n  },\n")]
+        self.assertIn('dt.getData("text/uri-list")', block)
+        self.assertIn("this.dropped(paths)", block)
+
+    def test_what_a_drop_carried_is_logged(self):
+        api = self.api()
+        before = crow_core.LOG_FILE
+        self.addCleanup(setattr, crow_core, "LOG_FILE", before)
+        crow_core.LOG_FILE = os.path.join(self.dir, "crow.log")
+        api.drop_seen({"types": ["text/uri-list"], "files": 0, "uris": 57})
+        api.drop_seen("garbage")
+        text = open(crow_core.LOG_FILE, encoding="utf-8").read()
+        self.assertIn("page saw types ['text/uri-list'], 0 file(s), uri text 57 chars", text)
+        self.assertEqual(text.count("[drop]"), 2)
+
     def test_bytes_that_are_not_a_picture_are_a_note_and_no_chip(self):
         """NEGATIVE: a name Crow cannot read as an image, a body that is not a
         base64 data URL, an empty read (the page's FileReader failed)."""
@@ -13990,7 +14027,7 @@ class RemoteApiParityTests(RemoteCase):
     to the desktop with a stated replacement -- and a call from one client
     produces the push the other one needs."""
 
-    PAGE_METHODS = 95          # 88 at fb31ca2 + the six pairing controls (#249 stage 5) + stage_image_data (drop bytes)
+    PAGE_METHODS = 96          # 88 at fb31ca2 + the six pairing controls (#249 stage 5) + stage_image_data, drop_seen (#312)
 
     def page_methods(self) -> set:
         page = crow_gui.PAGE
@@ -15731,6 +15768,24 @@ class TheProcessEndsAfterTheWindowTests(unittest.TestCase):
             text = open(log, encoding="utf-8").read()
             self.assertIn("stuck (non-daemon)", text)
             self.assertIn("exit watchdog: stacks of every thread", text)
+
+    def test_the_bridge_threads_cannot_hold_the_exit(self):
+        """THE CAUSE (the watchdog's stacks, crow.log 09:39:45): a pywebview
+        bridge thread waiting in `evaluate_js` for an answer the dead GTK loop
+        never delivers. They are daemon threads now, so the exit does not
+        join them; the call is idempotent."""
+        import webview.util as wutil
+        before = wutil.Thread
+        self.addCleanup(setattr, wutil, "Thread", before)
+        crow_gui.daemon_bridge_threads()
+        crow_gui.daemon_bridge_threads()
+        t = wutil.Thread(target=lambda: None)
+        self.assertTrue(t.daemon)
+        self.assertIsInstance(t, threading.Thread)
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = source[source.index("        import webview\n    except ImportError:"):]
+        self.assertLess(body.index("daemon_bridge_threads()"),
+                        body.index("webview.create_window("))
 
     def test_main_arms_the_watchdog_once_the_window_loop_returns(self):
         source = (HERE / "crow_gui.py").read_text(encoding="utf-8")

@@ -3885,6 +3885,18 @@ const LINK = {
     return null; }
 };
 
+// #312: the local paths in a drag's `text/uri-list` (RFC 2483: one URI per
+// line, `#` lines are comments). `file:///home/x/a%20b.png` -> `/home/x/a b.png`,
+// `file:///C:/x.png` -> `C:/x.png`; anything that is not a local file is left out.
+function dropUriPaths(text){
+  return String(text || "").split(/\r?\n/).map(l => l.trim())
+    .filter(l => l && l[0] !== "#" && /^file:\/\//i.test(l))
+    .map(l => { let p=l.replace(/^file:\/\/(localhost)?/i, "");
+                try{ p=decodeURIComponent(p); }catch(_){ }
+                return /^\/[A-Za-z]:\//.test(p) ? p.slice(1) : p; })
+    .filter(p => p.startsWith("/") || /^[A-Za-z]:\//.test(p));
+}
+
 const crow = {
   running:false, col:null, say:null, think:null, fence:null, fenceLang:"",
   cursor:null, blocks:[],
@@ -5697,10 +5709,22 @@ const crow = {
   // bytes on every backend, so an image is read here and handed over the way a
   // paste is; `dropped` skips the path of a picture already read this way.
   _byteNames: [],
+  // #312, second half, MEASURED on robin's retest (crow.log 09:38:03 and
+  // 09:38:47): a drop from the file manager reached the page with ZERO files
+  // -- WebKitGTK handed over no File objects, so neither the bytes nor
+  // pywebview's path matching had anything to work on. What the drag carries
+  // then is the file manager's `text/uri-list`: the page reads it itself and
+  // treats each `file://` entry exactly like a path pywebview would have
+  // delivered. `drop_seen` writes what the drop carried into crow.log.
   dropBytes(dt){
     this._byteNames=[];
     const img=/\.(png|jpe?g|gif|webp|bmp)$/i;
-    Array.prototype.forEach.call((dt && dt.files) || [], f => {
+    const files=Array.prototype.slice.call((dt && dt.files) || []);
+    let uris="";
+    try{ uris=(dt && (dt.getData("text/uri-list") || dt.getData("text/plain"))) || ""; }catch(_){ uris=""; }
+    try{ pywebview.api.drop_seen({types: Array.prototype.slice.call((dt && dt.types) || []),
+                                  files: files.length, uris: uris.length}); }catch(_){}
+    files.forEach(f => {
       if(!img.test(f.name)) return;
       this._byteNames.push(f.name);
       const r=new FileReader();
@@ -5708,6 +5732,9 @@ const crow = {
       r.onerror=()=>pywebview.api.stage_image_data(f.name, "");
       r.readAsDataURL(f);
     });
+    if(files.length){ return; }
+    const paths=dropUriPaths(uris);
+    if(paths.length){ this.dropped(paths); }
   },
 
   dropped(paths){
@@ -8389,6 +8416,7 @@ REMOTE_DESKTOP_BOUND = {
     # window, and a phone or browser mirror the same way (robin 2026-09-27:
     # "Handy auch, wichtig")
     "stage_image_data": "upload",
+    "drop_seen": "desktop-only",
     "reveal_path": "desktop", "roll_show": "desktop",
     "provider_authorise": "desktop",
     "pane_go": "pane", "pane_show": "pane", "pane_hide": "pane",
@@ -13490,6 +13518,14 @@ class Api:
         self.push({"k": "chips", "c": self._image_chips()})
         return {"chips": self._image_chips()}
 
+    def drop_seen(self, info) -> None:
+        """#312: one crow.log line with what a drop carried to the page --
+        its data types, how many File objects, how long the uri text was."""
+        info = info if isinstance(info, dict) else {}
+        crow_core.log_note("drop: page saw types %s, %s file(s), uri text %s chars"
+                           % (list(info.get("types") or [])[:12], info.get("files"),
+                              info.get("uris")), "drop")
+
     def stage_image_data(self, name: str, data_url: str) -> dict:
         """#312: a dropped picture that came as bytes from the page.
 
@@ -17334,6 +17370,7 @@ def main(argv: list[str] | None = None) -> int:
             "      pip install pywebview\n"
             "      The terminal client needs nothing: python cli/crow.py\n")
         return 2
+    daemon_bridge_threads()
 
     # #249: the chain lives in `stamped_page`, shared with the phone's
     # variant of the same page.
@@ -17478,6 +17515,25 @@ def main(argv: list[str] | None = None) -> int:
         webview.start(styles, window, gui="gtk", icon=icon_png(256) or None)
     arm_exit_watchdog()
     return 0
+
+
+def daemon_bridge_threads() -> None:
+    """#313, the cause. pywebview runs every JS-API call and every DOM event
+    handler in a plain `Thread` (webview/util.py:303, :335 -- non-daemon) and
+    hands a call's answer back with `evaluate_js`, which on GTK waits on a
+    semaphore with no timeout for WebKit's asynchronous reply
+    (platforms/gtk.py:693-695). An answer still in flight when the window goes
+    never gets that reply -- the GTK loop has ended -- and Python's exit joins
+    that thread forever. MEASURED: the exit watchdog's stacks on robin's close
+    (crow.log 2026-09-27 09:39:45: MainThread in `threading._shutdown`,
+    `Thread-14 (_call)` in `evaluate_js`); a harness with one answer in flight
+    at the close hangs 2 of 2 without this and ends 2 of 2 with it. Nothing
+    Crow must finish runs on those threads after the window is gone: `close`
+    saves before it destroys."""
+    import functools
+    import webview.util as wutil
+    if getattr(wutil.Thread, "func", None) is not threading.Thread:
+        wutil.Thread = functools.partial(threading.Thread, daemon=True)
 
 
 # #313. THE WINDOW IS SHUT, SO THE PROCESS ENDS -- within seconds.
