@@ -933,9 +933,43 @@ class TerminalTurnEvents(TurnEvents):
         # call left the terminal silent for its whole duration with nothing naming what it
         # was waiting on -- and the previous round's six figures as the last thing visible.
         # No newline, so the outcome lands on the same line when it comes back.
-        print(f"{DIM}  ● {name}({arg_note})", end="", flush=True, file=self._out)
+        self._open_call = f"  ● {name}({arg_note})"
+        self._progress_drawn = False
+        print(f"{DIM}{self._open_call}", end="", flush=True, file=self._out)
+
+    def tool_progress(self, name: str, state: dict) -> None:
+        """#308: the OPEN LINE is rewritten, never a new one per step.
+
+        `tool_started` leaves its line open for `tool_finished`; a progress
+        line is that same line redrawn with `\\r` and ended with ESC[K, so
+        forty sampling steps are one line, and the outcome still lands on it.
+        A transcript that is not a terminal gets none of it: `\\r` there is
+        forty lines of litter in every later grep.
+        """
+        if not getattr(self._out, "isatty", lambda: False)():
+            return
+        opened = getattr(self, "_open_call", f"  ● {name}()")
+        stage = state.get("stage") or ""
+        said = (f"{stage} " if stage else "") + str(state.get("line") or state.get("phase") or "")
+        print(f"\r{DIM}{opened} -- {said}\033[K", end="", flush=True, file=self._out)
+        self._progress_drawn = True
+
+    def image_created(self, path: str, source: str, job: str = "") -> None:
+        """#311: the terminal has no preview, so it names the file -- one line,
+        the size and the weight, which is what decides whether to open it."""
+        size = crow_core.image_dimensions(path) or (0, 0)
+        try:
+            kb = round(os.path.getsize(path) / 1024)
+        except OSError:
+            kb = 0
+        print(f"{DIM}    image: {path} ({size[0]}x{size[1]}, {kb} KB){RESET}",
+              file=self._out)
 
     def tool_finished(self, name: str, seconds: float, repeated: bool) -> None:
+        if getattr(self, "_progress_drawn", False):
+            # The last phase line gives way to the outcome, on the same line.
+            print(f"\r{DIM}{self._open_call}\033[K", end="", file=self._out)
+            self._progress_drawn = False
         marks = []
         if repeated:
             marks.append("repeat")

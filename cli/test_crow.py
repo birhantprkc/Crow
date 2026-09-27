@@ -5401,5 +5401,76 @@ class RemoteSlashTests(unittest.TestCase):
         self.assertFalse(result.handled)
 
 
+
+class _Tty(io.StringIO):
+    """A StringIO that says it is a terminal."""
+
+    def isatty(self):
+        return True
+
+
+class TheTerminalRedrawsOneLineForAnImageJobTests(unittest.TestCase):
+    """#308 in the terminal: the call's open line is rewritten in place,
+    and a saved picture is one line naming it (#311)."""
+
+    def _state(self, **over):
+        state = {"job": "img-1", "kind": "generate", "phase": "sampling",
+                 "stage": "", "i": 3, "n": 40, "eta_s": 131.0,
+                 "line": "sampling 3/40 · 3.54 s/it", "width": 2752,
+                 "height": 1536}
+        state.update(over)
+        return state
+
+    def test_progress_rewrites_the_open_line_and_the_outcome_lands_on_it(self):
+        out = _Tty()
+        events = crow.TerminalTurnEvents(out=out)
+        events.tool_started("generate_image", json.dumps({"prompt": "a crow"}))
+        events.tool_progress("generate_image", self._state(phase="loading",
+                                                           line="loading weights 38/397"))
+        events.tool_progress("generate_image", self._state())
+        events.tool_finished("generate_image", 155.2, False)
+        text = out.getvalue()
+        self.assertEqual(text.count("\n"), 1, "one call, one line")
+        self.assertTrue(text.endswith("\n"))
+        self.assertIn("\r", text)
+        self.assertIn("sampling 3/40", text)
+        self.assertIn("\033[K", text)
+        last = text.rsplit("\r", 1)[1]
+        self.assertIn("generate_image(", last)
+        self.assertNotIn("sampling", last, "the outcome replaces the phase line")
+        self.assertIn("2m35s", last)
+
+    def test_an_edit_names_its_stage(self):
+        out = _Tty()
+        events = crow.TerminalTurnEvents(out=out)
+        events.tool_started("edit_image", "{}")
+        events.tool_progress("edit_image", self._state(stage="2/2", phase="refining",
+                                                       line="refining 5/40"))
+        self.assertIn("2/2 refining 5/40", out.getvalue())
+
+    def test_a_transcript_gets_no_redraws(self):
+        out = io.StringIO()
+        events = crow.TerminalTurnEvents(out=out)
+        events.tool_started("generate_image", "{}")
+        before = out.getvalue()
+        events.tool_progress("generate_image", self._state())
+        self.assertEqual(out.getvalue(), before)
+        self.assertNotIn("\r", out.getvalue())
+
+    def test_a_saved_picture_is_one_line_with_size_and_weight(self):
+        folder = tempfile.mkdtemp(prefix="crow-term-img-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "a.png")
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
+                     + (2752).to_bytes(4, "big") + (1536).to_bytes(4, "big")
+                     + b"\x00" * 3000)
+        out = io.StringIO()
+        crow.TerminalTurnEvents(out=out).image_created(path, "generate_image", "img-1")
+        self.assertEqual(out.getvalue().strip().replace(crow_core.DIM, "")
+                         .replace(crow_core.RESET, ""),
+                         "image: %s (2752x1536, 3 KB)" % path)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -56,6 +56,16 @@
    "kind": "def"
   },
   {
+   "name": "tool_generate_image",
+   "kind": "def",
+   "why": "#300 phase 3. The only place that talks to the image server and owns the handle that stops it. A second copy would start a second sd-server beside the first, and 29.8 GB of weights would sit in RAM twice."
+  },
+  {
+   "name": "tool_edit_image",
+   "kind": "def",
+   "why": "#300 phase 3. The two-stage edit robin chose on the pictures (1 MP edit, then img2img at full size). A second copy would drift back to a 4 MP edit, which measured grainy (E1, E2)."
+  },
+  {
    "name": "tool_write_file",
    "kind": "def",
    "why": "The one tool whose drift costs data: #10 measured hermes-agent resolving read-before-write to last-write-wins in two independent code paths, one warning and one writing anyway. Two implementations here is that same defect with a different name."
