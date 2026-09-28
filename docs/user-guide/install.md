@@ -92,7 +92,8 @@ build does; `Ninja Multi-Config` still writes to `build\bin\Release`.
 | build | 398 of 398 steps; `sd-cli.exe` 91.2 MB, `sd-server.exe` 91.4 MB |
 | check | `sd-cli.exe --version` reads `master-920-2f88688, commit 2f88688`, run from the packed `bin\` with only `System32` on `PATH` |
 | pack | 7 runtime libraries added, `msvcp140_codecvt_ids.dll` new with the image server; completeness OK |
-| not yet run | `generate_image` live on Windows |
+| beside the 27B | Windows commit limit under WDDM: sd-server starts with `--mmap` on Windows (#320); 3 of 3 images beside the crow-nest 27B serve, 218 to 235 s, card peak 31,861 MiB (2026-09-28) |
+| not yet run | the image tools from the Crow window on Windows |
 
 `pack-release.ps1` takes only `sd-server.exe` and `sd-cli.exe` from that directory and resolves
 their DLLs with `dumpbin` exactly as it does for `llama-server.exe`; a DLL already staged is not

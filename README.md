@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | ba
 curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | bash -s -- --build-image-server
 ```
 
-**Windows**
+**Windows** (image server included in the package)
 
 ```powershell
 irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
