@@ -24978,6 +24978,52 @@ SD_SERVER_LOG_HOST_ALLOC = (
     b"[ERROR  ] image.cpp:902  - sampling for image 1/1 failed after 2.30s\n")
 
 
+class TheImageServerArgvTests(unittest.TestCase):
+    """#320. Windows adds `--mmap` (the commit limit under WDDM); the Linux
+    argv is the one measured beside the 27B, unchanged."""
+
+    MODEL = os.path.join("M", "qwen-image-2.1")
+
+    def argv(self, windows: bool) -> "list[str]":
+        with mock.patch.object(crow_platform, "IS_WINDOWS", windows), \
+                mock.patch.object(crow_core, "image_server_binary",
+                                  return_value="SD"), \
+                mock.patch.object(crow_core, "image_model_dir",
+                                  return_value=self.MODEL):
+            return crow_core.image_server_command(8097)
+
+    def linux_argv(self) -> "list[str]":
+        m = self.MODEL
+        return ["SD", "--diffusion-model",
+                os.path.join(m, "transformer",
+                             "diffusion_pytorch_model.safetensors.index.json"),
+                "--llm", os.path.join(m, "text_encoder_sdcli",
+                                      "model.safetensors.index.json"),
+                "--vae", os.path.join(m, "vae", "diffusion_pytorch_model.safetensors"),
+                "--backend", "te=cpu", "--diffusion-fa", "--max-vram", "7",
+                "--vae-tiling",
+                "--model-args", "qwen_image_2_1_prefix_cache_type=q8_0",
+                "--listen-port", "8097", "-v"]
+
+    def test_windows_adds_mmap_and_nothing_else(self):
+        self.assertEqual(self.argv(True), self.linux_argv() + ["--mmap"])
+
+    def test_the_linux_argv_is_the_measured_one(self):
+        self.assertEqual(self.argv(False), self.linux_argv())
+
+    def test_the_platform_layer_decides(self):
+        """crow_core appends what crow_platform says; it does not branch on
+        the OS itself."""
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(crow_platform.image_server_platform_args(), ["--mmap"])
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(crow_platform.image_server_platform_args(), [])
+        with mock.patch.object(crow_platform, "image_server_platform_args",
+                               return_value=["--probe"]):
+            for windows in (True, False):
+                self.assertEqual(self.argv(windows), self.linux_argv() + ["--probe"])
+
+
 class AnOutOfMemoryJobSaysSoTests(_ImageServerCase):
     """#320. sd-server's job answers "generate_image returned no results";
     the log since the job's start says why, and the result names it."""
@@ -24986,6 +25032,9 @@ class AnOutOfMemoryJobSaysSoTests(_ImageServerCase):
         super().setUp()
         self.fake.mode = "fail"
         self.fake.fail_message = "generate_image returned no results"
+        patcher = mock.patch.object(crow_platform, "IS_WINDOWS", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_a_cuda_out_of_memory_is_named_with_its_log_line(self):
         # An earlier job's OOM stands before this job's start: not this job's.
@@ -25012,99 +25061,36 @@ class AnOutOfMemoryJobSaysSoTests(_ImageServerCase):
                          "ggml_backend_cpu_buffer_type_alloc_buffer: failed to "
                          "allocate buffer of size 436208640")
 
+    def test_a_pinned_memory_refusal_alone_is_named(self):
+        """Logged VERBOSE, so it counts only when no ERROR line names a cause."""
+        self.fake.lines = [
+            b"[INFO   ] image.cpp:809  - generate_image 2752x1536",
+            b"[VERBOSE] ggml - ggml_cuda_host_malloc: failed to allocate 416.00 "
+            b"MiB of pinned memory: resource already mapped",
+            b"[ERROR  ] image.cpp:902  - sampling for image 1/1 failed after 2.30s"]
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertEqual(said.splitlines()[0],
+                         "error: the image job failed: the image server could not "
+                         "allocate pinned host memory: [VERBOSE] ggml - "
+                         "ggml_cuda_host_malloc: failed to allocate 416.00 MiB of "
+                         "pinned memory: resource already mapped")
+
+    def test_on_windows_the_commit_limit_is_named(self):
+        self.fake.lines = [x for x in SD_SERVER_LOG_OOM.split(b"\n") if x]
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertIn("ran out of GPU memory: ", said)
+        self.assertTrue(said.endswith(
+            " -- on Windows the system memory commit limit (RAM plus pagefile) "
+            "may be the cause: every CUDA allocation also counts against it "
+            "(#320)"), said)
+
     def test_a_server_that_dies_after_an_oom_says_so(self):
         self.fake.mode = "die"
         self.fake.lines = [x for x in SD_SERVER_LOG_OOM.split(b"\n") if x]
         said = crow_core.tool_generate_image("a crow", seed=3)
         self.assertTrue(said.startswith("error: the image server stopped answering"), said)
         self.assertIn(" -- the image server ran out of GPU memory: ", said.splitlines()[0])
-
-
-class TheImageToolsBorrowVramTests(_ImageServerCase):
-    """#320 / #297. An image job borrows VRAM from this turn's local crow-nest
-    serve before it is sent and gives it back after it ends -- done, failed
-    or stopped. A server without the lend API runs the job as before."""
-
-    def setUp(self):
-        super().setUp()
-        crow_core._RENDER_LENT.clear()
-        self.addCleanup(crow_core._RENDER_LENT.clear)
-        self.serve = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeLendServe)
-        self.serve.daemon_threads = True
-        self.serve.events = []
-        self.serve.lend = (200, dict(TheRenderLendsVramTests.LENT))
-        self.serve.returns = []
-        threading.Thread(target=self.serve.serve_forever, args=(0.05,),
-                         daemon=True).start()
-        self.addCleanup(self.serve.server_close)
-        self.addCleanup(self.serve.shutdown)
-        self.addCleanup(crow_core._TURN_SPOT.clear)
-        crow_core._TURN_SPOT.clear()
-        crow_core._TURN_SPOT.update({
-            "base_url": "http://127.0.0.1:%d/v1" % self.serve.server_address[1],
-            "model": "crow", "api_key": "x", "remote": False, "headers": {},
-            "served": "crow"})
-        for name, value in (("_render_lend_root", _REAL_LEND_ROOT),
-                            ("RENDER_RETURN_WAIT_S", 0.0)):
-            patcher = mock.patch.object(crow_core, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.stop_at = None
-        self.fake.on_poll = self._polled
-
-    def _polled(self, job, polls):
-        self.serve.events.append(("poll", None))
-        if self.stop_at is not None and polls == self.stop_at:
-            crow_core.INTERRUPT.set()
-
-    def events(self):
-        out = []
-        for name, _ in self.serve.events:
-            if not out or out[-1] != name:
-                out.append(name)
-        return out
-
-    def test_generate_borrows_before_the_job_and_returns_after(self):
-        said = crow_core.tool_generate_image("a crow on a nest", seed=7)
-        self.assertFalse(said.startswith("error:"), said)
-        self.assertEqual(self.events(), ["lend", "poll", "return"])
-        self.assertEqual(self.serve.events[0][1], {"mib": 7 * 1024 + 256, "ttl_s": 600})
-        self.assertEqual(crow_core._RENDER_LENT, {})
-
-    def test_edit_holds_one_loan_across_both_stages(self):
-        src = self.picture("night.png", 2752, 1536)
-        said = crow_core.tool_edit_image([src], "make it daytime", "a daylight crow")
-        self.assertFalse(said.startswith("error:"), said)
-        self.assertEqual(len(self.fake.bodies), 2)
-        self.assertEqual(self.events(), ["lend", "poll", "return"])
-
-    def test_a_failed_job_gives_the_loan_back(self):
-        self.fake.mode = "fail"
-        said = crow_core.tool_generate_image("a crow", seed=3)
-        self.assertTrue(said.startswith("error: the image job failed"), said)
-        self.assertEqual(self.events(), ["lend", "poll", "return"])
-        self.assertEqual(crow_core._RENDER_LENT, {})
-
-    def test_stop_gives_the_loan_back(self):
-        self.stop_at = 3
-        said = crow_core.tool_generate_image("a crow", seed=3)
-        self.assertTrue(said.startswith(crow_core.STOPPED), said)
-        self.assertEqual(self.events(), ["lend", "poll", "return"])
-        self.assertEqual(crow_core._RENDER_LENT, {})
-
-    def test_a_server_without_lending_runs_the_job_as_before(self):
-        """llama.cpp and an older serve answer 404, lending off 501: nothing
-        is lent, nothing is returned, the picture is made."""
-        for status in (404, 501):
-            with self.subTest(status=status):
-                self.serve.events.clear()
-                self.fake.bodies.clear()
-                self.serve.lend = (status, {"error": "no"})
-                said = crow_core.tool_generate_image("a crow", seed=5)
-                self.assertFalse(said.startswith("error:"), said)
-                self.assertIn("2752x1536", said)
-                self.assertEqual(self.events(), ["lend", "poll"])
-                self.assertEqual(crow_core._RENDER_LENT, {})
 
 
 class TheImageToolsReachTheTurnsEventsTests(TurnLoopCase):
