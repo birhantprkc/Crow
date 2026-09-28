@@ -216,7 +216,7 @@ Both use Qwen-Image 2.1 on a resident `sd-server`.
 | notes | a chat's `image` notes keep only `path`, `name`, `w`, `h`, `bytes`, `source` and `job`, never pixels. `imgjob` notes (one per job, kept current by the window) keep `job`, `kind`, `phase`, `stage`, `w`, `h` and `line`, so a restart can show an unfinished job as interrupted |
 | thread | `tool_progress` is always called on the turn's own thread: the tool polls the job and reads the log in its own loop, and the sink is thread-local, so a helper thread's `report_progress` reaches nothing |
 
-Measured 2026-09-27, RTX 5090 beside the 27B serve (8.15 GiB free after its load), 62 GiB host,
+Measured on Linux 2026-09-27, RTX 5090 beside the 27B serve (8.15 GiB free after its load), 62 GiB host,
 sd-server 2f88688 with the argv above, 40 steps (crow-nest `decode_out/p3-img`, RESULTS.md):
 
 | job | wall clock | result |
@@ -229,6 +229,8 @@ sd-server 2f88688 with the argv above, 40 steps (crow-nest `decode_out/p3-img`, 
 | stage 2 (B5): E3 to 2752×1536, strength 0.25 | 55.3 s | clean, closest to E3 |
 
 The two-stage edit is therefore about 161 s, close to one warm generation.
+
+Windows, 2026-09-28 (#320): RTX 5090 beside the crow-nest 27B `serve.exe` (24,020 MiB after its boot), 63 GB host without a pagefile, sd-server 2f88688 with the argv above plus `--mmap`, 40 steps: generate 2752×1536 three times in a row, 235.1 s (first, loads the weights), 218.1 s, 218.5 s; 0 out-of-memory lines, card peak 31,861 MiB. Without `--mmap` all three failed in under 4 s (Windows commit limit).
 Both tools ran end to end in the window on 2026-09-27 (robin's live check, #308/#311): generate 162.2 s and 163.6 s, edit 109.4 s + 60.3 s at 2752×1536 (`sd-server-8097.log`); the table's numbers come from the measurement script's requests.
 One difference: B5's init was E3 upscaled beforehand (`E3-up.png`), while the tool lets the
 server stretch it (`image_preprocess`); the live edit on 2026-09-27 came out clean at 2752×1536

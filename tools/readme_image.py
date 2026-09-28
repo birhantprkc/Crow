@@ -118,14 +118,15 @@ if sorted(_listed) != sorted(BUILTIN):
     sys.exit(f"readme_image: TOOLS is out of date; missing {sorted(set(BUILTIN) - set(_listed))}, "
              f"extra {sorted(set(_listed) - set(BUILTIN))}")
 
-# Measured 2026-09-27 (docs/reference/tools.md, "generate_image and edit_image"): 40 steps.
+# Measured on Linux 2026-09-27, the Windows row 2026-09-28 (docs/reference/tools.md, "generate_image and edit_image"): 40 steps.
 IMAGES = [("generate_image, warm", "2752×1536", "155.2 s"),
           ("generate_image, cold", "2752×1536", "175.3 s"),
-          ("edit_image, 2 stages", "1 MP edit + full-size redraw", "105.7 + 55.3 s")]
+          ("edit_image, 2 stages", "1 MP edit + full-size redraw", "105.7 + 55.3 s"),
+          ("generate_image, Windows", "2752×1536", "218.1 s")]
 IMAGES_SUB = "Qwen-Image 2.1 beside crow-nest's 27B"
 IMAGES_TEXT = ("In the chat an animated square in the theme's colours stands where the picture will be, "
                "then turns into it.")
-IMAGES_NOTE = ("One RTX 5090 (32 GB) beside the 27B serve, sd-server, 40 steps, 2026-09-27. "
+IMAGES_NOTE = ("RTX 5090 beside the 27B serve, 40 steps; Linux 2026-09-27, Windows 2026-09-28. "
                "Source: docs/reference/tools.md")
 
 OPS = [("Default, Windows", "CNQ4.5-M NVFP4 container", "45.1", "crow-nest"),
