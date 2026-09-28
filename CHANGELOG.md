@@ -5,6 +5,13 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Fixed
+
+- **Image jobs borrow VRAM from crow-nest and name an out-of-memory end** (#320, 2026-09-28). On Windows every `generate_image` beside crow-nest's 27B serve died in `cudaMalloc failed: out of memory`, and the tool answered only `generate_image returned no results`.
+  - `generate_image` and `edit_image` now borrow VRAM from this turn's local crow-nest serve before the job (`POST /v1/crow/vram/lend`, 7,424 MiB asked, ttl 600 s) and return it when the job ends, also on failure and Stop; one loan covers both edit stages. llama.cpp, an older serve or lending off: nothing is lent, the job runs as before.
+  - A failed job whose log since its start holds `cudaMalloc failed: out of memory` or `failed to allocate` answers `the image server ran out of GPU memory: <log line>`.
+  - Unit tests only (mocked serve, sd-server and log). Not measured on the card yet: whether the loan is enough for the job on Windows.
+
 ### Changed
 
 - **Docs name the image model's licence** (2026-09-27). README, `docs/user-guide/linux.md` and `docs/reference/tools.md` link [`Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1) and say that it is under the Qwen Research License: research and evaluation only, commercial use needs a licence from Qwen. No code change.

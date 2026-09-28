@@ -11322,11 +11322,12 @@ def _render_vram_post(url: str, body: dict) -> "tuple[int | None, dict]":
     return status, doc if isinstance(doc, dict) else {}
 
 
-def _render_vram_lend(mib: int, ttl_s: int) -> "dict | None":
+def _render_vram_lend(mib: int, ttl_s: int, who: str = "render") -> "dict | None":
     """#297: ask this turn's local serve for `mib` MiB for `ttl_s` s. The
     loan on a 200 (kept for _render_vram_return), None on anything else --
     llama.cpp and an older serve answer 404, a disabled lend 501, a loan
-    already out 409."""
+    already out 409. `who` names the borrower in the log (#320: the image
+    tools borrow through here too)."""
     root = _render_lend_root()
     if root is None:
         return None
@@ -11335,9 +11336,9 @@ def _render_vram_lend(mib: int, ttl_s: int) -> "dict | None":
                                     {"mib": int(mib), "ttl_s": int(ttl_s)})
     took = (time.monotonic() - started) * 1000.0
     if status != 200:
-        log_note("render: no VRAM lend from %s (asked %d MiB, ttl %d s): %s %s"
+        log_note(who + ": no VRAM lend from %s (asked %d MiB, ttl %d s): %s %s"
                  % (root, mib, ttl_s, status or "no answer",
-                    str(doc.get("error") or "")[:200]), "render")
+                    str(doc.get("error") or "")[:200]), who)
         if status is None:
             # A lend that timed out may still be served once serve reads
             # it: the return is idempotent (0 MiB when nothing is out), so
@@ -11355,14 +11356,14 @@ def _render_vram_lend(mib: int, ttl_s: int) -> "dict | None":
     _RENDER_LENT.clear()
     _RENDER_LENT.update({"root": root, "lent_mib": lent, "asked": int(mib),
                          "at": time.monotonic()})
-    log_note("render: lent %.0f MiB of %d asked (ttl %d s, release %s ms, "
+    log_note(who + ": lent %.0f MiB of %d asked (ttl %d s, release %s ms, "
              "%.0f ms round trip, serve reads %s MiB free)"
              % (lent, mib, ttl_s, doc.get("release_ms"), took,
-                doc.get("free_vram_mib")), "render")
+                doc.get("free_vram_mib")), who)
     return dict(_RENDER_LENT)
 
 
-def _render_vram_return() -> None:
+def _render_vram_return(who: str = "render") -> None:
     """#297: give the loan back, if there is one. NEVER RAISES. A 503 is
     serve's remap still waiting for VRAM another process holds: retried a
     few times, then left to serve, which retries on its own and returns at
@@ -11378,18 +11379,18 @@ def _render_vram_return() -> None:
         started = time.monotonic()
         status, doc = _render_vram_post(loan["root"] + "/v1/crow/vram/return", {})
         if status == 200:
-            log_note("render: returned %s MiB (remap %s ms, %.0f ms round trip, "
+            log_note(who + ": returned %s MiB (remap %s ms, %.0f ms round trip, "
                      "lent %.1f s)"
                      % (doc.get("returned_mib"), doc.get("remap_ms"),
                         (time.monotonic() - started) * 1000.0,
-                        time.monotonic() - loan["at"]), "render")
+                        time.monotonic() - loan["at"]), who)
             return
         if status != 503:
             break
-    log_note("render: return of %.0f MiB not confirmed by %s: %s %s -- serve "
+    log_note(who + ": return of %.0f MiB not confirmed by %s: %s %s -- serve "
              "gives it back itself at the TTL"
              % (loan["lent_mib"], loan["root"], status or "no answer",
-                str(doc.get("error") or "")[:200]), "render")
+                str(doc.get("error") or "")[:200]), who)
 
 
 # #293. THE PRECHECK LINES, fixed in the ticket before any result existed.
@@ -12138,6 +12139,18 @@ IMAGE_POLL_S = 0.5
 # `capabilities` answers once the arguments are parsed -- the weights load
 # lazily with the first job ("weights will be prepared lazily", sd-server.log).
 IMAGE_BOOT_WAIT = 180.0
+# sd-server's `--max-vram`, in GiB: the budget image_server_command passes.
+IMAGE_MAX_VRAM_GIB = 7
+# #320. AN IMAGE JOB BORROWS FROM THE IDLE ENGINE, like render_page (#297).
+# Beside crow-nest's 27B on Windows every job died in `cudaMalloc failed: out
+# of memory` (runs C and D). The ask is sd-server's whole budget plus the
+# render's margin; serve lends what it has (2,622 MiB at its boot on robin's
+# card) and never more. The TTL is the most serve accepts: one job may run up
+# to IMAGE_JOB_TIMEOUT, and serve takes the memory back itself at the TTL.
+IMAGE_LEND_MIB = IMAGE_MAX_VRAM_GIB * 1024 + RENDER_LEND_MARGIN_MIB
+IMAGE_LEND_TTL_S = RENDER_LEND_TTL_MAX_S
+# #320: how far back a failed job's log is searched for its cause.
+IMAGE_LOG_SCAN_BYTES = 8 << 20
 
 # THE MODEL CARD'S TABLE, not a formula: each is the size Qwen-Image 2.1 was
 # trained at for that shape. 16:9 is the default because every measured run
@@ -12290,7 +12303,8 @@ def image_server_command(port: int) -> "list[str]":
     transformer, encoder, vae = _image_model_files(image_model_dir())
     return [image_server_binary() or "sd-server",
             "--diffusion-model", transformer, "--llm", encoder, "--vae", vae,
-            "--backend", "te=cpu", "--diffusion-fa", "--max-vram", "7",
+            "--backend", "te=cpu", "--diffusion-fa",
+            "--max-vram", str(IMAGE_MAX_VRAM_GIB),
             "--vae-tiling",
             "--model-args", "qwen_image_2_1_prefix_cache_type=q8_0",
             "--listen-port", str(port), "-v"]
@@ -12349,22 +12363,71 @@ _SD_BAR = re.compile(r"^\|([#=> ]*)\|\s*(\d+)/(\d+)\s*-\s*([\d.]+)\s*"
 _SD_LOG = re.compile(r"^\[(INFO|VERBOSE|DEBUG|WARN|ERROR)\s*\][^-]*-\s(.*)$")
 
 
-def _image_log_tail(path: str, lines: int = 6) -> str:
-    """The server's last log lines, bars dropped -- evidence for an error."""
+def _image_log_lines(path: str, since: "int | None" = None) -> "list[str] | None":
+    """The server's log lines, bars dropped. From byte `since` (a file
+    shorter than that is a restarted server's: read from its start), at most
+    IMAGE_LOG_SCAN_BYTES back; without `since`, the last 64 KiB. None when
+    there is no file."""
     try:
         with open(path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - 65536))
+            size = fh.seek(0, os.SEEK_END)
+            if since is None:
+                start = max(0, size - 65536)
+            else:
+                start = max(since if since <= size else 0,
+                            size - IMAGE_LOG_SCAN_BYTES)
+            fh.seek(start)
             raw = fh.read()
     except OSError:
-        return "(no server log at %s)" % path
+        return None
     kept = []
     for seg in _SD_SPLIT.split(raw):
         text = seg.decode("utf-8", "replace").strip()
         if text and not _SD_BAR.match(text):
             kept.append(text)
+    return kept
+
+
+def _image_log_tail(path: str, lines: int = 6) -> str:
+    """The server's last log lines, bars dropped -- evidence for an error."""
+    kept = _image_log_lines(path)
+    if kept is None:
+        return "(no server log at %s)" % path
     return "\n".join(kept[-lines:]) if kept else "(the server printed nothing)"
+
+
+# #320. WHAT AN OUT-OF-MEMORY JOB LEAVES IN THE LOG, cudaMalloc's line first.
+# sd-server's job answers only "generate_image returned no results"; the
+# cause stands in its log (sd-server-8097.log, Windows, 2026-09-28):
+#   [ERROR  ] ggml - ggml_backend_cuda_buffer_type_alloc_buffer: allocating
+#             416.00 MiB on device 0: cudaMalloc failed: out of memory
+#   [ERROR  ] ggml - alloc_tensor_range: failed to allocate CUDA0 buffer ...
+# A VERBOSE `failed to allocate ... pinned memory` is a fallback, not the end.
+_SD_OOM_MARKS = ("cudaMalloc failed: out of memory", "failed to allocate")
+
+
+def _image_oom_cause(path: str, since: int) -> "str | None":
+    """#320: the sentence naming a job's out-of-memory end, with its log line,
+    from what the log gained since byte `since`; None when it holds none."""
+    lines = _image_log_lines(path, since) or []
+    for mark in _SD_OOM_MARKS:
+        for line in lines:
+            if mark not in line:
+                continue
+            level = _SD_LOG.match(line)
+            if level and level.group(1) != "ERROR":
+                continue
+            what = "GPU memory" if "cuda" in line.lower() else "memory"
+            return "the image server ran out of %s: %s" % (what, line)
+    return None
+
+
+def _image_vram_lend() -> None:
+    """#320: borrow VRAM for the image job from this turn's local crow-nest
+    serve (render_page's loan, #297). Anything but a 200 -- llama.cpp and an
+    older serve answer 404, lending off 501 -- lends nothing and the job runs
+    as before. The caller's `finally` gives it back: _render_vram_return."""
+    _render_vram_lend(IMAGE_LEND_MIB, IMAGE_LEND_TTL_S, "image")
 
 
 def _image_proc_alive() -> bool:
@@ -12787,6 +12850,13 @@ def _run_image_job(body: dict, base: dict, refine: bool = False
         offset = os.path.getsize(log)
     except OSError:
         offset = 0
+    job_start = offset
+
+    def oom(head: str) -> str:
+        """#320: `head` with the out-of-memory cause, when the log has one."""
+        cause = _image_oom_cause(log, job_start)
+        return "%s -- %s" % (head, cause) if cause else head
+
     try:
         accepted = _image_request("/sdcpp/v1/img_gen", body, timeout=120)
     except urllib.error.HTTPError as exc:
@@ -12835,15 +12905,17 @@ def _run_image_job(body: dict, base: dict, refine: bool = False
             code = _IMAGE_PROC[0].poll()
             emit(phase="error", line="the image server exited (%s)" % code)
             return None, time.monotonic() - began, (
-                "error: the image server exited with %s during the job; its "
-                "last lines:\n%s" % (code, _image_log_tail(log)))
+                "%s; its last lines:\n%s" % (oom(
+                    "error: the image server exited with %s during the job"
+                    % code), _image_log_tail(log)))
         try:
             job = _image_request("/sdcpp/v1/jobs/%s" % job_id, timeout=30)
         except Exception as exc:           # noqa: BLE001
             emit(phase="error", line="the image server stopped answering")
             return None, time.monotonic() - began, (
-                "error: the image server stopped answering (%s); its last "
-                "lines:\n%s" % (exc, _image_log_tail(log)))
+                "%s; its last lines:\n%s" % (oom(
+                    "error: the image server stopped answering (%s)" % exc),
+                    _image_log_tail(log)))
         try:
             with open(log, "rb") as fh:
                 size = fh.seek(0, os.SEEK_END)
@@ -12881,6 +12953,13 @@ def _run_image_job(body: dict, base: dict, refine: bool = False
                     % job_id)
             return png, time.monotonic() - began, None
         elif status in ("failed", "cancelled"):
+            cause = _image_oom_cause(log, job_start)
+            if cause:
+                # #320: the log's cause, not "generate_image returned no
+                # results" -- the model guessed at that one.
+                emit(phase="error", line=cause[:200])
+                return None, time.monotonic() - began, (
+                    "error: the image job %s: %s" % (status, cause))
             err = job.get("error") or {}
             said = (err.get("message") if isinstance(err, dict) else str(err)) \
                 or parser.error or status
@@ -12997,9 +13076,13 @@ def tool_generate_image(prompt: str, aspect_ratio: str = IMAGE_DEFAULT_ASPECT,
     base, why = _image_start("generate", width, height, "")
     if why is not None:
         return why
-    png, took, err = _run_image_job({
-        "prompt": str(prompt), "width": width, "height": height,
-        "seed": value, "sample_params": _image_sample_params()}, base)
+    try:
+        _image_vram_lend()
+        png, took, err = _run_image_job({
+            "prompt": str(prompt), "width": width, "height": height,
+            "seed": value, "sample_params": _image_sample_params()}, base)
+    finally:
+        _render_vram_return("image")
     if err is not None:
         return err
     try:
@@ -13072,24 +13155,29 @@ def tool_edit_image(images=None, instruction: str = "", description: str = "",
     base, why = _image_start("edit", width, height, "1/2")
     if why is not None:
         return why
-    first, took1, err = _run_image_job({
-        "prompt": str(instruction), "width": small_w, "height": small_h,
-        "seed": value, "sample_params": _image_sample_params(),
-        "ref_images": refs, "ref_image_args": EDIT_REF_ARGS,
-        "image_preprocess": rules}, base)
-    if err is not None:
-        return err
     import base64
-    base = dict(base, stage="2/2")
-    final, took2, err = _run_image_job({
-        "prompt": str(description), "width": width, "height": height,
-        "seed": value, "sample_params": _image_sample_params(),
-        "init_image": "data:image/png;base64,"
-                      + base64.b64encode(first).decode("ascii"),
-        "strength": EDIT_REFINE_STRENGTH,
-        "image_preprocess": "target=init,mode=stretch,width=%d,height=%d,"
-                            "filter=lanczos" % (width, height)},
-        base, refine=True)
+    # #320: ONE LOAN FOR BOTH STAGES, given back before the file is written.
+    try:
+        _image_vram_lend()
+        first, took1, err = _run_image_job({
+            "prompt": str(instruction), "width": small_w, "height": small_h,
+            "seed": value, "sample_params": _image_sample_params(),
+            "ref_images": refs, "ref_image_args": EDIT_REF_ARGS,
+            "image_preprocess": rules}, base)
+        if err is not None:
+            return err
+        base = dict(base, stage="2/2")
+        final, took2, err = _run_image_job({
+            "prompt": str(description), "width": width, "height": height,
+            "seed": value, "sample_params": _image_sample_params(),
+            "init_image": "data:image/png;base64,"
+                          + base64.b64encode(first).decode("ascii"),
+            "strength": EDIT_REFINE_STRENGTH,
+            "image_preprocess": "target=init,mode=stretch,width=%d,height=%d,"
+                                "filter=lanczos" % (width, height)},
+            base, refine=True)
+    finally:
+        _render_vram_return("image")
     if err is not None:
         return err
     try:
