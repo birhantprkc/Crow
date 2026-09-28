@@ -5,15 +5,23 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 2.8.2 — 2026-09-28
+
+**Pictures on Windows beside the 27B.** `generate_image` failed on every call on Windows while crow-nest's 27B served; sd-server now maps its weights there, and a failed image names its out-of-memory line. The Windows package is attached to the release again, so the Windows one-line installer finds it. Linux behaviour is unchanged.
+
 ### Fixed
 
+- **The Windows package is on the release again** (2026-09-28). `install.ps1` downloads `crow-<version>-win-x64.zip` from the release of the newest tag; v2.8.0 and v2.8.1 carried no asset, so the Windows one-liner had nothing to fetch. 2.8.2 ships `crow-2.8.2-win-x64.zip` with `sd-server.exe` and `sd-cli.exe` (pin `2f88688`, built with the Ninja recipe of #318).
 - **Windows: the image server starts with `--mmap`, and an out-of-memory end is named** (#320, 2026-09-28). On Windows every `generate_image` beside crow-nest's 27B serve died in `cudaMalloc failed: out of memory` with VRAM free, and the tool answered only `generate_image returned no results`.
   - Cause, measured on robin's machine: the Windows commit limit, not the card. Under WDDM every CUDA allocation also counts against commit (no pagefile, limit 64,901 MB); serve holds 26.7 GB, sd-server without `--mmap` needs ~37 GB (CPU text encoder copy 14.4 GB + pinned DiT staging 14 GB). A VRAM loan from serve did not help (10 GB VRAM free, same failure).
   - Windows: `image_server_command` appends `--mmap` from `crow_platform.image_server_platform_args()`. Measured beside the default 27B serve: the image completed in 237.7 s, commit 51,149 of 64,901 MB. The Linux argv is unchanged.
   - Both systems: a failed job whose log since its start holds `cudaMalloc failed: out of memory`, an ERROR `failed to allocate` line or a pinned-memory refusal answers with that log line (`the image server ran out of GPU memory: <line>`); on Windows it adds that the commit limit may be the cause.
+  - Acceptance, same machine, 2026-09-28: 3 of 3 images beside the running 27B serve (235.1 s, 218.1 s, 218.5 s), 0 out-of-memory lines, card peak 31,861 of 32,607 MiB. The GUI path on Windows is robin's live check.
 
 ### Changed
 
+- **Windows image-server recipe builds with Ninja** (#318, 2026-09-28). `docs/user-guide/install.md`: `cmake -G "Ninja Multi-Config"` in a `vcvars64` shell; the Visual Studio generator stopped at `No CUDA toolset found` (VS 18, CUDA 13.3). Measured: 398 of 398 build steps, `sd-cli.exe --version` reads `master-920-2f88688, commit 2f88688`.
+- **The node parse tests no longer depend on the runner's first node start** (#319, 2026-09-28). The tests that assert `node --check`'s verdict run with a 60 s clock; the product keeps 5 s. Before: 7 red CI jobs in 55 runs (2026-09-20 to 09-27). Tests only.
 - **Docs name the image model's licence** (2026-09-27). README, `docs/user-guide/linux.md` and `docs/reference/tools.md` link [`Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1) and say that it is under the Qwen Research License: research and evaluation only, commercial use needs a licence from Qwen. No code change.
 
 ## 2.8.1 — 2026-09-27
