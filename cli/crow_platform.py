@@ -551,6 +551,21 @@ def image_server_platform_args() -> list[str]:
     return ["--mmap"] if IS_WINDOWS else []
 
 
+def oom_hint() -> str:
+    """What this platform adds to an image job's out-of-memory sentence (#320).
+
+    WINDOWS: under WDDM every CUDA allocation also counts against the system
+    commit limit, so a `cudaMalloc failed: out of memory` can come with VRAM
+    free (robin's machine, 2026-09-28: 10 GB free, commit exhausted).
+    ELSEWHERE nothing: the card is what runs out.
+    """
+    if not IS_WINDOWS:
+        return ""
+    return (" -- on Windows the system memory commit limit (RAM plus pagefile) "
+            "may be the cause: every CUDA allocation also counts against it "
+            "(#320)")
+
+
 _SYSTEMD_VERSIONS: dict = {}
 
 

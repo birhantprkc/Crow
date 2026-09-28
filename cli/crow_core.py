@@ -12403,15 +12403,13 @@ def _image_log_tail(path: str, lines: int = 6) -> str:
 # is logged VERBOSE and counts only when nothing louder stands there.
 _SD_OOM_MARKS = ("cudaMalloc failed: out of memory", "failed to allocate")
 _SD_PINNED_MARKS = ("ggml_cuda_host_malloc: failed", "of pinned memory")
-_IMAGE_COMMIT_HINT = (" -- on Windows the system memory commit limit (RAM "
-                      "plus pagefile) may be the cause: every CUDA allocation "
-                      "also counts against it (#320)")
 
 
 def _image_oom_cause(path: str, since: int) -> "str | None":
     """#320: the sentence naming a job's out-of-memory end, with its log line,
-    from what the log gained since byte `since`; None when it holds none. On
-    Windows it names the commit limit as a possible cause."""
+    from what the log gained since byte `since`; None when it holds none. The
+    platform's hint follows (crow_platform.oom_hint: Windows names the commit
+    limit)."""
     lines = _image_log_lines(path, since) or []
     found = None
     for mark in _SD_OOM_MARKS:
@@ -12434,7 +12432,7 @@ def _image_oom_cause(path: str, since: int) -> "str | None":
         said = "the image server ran out of GPU memory: %s" % found
     else:
         said = "the image server ran out of memory: %s" % found
-    return said + (_IMAGE_COMMIT_HINT if crow_platform.IS_WINDOWS else "")
+    return said + crow_platform.oom_hint()
 
 
 def _image_proc_alive() -> bool:

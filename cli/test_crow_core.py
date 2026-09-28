@@ -25016,8 +25016,10 @@ class TheImageServerArgvTests(unittest.TestCase):
         the OS itself."""
         with mock.patch.object(crow_platform, "IS_WINDOWS", True):
             self.assertEqual(crow_platform.image_server_platform_args(), ["--mmap"])
+            self.assertIn("commit limit", crow_platform.oom_hint())
         with mock.patch.object(crow_platform, "IS_WINDOWS", False):
             self.assertEqual(crow_platform.image_server_platform_args(), [])
+            self.assertEqual(crow_platform.oom_hint(), "")
         with mock.patch.object(crow_platform, "image_server_platform_args",
                                return_value=["--probe"]):
             for windows in (True, False):
