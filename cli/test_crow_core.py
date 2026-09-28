@@ -25026,6 +25026,108 @@ class TheImageServerArgvTests(unittest.TestCase):
                 self.assertEqual(self.argv(windows), self.linux_argv() + ["--probe"])
 
 
+class TheImageServerRunsInItsOwnFolderTests(unittest.TestCase):
+    """#324. sd-server walks its working directory on every capabilities
+    probe (`--lora-model-dir` defaults to `.`); started from the home folder on
+    Windows the walk threw and the probe answered HTTP 500 forever. Crow gives
+    it an empty folder of its own, and a 5xx ends the boot wait with its text.
+    Nothing here starts a process: Popen is a stand-in."""
+
+    WHAT = ('directory_entry::status: The file cannot be accessed by the system.: '
+            '".\\AppData\\Local\\Docker\\run\\dockerEthernetVfkit"')
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-image-cwd-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.log = os.path.join(self.dir, "runs", "sd-server-8097.log")
+        self.proc = mock.Mock(pid=4242)
+        self.proc.poll.return_value = None
+        self.popen = mock.Mock(return_value=self.proc)
+        self.terminate = mock.Mock()
+        for name, value in (("IMAGE_POLL_S", 0.005), ("_IMAGE_PROC", None),
+                            ("IMAGE_BOOT_WAIT", 3.0)):
+            self.addCleanup(setattr, crow_core, name, getattr(crow_core, name))
+            setattr(crow_core, name, value)
+        for target, attr, value in (
+                (crow_core, "image_server_log", mock.Mock(return_value=self.log)),
+                (crow_core, "image_tools_unavailable", mock.Mock(return_value=None)),
+                (crow_core, "image_server_command", mock.Mock(return_value=["SD"])),
+                (crow_core, "log_note", mock.Mock()),
+                (crow_core.subprocess, "Popen", self.popen),
+                (crow_platform, "state_dir", mock.Mock(return_value=self.dir)),
+                (crow_platform, "server_scope_prefix", mock.Mock(return_value=[])),
+                (crow_platform, "spawn_kwargs", mock.Mock(return_value={})),
+                (crow_platform, "terminate_tree", self.terminate)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        crow_core.INTERRUPT.clear()
+        self.addCleanup(crow_core.INTERRUPT.clear)
+
+    def serve_capabilities(self, code: int, what: str = "") -> None:
+        """A server whose capabilities route answers `code`, sd-server style."""
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(code)
+                if what:
+                    self.send_header("EXCEPTION_WHAT", what)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        self.addCleanup(setattr, crow_core, "IMAGE_SERVER_URL", crow_core.IMAGE_SERVER_URL)
+        crow_core.IMAGE_SERVER_URL = "http://127.0.0.1:%d" % httpd.server_address[1]
+
+    def test_sd_server_starts_in_an_empty_folder_crow_owns(self):
+        calls = iter([crow_core.urllib.error.URLError("refused"), {}])
+
+        def answer(*_a, **_k):
+            got = next(calls)
+            if isinstance(got, Exception):
+                raise got
+            return got
+
+        with mock.patch.object(crow_core, "_image_request", side_effect=answer):
+            self.assertIsNone(crow_core.image_server_start())
+        work = self.popen.call_args.kwargs.get("cwd")
+        self.assertEqual(work, os.path.join(self.dir, "image-server"))
+        self.assertTrue(os.path.isdir(work))
+        self.assertEqual(os.listdir(work), [])
+
+    def test_a_500_on_capabilities_ends_the_wait_with_its_text(self):
+        self.serve_capabilities(500, self.WHAT)
+        began = time.monotonic()
+        why = crow_core.image_server_start()
+        took = time.monotonic() - began
+        self.assertLess(took, 2.0, why)
+        self.assertIn("HTTP 500", why or "")
+        self.assertIn("dockerEthernetVfkit", why or "")
+        self.terminate.assert_called_once_with(self.proc)
+        self.assertIsNone(crow_core._IMAGE_PROC)
+
+    def test_only_a_5xx_is_a_refusal(self):
+        """A 4xx or no answer keeps the boot wait; a 5xx names itself."""
+        self.serve_capabilities(404)
+        self.assertEqual(crow_core._image_server_probe(timeout=2.0), "")
+        self.serve_capabilities(503)
+        self.assertEqual(crow_core._image_server_probe(timeout=2.0), "HTTP 503")
+
+    def test_a_relative_model_dir_is_resolved_where_crow_started(self):
+        rel = os.path.join("rel", "qwen-image-2.1")
+        with mock.patch.dict(os.environ, {crow_core.IMAGE_MODEL_DIR_ENV: rel}):
+            self.assertEqual(crow_core.image_model_dir(), os.path.abspath(rel))
+        for rooted in ("/elsewhere/q", "C:\\models\\q"):
+            with mock.patch.dict(os.environ, {crow_core.IMAGE_MODEL_DIR_ENV: rooted}):
+                self.assertEqual(crow_core.image_model_dir(), rooted)
+
+
 class AnOutOfMemoryJobSaysSoTests(_ImageServerCase):
     """#320. sd-server's job answers "generate_image returned no results";
     the log since the job's start says why, and the result names it."""

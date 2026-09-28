@@ -5,6 +5,14 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Fixed
+
+- **The image server runs in its own empty folder, and a refusing server says so** (#324, 2026-09-28). A window started from the home folder on Windows never posted an image job: sd-server walks its working directory on every `GET /sdcpp/v1/capabilities` (`--lora-model-dir` defaults to `.`), the walk threw on Docker's socket file, the probe got HTTP 500, and the card showed "loading" until stop (238 s).
+  - sd-server now starts in `<state>/image-server`, a folder Crow creates and keeps empty. Same machine, started from an empty folder: capabilities 200 in 29 ms. The argv is unchanged on both systems.
+  - A 5xx on capabilities ends the start at once with `the image server answered HTTP 500 on /sdcpp/v1/capabilities` and the server's exception text, instead of waiting 180 s.
+  - A relative `CROW_IMAGE_MODEL_DIR` is resolved against the folder Crow was started in.
+  - The fixed build in the window from the home folder: not measured yet (robin's live check).
+
 ## 2.8.2 — 2026-09-28
 
 **Pictures on Windows beside the 27B.** `generate_image` failed on every call on Windows while crow-nest's 27B served; sd-server now maps its weights there, and a failed image names its out-of-memory line. The Windows package is attached to the release again, so the Windows one-line installer finds it. Linux behaviour is unchanged.
