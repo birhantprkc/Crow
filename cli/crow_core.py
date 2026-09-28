@@ -12138,6 +12138,8 @@ IMAGE_POLL_S = 0.5
 # `capabilities` answers once the arguments are parsed -- the weights load
 # lazily with the first job ("weights will be prepared lazily", sd-server.log).
 IMAGE_BOOT_WAIT = 180.0
+# #320: how far back a failed job's log is searched for its cause.
+IMAGE_LOG_SCAN_BYTES = 8 << 20
 
 # THE MODEL CARD'S TABLE, not a formula: each is the size Qwen-Image 2.1 was
 # trained at for that shape. 16:9 is the default because every measured run
@@ -12282,18 +12284,25 @@ def image_server_command(port: int) -> "list[str]":
     """The argv measured on 2026-09-27 beside the 27B serve (8.15 GiB free).
 
     `--max-vram 7` and `te=cpu` are what keeps it beside the language model:
-    card peak 31,322-31,566 MiB of 32,127 over every arm. The q8_0 prefix
-    cache is the measured line's; E1's grain was NOT traced to it (E3 is
-    clean with it). No `vae_tiling_params` is ever sent per request -- the
+    card peak 31,322-31,566 MiB of 32,127 over every arm (Linux). The q8_0
+    prefix cache is the measured line's; E1's grain was NOT traced to it (E3
+    is clean with it). No `vae_tiling_params` is ever sent per request -- the
     server's own `--vae-tiling` is the measured setting.
+
+    Windows adds `--mmap` (#320, crow_platform.image_server_platform_args):
+    measured 2026-09-28 beside the default 27B serve, the image completed in
+    237.7 s with it (commit 51,149 of 64,901 MB); without it every job failed.
     """
     transformer, encoder, vae = _image_model_files(image_model_dir())
-    return [image_server_binary() or "sd-server",
+    argv = [image_server_binary() or "sd-server",
             "--diffusion-model", transformer, "--llm", encoder, "--vae", vae,
             "--backend", "te=cpu", "--diffusion-fa", "--max-vram", "7",
             "--vae-tiling",
             "--model-args", "qwen_image_2_1_prefix_cache_type=q8_0",
             "--listen-port", str(port), "-v"]
+    # #320: Windows appends --mmap (the commit limit under WDDM); the
+    # reason and the numbers stand at crow_platform.image_server_platform_args.
+    return argv + crow_platform.image_server_platform_args()
 
 
 def _image_server_env() -> dict:
@@ -12349,22 +12358,81 @@ _SD_BAR = re.compile(r"^\|([#=> ]*)\|\s*(\d+)/(\d+)\s*-\s*([\d.]+)\s*"
 _SD_LOG = re.compile(r"^\[(INFO|VERBOSE|DEBUG|WARN|ERROR)\s*\][^-]*-\s(.*)$")
 
 
-def _image_log_tail(path: str, lines: int = 6) -> str:
-    """The server's last log lines, bars dropped -- evidence for an error."""
+def _image_log_lines(path: str, since: "int | None" = None) -> "list[str] | None":
+    """The server's log lines, bars dropped. From byte `since` (a file
+    shorter than that is a restarted server's: read from its start), at most
+    IMAGE_LOG_SCAN_BYTES back; without `since`, the last 64 KiB. None when
+    there is no file."""
     try:
         with open(path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - 65536))
+            size = fh.seek(0, os.SEEK_END)
+            if since is None:
+                start = max(0, size - 65536)
+            else:
+                start = max(since if since <= size else 0,
+                            size - IMAGE_LOG_SCAN_BYTES)
+            fh.seek(start)
             raw = fh.read()
     except OSError:
-        return "(no server log at %s)" % path
+        return None
     kept = []
     for seg in _SD_SPLIT.split(raw):
         text = seg.decode("utf-8", "replace").strip()
         if text and not _SD_BAR.match(text):
             kept.append(text)
+    return kept
+
+
+def _image_log_tail(path: str, lines: int = 6) -> str:
+    """The server's last log lines, bars dropped -- evidence for an error."""
+    kept = _image_log_lines(path)
+    if kept is None:
+        return "(no server log at %s)" % path
     return "\n".join(kept[-lines:]) if kept else "(the server printed nothing)"
+
+
+# #320. WHAT AN OUT-OF-MEMORY JOB LEAVES IN THE LOG. sd-server's job answers
+# only "generate_image returned no results"; the cause stands in its log
+# (sd-server-8097.log, Windows, 2026-09-28):
+#   [ERROR  ] ggml - ggml_backend_cuda_buffer_type_alloc_buffer: allocating
+#             416.00 MiB on device 0: cudaMalloc failed: out of memory
+#   [ERROR  ] ggml - alloc_tensor_range: failed to allocate CUDA0 buffer ...
+#   [VERBOSE] ggml - ggml_cuda_host_malloc: failed to allocate 416.00 MiB of
+#             pinned memory: resource already mapped
+# ERROR lines first, cudaMalloc's before the rest; a pinned-memory refusal
+# is logged VERBOSE and counts only when nothing louder stands there.
+_SD_OOM_MARKS = ("cudaMalloc failed: out of memory", "failed to allocate")
+_SD_PINNED_MARKS = ("ggml_cuda_host_malloc: failed", "of pinned memory")
+
+
+def _image_oom_cause(path: str, since: int) -> "str | None":
+    """#320: the sentence naming a job's out-of-memory end, with its log line,
+    from what the log gained since byte `since`; None when it holds none. The
+    platform's hint follows (crow_platform.oom_hint: Windows names the commit
+    limit)."""
+    lines = _image_log_lines(path, since) or []
+    found = None
+    for mark in _SD_OOM_MARKS:
+        for line in lines:
+            level = _SD_LOG.match(line)
+            if mark in line and not (level and level.group(1) != "ERROR"):
+                found = line
+                break
+        if found:
+            break
+    if found is None:
+        found = next((line for line in lines
+                      if any(m in line for m in _SD_PINNED_MARKS)), None)
+    if found is None:
+        return None
+    low = found.lower()
+    if any(m in found for m in _SD_PINNED_MARKS):
+        said = "the image server could not allocate pinned host memory: %s" % found
+    elif "cuda" in low and "host" not in low:
+        said = "the image server ran out of GPU memory: %s" % found
+    else:
+        said = "the image server ran out of memory: %s" % found
+    return said + crow_platform.oom_hint()
 
 
 def _image_proc_alive() -> bool:
@@ -12787,6 +12855,13 @@ def _run_image_job(body: dict, base: dict, refine: bool = False
         offset = os.path.getsize(log)
     except OSError:
         offset = 0
+    job_start = offset
+
+    def oom(head: str) -> str:
+        """#320: `head` with the out-of-memory cause, when the log has one."""
+        cause = _image_oom_cause(log, job_start)
+        return "%s -- %s" % (head, cause) if cause else head
+
     try:
         accepted = _image_request("/sdcpp/v1/img_gen", body, timeout=120)
     except urllib.error.HTTPError as exc:
@@ -12835,15 +12910,17 @@ def _run_image_job(body: dict, base: dict, refine: bool = False
             code = _IMAGE_PROC[0].poll()
             emit(phase="error", line="the image server exited (%s)" % code)
             return None, time.monotonic() - began, (
-                "error: the image server exited with %s during the job; its "
-                "last lines:\n%s" % (code, _image_log_tail(log)))
+                "%s; its last lines:\n%s" % (oom(
+                    "error: the image server exited with %s during the job"
+                    % code), _image_log_tail(log)))
         try:
             job = _image_request("/sdcpp/v1/jobs/%s" % job_id, timeout=30)
         except Exception as exc:           # noqa: BLE001
             emit(phase="error", line="the image server stopped answering")
             return None, time.monotonic() - began, (
-                "error: the image server stopped answering (%s); its last "
-                "lines:\n%s" % (exc, _image_log_tail(log)))
+                "%s; its last lines:\n%s" % (oom(
+                    "error: the image server stopped answering (%s)" % exc),
+                    _image_log_tail(log)))
         try:
             with open(log, "rb") as fh:
                 size = fh.seek(0, os.SEEK_END)
@@ -12881,6 +12958,13 @@ def _run_image_job(body: dict, base: dict, refine: bool = False
                     % job_id)
             return png, time.monotonic() - began, None
         elif status in ("failed", "cancelled"):
+            cause = _image_oom_cause(log, job_start)
+            if cause:
+                # #320: the log's cause, not "generate_image returned no
+                # results" -- the model guessed at that one.
+                emit(phase="error", line=cause[:200])
+                return None, time.monotonic() - began, (
+                    "error: the image job %s: %s" % (status, cause))
             err = job.get("error") or {}
             said = (err.get("message") if isinstance(err, dict) else str(err)) \
                 or parser.error or status

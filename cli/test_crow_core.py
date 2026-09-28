@@ -4473,6 +4473,12 @@ class AWriteParsesWhatItWroteTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, True)
         crow_core.set_root(self.root)
         self.addCleanup(crow_core.set_root, None)
+        # #319. THE PARSE IS UNDER TEST, NOT THE RUNNER'S NODE START: a cold
+        # first node on a CI runner took over 5 s, 7 red jobs in 55 runs. The
+        # clock path has its own test, test_a_check_past_its_clock_says_so.
+        clock = mock.patch.object(crow_core, "SYNTAX_CHECK_SECONDS", 60.0)
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def at(self, name):
         return os.path.join(self.root, name)
@@ -4541,6 +4547,9 @@ class AnEditIsCheckedAndTheTableIsOneRowPerFormatTests(unittest.TestCase):
         crow_core.set_root(self.root)
         self.addCleanup(crow_core.set_root, None)
         self.addCleanup(crow_core.syntax_checks_set, None)
+        clock = mock.patch.object(crow_core, "SYNTAX_CHECK_SECONDS", 60.0)  # #319
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def at(self, name):
         return os.path.join(self.root, name)
@@ -24354,6 +24363,7 @@ class _FakeSdServer:
         self.cancels: list[tuple] = []
         self.jobs: dict = {}
         self.mode = "ok"
+        self.fail_message = "CUDA out of memory"
         self.on_poll = None
         fake = self
 
@@ -24424,7 +24434,7 @@ class _FakeSdServer:
         if self.mode == "fail":
             job["status"] = "failed"
             return handler._send(200, {"id": ident, "status": "failed",
-                                       "error": {"message": "CUDA out of memory"}})
+                                       "error": {"message": self.fail_message}})
         import base64
         body = job["body"]
         png = _gray_png(body["width"], body["height"])
@@ -24943,6 +24953,146 @@ class AnImageJobThatDoesNotFinishSaysWhyTests(_ImageServerCase):
             why = crow_core.image_tools_unavailable()
         self.assertIn(crow_core.IMAGE_MODEL_DIR_ENV, why)
         self.assertIn("transformer", why)
+
+
+# #320: sd-server's own lines from the Windows run D (sd-server-8097.log,
+# 2026-09-28), the job's start and its out-of-memory end.
+SD_SERVER_LOG_OOM = (
+    b"[INFO   ] image.cpp:809  - generate_image 2752x1536\n"
+    b"[ERROR  ] ggml - ggml_backend_cuda_buffer_type_alloc_buffer: allocating "
+    b"416.00 MiB on device 0: cudaMalloc failed: out of memory\n"
+    b"[ERROR  ] ggml - alloc_tensor_range: failed to allocate CUDA0 buffer of "
+    b"size 436208640\n"
+    b"[ERROR  ] model_manager.cpp:565  - model manager alloc compute params "
+    b"backend buffer failed, num_tensors = 9\n"
+    b"[ERROR  ] diffusion_engine.cpp:2719 - Diffusion model sampling failed\n"
+    b"[ERROR  ] image.cpp:902  - sampling for image 1/1 failed after 3.43s\n")
+# The same run's earlier job: pinned host memory refused (VERBOSE, a
+# fallback), then a CPU buffer that could not be allocated.
+SD_SERVER_LOG_HOST_ALLOC = (
+    b"[INFO   ] image.cpp:809  - generate_image 2752x1536\n"
+    b"[VERBOSE] ggml - ggml_cuda_host_malloc: failed to allocate 416.00 MiB of "
+    b"pinned memory: resource already mapped\n"
+    b"[ERROR  ] ggml - ggml_backend_cpu_buffer_type_alloc_buffer: failed to "
+    b"allocate buffer of size 436208640\n"
+    b"[ERROR  ] image.cpp:902  - sampling for image 1/1 failed after 2.30s\n")
+
+
+class TheImageServerArgvTests(unittest.TestCase):
+    """#320. Windows adds `--mmap` (the commit limit under WDDM); the Linux
+    argv is the one measured beside the 27B, unchanged."""
+
+    MODEL = os.path.join("M", "qwen-image-2.1")
+
+    def argv(self, windows: bool) -> "list[str]":
+        with mock.patch.object(crow_platform, "IS_WINDOWS", windows), \
+                mock.patch.object(crow_core, "image_server_binary",
+                                  return_value="SD"), \
+                mock.patch.object(crow_core, "image_model_dir",
+                                  return_value=self.MODEL):
+            return crow_core.image_server_command(8097)
+
+    def linux_argv(self) -> "list[str]":
+        m = self.MODEL
+        return ["SD", "--diffusion-model",
+                os.path.join(m, "transformer",
+                             "diffusion_pytorch_model.safetensors.index.json"),
+                "--llm", os.path.join(m, "text_encoder_sdcli",
+                                      "model.safetensors.index.json"),
+                "--vae", os.path.join(m, "vae", "diffusion_pytorch_model.safetensors"),
+                "--backend", "te=cpu", "--diffusion-fa", "--max-vram", "7",
+                "--vae-tiling",
+                "--model-args", "qwen_image_2_1_prefix_cache_type=q8_0",
+                "--listen-port", "8097", "-v"]
+
+    def test_windows_adds_mmap_and_nothing_else(self):
+        self.assertEqual(self.argv(True), self.linux_argv() + ["--mmap"])
+
+    def test_the_linux_argv_is_the_measured_one(self):
+        self.assertEqual(self.argv(False), self.linux_argv())
+
+    def test_the_platform_layer_decides(self):
+        """crow_core appends what crow_platform says; it does not branch on
+        the OS itself."""
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(crow_platform.image_server_platform_args(), ["--mmap"])
+            self.assertIn("commit limit", crow_platform.oom_hint())
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(crow_platform.image_server_platform_args(), [])
+            self.assertEqual(crow_platform.oom_hint(), "")
+        with mock.patch.object(crow_platform, "image_server_platform_args",
+                               return_value=["--probe"]):
+            for windows in (True, False):
+                self.assertEqual(self.argv(windows), self.linux_argv() + ["--probe"])
+
+
+class AnOutOfMemoryJobSaysSoTests(_ImageServerCase):
+    """#320. sd-server's job answers "generate_image returned no results";
+    the log since the job's start says why, and the result names it."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.mode = "fail"
+        self.fake.fail_message = "generate_image returned no results"
+        patcher = mock.patch.object(crow_platform, "IS_WINDOWS", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_cuda_out_of_memory_is_named_with_its_log_line(self):
+        # An earlier job's OOM stands before this job's start: not this job's.
+        with open(self.log, "ab") as fh:
+            fh.write(SD_SERVER_LOG_OOM.replace(b"416.00 MiB", b"999.00 MiB"))
+        self.fake.lines = [x for x in SD_SERVER_LOG_OOM.split(b"\n") if x]
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertTrue(said.startswith(
+            "error: the image job failed: the image server ran out of GPU "
+            "memory: [ERROR  ] ggml - ggml_backend_cuda_buffer_type_alloc_buffer: "
+            "allocating 416.00 MiB on device 0: cudaMalloc failed: out of memory"),
+            said)
+        self.assertNotIn("999.00", said)
+        self.assertNotIn("returned no results", said)
+        self.assertEqual(self.states[-1]["phase"], "error")
+        self.assertIn("ran out of GPU memory", self.states[-1]["line"])
+
+    def test_a_host_buffer_failure_is_named_without_blaming_the_card(self):
+        self.fake.lines = [x for x in SD_SERVER_LOG_HOST_ALLOC.split(b"\n") if x]
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertEqual(said.splitlines()[0],
+                         "error: the image job failed: the image server ran out "
+                         "of memory: [ERROR  ] ggml - "
+                         "ggml_backend_cpu_buffer_type_alloc_buffer: failed to "
+                         "allocate buffer of size 436208640")
+
+    def test_a_pinned_memory_refusal_alone_is_named(self):
+        """Logged VERBOSE, so it counts only when no ERROR line names a cause."""
+        self.fake.lines = [
+            b"[INFO   ] image.cpp:809  - generate_image 2752x1536",
+            b"[VERBOSE] ggml - ggml_cuda_host_malloc: failed to allocate 416.00 "
+            b"MiB of pinned memory: resource already mapped",
+            b"[ERROR  ] image.cpp:902  - sampling for image 1/1 failed after 2.30s"]
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertEqual(said.splitlines()[0],
+                         "error: the image job failed: the image server could not "
+                         "allocate pinned host memory: [VERBOSE] ggml - "
+                         "ggml_cuda_host_malloc: failed to allocate 416.00 MiB of "
+                         "pinned memory: resource already mapped")
+
+    def test_on_windows_the_commit_limit_is_named(self):
+        self.fake.lines = [x for x in SD_SERVER_LOG_OOM.split(b"\n") if x]
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertIn("ran out of GPU memory: ", said)
+        self.assertTrue(said.endswith(
+            " -- on Windows the system memory commit limit (RAM plus pagefile) "
+            "may be the cause: every CUDA allocation also counts against it "
+            "(#320)"), said)
+
+    def test_a_server_that_dies_after_an_oom_says_so(self):
+        self.fake.mode = "die"
+        self.fake.lines = [x for x in SD_SERVER_LOG_OOM.split(b"\n") if x]
+        said = crow_core.tool_generate_image("a crow", seed=3)
+        self.assertTrue(said.startswith("error: the image server stopped answering"), said)
+        self.assertIn(" -- the image server ran out of GPU memory: ", said.splitlines()[0])
 
 
 class TheImageToolsReachTheTurnsEventsTests(TurnLoopCase):

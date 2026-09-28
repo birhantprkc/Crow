@@ -534,6 +534,38 @@ def server_scope_prefix() -> list[str]:
     return _user_scope_prefix(server_memory_bounds())
 
 
+def image_server_platform_args() -> list[str]:
+    """What this platform appends to sd-server's argv (#320).
+
+    WINDOWS: `--mmap`. Under WDDM every CUDA allocation also counts against
+    the system commit limit (robin's machine: no pagefile, 64,901 MB). serve
+    holds 26.7 GB of it, and sd-server without --mmap needs ~37 GB more (the
+    CPU text encoder's copy 14.4 GB + pinned DiT staging 14 GB), so every job
+    died in `cudaMalloc failed: out of memory` with VRAM free; a VRAM loan
+    from serve did not help (10 GB free, same failure). mmap-backed weights
+    are file-backed pages, not commit-charged. Measured 2026-09-28 beside the
+    default 27B serve: the image completed in 237.7 s, commit 51,149 of
+    64,901 MB. ELSEWHERE nothing: the Linux argv is the one measured beside
+    the 27B (8.15 GiB free) and stays as it is.
+    """
+    return ["--mmap"] if IS_WINDOWS else []
+
+
+def oom_hint() -> str:
+    """What this platform adds to an image job's out-of-memory sentence (#320).
+
+    WINDOWS: under WDDM every CUDA allocation also counts against the system
+    commit limit, so a `cudaMalloc failed: out of memory` can come with VRAM
+    free (robin's machine, 2026-09-28: 10 GB free, commit exhausted).
+    ELSEWHERE nothing: the card is what runs out.
+    """
+    if not IS_WINDOWS:
+        return ""
+    return (" -- on Windows the system memory commit limit (RAM plus pagefile) "
+            "may be the cause: every CUDA allocation also counts against it "
+            "(#320)")
+
+
 _SYSTEMD_VERSIONS: dict = {}
 
 
