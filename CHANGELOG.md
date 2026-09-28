@@ -5,6 +5,13 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Fixed
+
+- **Windows: the image server starts with `--mmap`, and an out-of-memory end is named** (#320, 2026-09-28). On Windows every `generate_image` beside crow-nest's 27B serve died in `cudaMalloc failed: out of memory` with VRAM free, and the tool answered only `generate_image returned no results`.
+  - Cause, measured on robin's machine: the Windows commit limit, not the card. Under WDDM every CUDA allocation also counts against commit (no pagefile, limit 64,901 MB); serve holds 26.7 GB, sd-server without `--mmap` needs ~37 GB (CPU text encoder copy 14.4 GB + pinned DiT staging 14 GB). A VRAM loan from serve did not help (10 GB VRAM free, same failure).
+  - Windows: `image_server_command` appends `--mmap` from `crow_platform.image_server_platform_args()`. Measured beside the default 27B serve: the image completed in 237.7 s, commit 51,149 of 64,901 MB. The Linux argv is unchanged.
+  - Both systems: a failed job whose log since its start holds `cudaMalloc failed: out of memory`, an ERROR `failed to allocate` line or a pinned-memory refusal answers with that log line (`the image server ran out of GPU memory: <line>`); on Windows it adds that the commit limit may be the cause.
+
 ### Changed
 
 - **Docs name the image model's licence** (2026-09-27). README, `docs/user-guide/linux.md` and `docs/reference/tools.md` link [`Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1) and say that it is under the Qwen Research License: research and evaluation only, commercial use needs a licence from Qwen. No code change.
