@@ -83,15 +83,18 @@ local files. `build_bundle` turns the page and its modules into one self-contain
 esbuild already on the machine; render that file, not the module source. See
 [tools](../reference/tools.md#build_bundle-212).
 
-## Not verified on Windows (#247)
+## Windows (#247)
 
-Development and acceptance of #201, #226, #228, #229 and #238 ran on Linux (Hyprland) only. The
-Windows code paths have never run on Windows:
+Windows keeps the old second frameless WebView2 window for the panel. Checked on robin's Windows
+machine on 2026-09-30 (#247); the rows marked *fixed* were fixed after that check and are not yet
+run live:
 
 | | |
 |---|---|
-| the pane | Windows keeps the old second frameless WebView2 window (`on_top=True`). By the Win32 documentation that makes it TopMost over **every** application, not only over Crow; not observed |
-| profile | the Windows pane shares the main window's WebView2 profile; #226's own profile, memory kill and sandbox are Linux only |
-| copy and menu | Ctrl+C relies on WebView2 still passing editing keys with browser accelerators off (Microsoft's documentation); `Api.copy` goes through `clip`. Not run |
-| Show in file manager | `explorer /select,<path>`; a path with a space is not verified |
-| edge grips | one geometry call in flight with the newest rectangle (#238); not run |
+| the pane | follows the window and the sidebar. It was TopMost over every application (`on_top=True`, seen over Discord); it is now **owned** by Crow's window: above Crow only, behind other apps with it, minimised with it (#329, fixed) |
+| profile | pywebview's private default dropped logins on every restart; Crow now starts it with its own storage in `%LOCALAPPDATA%\Crow\webview` (#326, fixed). #226's memory kill and sandbox stay Linux only |
+| address and tab | follow each page load (#330, fixed). `pushState` and `#hash` changes fire no load and are not followed |
+| after a restart | a panel restored open came up with no tab and stayed blank until `+`; it now starts with a tab, and Enter in the bar without a tab opens one (#327, fixed). `crow.log` has `[pane]` lines for each panel event |
+| copy and menu | Ctrl+C and the context menu copy into Notepad with umlauts intact; checked |
+| Show in file manager | `explorer /select,<path>` opens the folder with the file selected, also for a path with a space; checked |
+| edge grips | the window follows a fast drag and stops on release (#238); checked |

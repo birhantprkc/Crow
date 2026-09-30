@@ -3082,6 +3082,44 @@ def forget_session(path: str | None = None) -> bool:
         return False
 
 
+class _ReplaceWhole:
+    """#325: write `path` through `path + ".tmp"` and `os.replace` -- the goal
+    file's shape. Use as `with _ReplaceWhole(path) as fh:`.
+
+    `open(path, "w")` truncates first and writes second; the exit watchdog
+    ending the process in between left session.json at 0 bytes and the chat
+    lost (robin's Windows machine, 2026-09-28 16:22), and a Ctrl+C during the
+    close does the same. With the tmp the old file stays whole until the new
+    one is complete. A failed write removes the tmp and still raises, so the
+    caller sees the failure it always saw.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path, self.tmp, self.fh = path, path + ".tmp", None
+
+    def __enter__(self):
+        self.fh = open(self.tmp, "w", encoding="utf-8")
+        return self.fh
+
+    def __exit__(self, kind, value, trace) -> bool:
+        try:
+            self.fh.close()
+            if kind is None:
+                os.replace(self.tmp, self.path)
+                return False
+        except BaseException:
+            self._drop()
+            raise
+        self._drop()
+        return False
+
+    def _drop(self) -> None:
+        try:
+            os.remove(self.tmp)
+        except OSError:
+            pass
+
+
 def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
                  path: str | None = None, with_kv: bool = True,
                  pretty: bool = False, model: str | None = None,
@@ -3148,7 +3186,8 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
             # worth keeping; the next start just pays a prefill for them.
             pass
 
-    with open(path, "w", encoding="utf-8") as fh:
+    # #325: through a tmp and os.replace, never truncated in place.
+    with _ReplaceWhole(path) as fh:
         # SESSION_FORMAT_KEY is ADDED, and `version` keeps the meaning it has
         # had since 0.2.0 -- the client that wrote the file. Renaming or
         # re-purposing an existing key would break the way back: an older build
@@ -3428,11 +3467,41 @@ def load_session(base_url: str, system: str | None = None,
         if not kv:
             try:
                 saved["kv"] = False
-                with open(path, "w", encoding="utf-8") as fh:
+                with _ReplaceWhole(path) as fh:      # #325: never truncated
                     json.dump(saved, fh)
             except Exception:
                 pass
     return messages, int(saved.get("context_tokens") or 0), kv
+
+
+def set_aside_unreadable_session(path: str | None = None) -> str | None:
+    """#325: the line for a session file that exists and cannot be read, or None.
+
+    `load_session` answers None for it, the same as for "no session", so the
+    window opened an empty chat and said nothing -- measured on robin's 0-byte
+    session.json (2026-09-28). The file is MOVED ASIDE to `<path>.unreadable`,
+    not deleted: that says it once (the next start finds no file) and keeps
+    whatever is left of it for whoever wants to look.
+    """
+    path = path or SESSION_FILE
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            if isinstance(json.load(fh), dict):
+                return None
+        why = "not a chat file"
+    except (OSError, ValueError):
+        why = "0 bytes" if size == 0 else "%d bytes, not valid JSON" % size
+    aside = path + ".unreadable"
+    try:
+        os.replace(path, aside)
+    except OSError:
+        return "the saved chat could not be read (%s): %s" % (why, path)
+    return ("the saved chat could not be read (%s) -- kept as %s"
+            % (why, os.path.basename(aside)))
 
 
 def should_roll(context_tokens: int, n_ctx: int, at: float = ROLLOVER_AT) -> bool:
@@ -12229,7 +12298,13 @@ def image_model_dir() -> str:
     """
     raw = (os.environ.get(IMAGE_MODEL_DIR_ENV) or "").strip()
     if raw:
-        return os.path.expanduser(raw)
+        raw = os.path.expanduser(raw)
+        # #324: sd-server runs in its own directory (image_server_workdir), so
+        # a plainly relative value is resolved HERE, against the directory
+        # Crow was started in. A rooted one (`/x`, `C:\x`) is left as given.
+        if not re.match(r"([A-Za-z]:)?[\\/]", raw):
+            raw = os.path.abspath(raw)
+        return raw
     root = crow_platform.models_dir()
     inside = os.path.join(root, IMAGE_MODEL_NAME)
     # BESIDE THE LINKED TREE, the layout install.sh makes: `<install>/models`
@@ -12340,12 +12415,44 @@ def _image_request(path: str, body: "dict | None" = None,
         return json.loads(resp.read().decode("utf-8") or "{}")
 
 
-def _image_server_answers(timeout: float = 2.0) -> bool:
+def image_server_workdir() -> str:
+    """#324: sd-server's working directory, an empty folder Crow owns.
+
+    NEVER THE WINDOW'S. sd-server 2f88688 defaults `--lora-model-dir` to `.`
+    (examples/common/common.h:147) and walks it recursively on every
+    `GET /sdcpp/v1/capabilities` (runtime.cpp:259). Started from the home
+    folder on Windows, the walk reached Docker's AF_UNIX socket file and threw
+    (`EXCEPTION_WHAT: directory_entry::status: The file cannot be accessed by
+    the system.`), the probe got HTTP 500 and no job was ever posted
+    (2026-09-28). From an empty folder the same probe answered 200 in 29 ms.
+    """
+    return os.path.join(crow_platform.state_dir(), "image-server")
+
+
+def _image_server_probe(timeout: float = 2.0) -> "str | None":
+    """None when the image server answers; else why not.
+
+    "" is "nothing answers yet" (connection refused, timeout: a server still
+    loading). A 5xx is an ANSWER, not a boot state (#324): sd-server listens
+    only after its arguments are parsed, and a capabilities route that throws
+    throws on every probe. It comes back as `HTTP 500: <EXCEPTION_WHAT>`.
+    """
     try:
         _image_request("/sdcpp/v1/capabilities", timeout=timeout)
-        return True
+        return None
+    except urllib.error.HTTPError as exc:
+        headers = getattr(exc, "headers", None)
+        what = (headers.get("EXCEPTION_WHAT") if headers is not None else "") or ""
+        exc.close()
+        if exc.code < 500:
+            return ""
+        return "HTTP %d%s" % (exc.code, ": " + what.strip() if what.strip() else "")
     except Exception:                      # noqa: BLE001 - not answering is the answer
-        return False
+        return ""
+
+
+def _image_server_answers(timeout: float = 2.0) -> bool:
+    return _image_server_probe(timeout) is None
 
 
 # One pattern for every line the server redraws: `\r`, `\n` and the `ESC[K`
@@ -12464,12 +12571,14 @@ def image_server_start() -> "str | None":
         log = image_server_log()
         os.makedirs(os.path.dirname(log), exist_ok=True)
         _keep_previous_log(log)
+        work = image_server_workdir()
         try:
+            os.makedirs(work, exist_ok=True)
             with open(log, "wb") as sink:
                 proc = subprocess.Popen(
                     crow_platform.server_scope_prefix()
                     + image_server_command(_image_port()),
-                    stdout=sink, stderr=subprocess.STDOUT,
+                    cwd=work, stdout=sink, stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL, env=_image_server_env(),
                     **crow_platform.spawn_kwargs(detached=True))
         except OSError as exc:
@@ -12482,10 +12591,19 @@ def image_server_start() -> "str | None":
                 _IMAGE_PROC = None
                 return ("the image server exited with %s before it answered. "
                         "Its last lines:\n%s" % (code, _image_log_tail(log)))
-            if _image_server_answers():
+            refused = _image_server_probe()
+            if refused is None:
                 log_note("image server started (pid %d, log %s)"
                          % (proc.pid, log), "image")
                 return None
+            if refused:
+                # #324: the same answer on every probe; waiting out
+                # IMAGE_BOOT_WAIT only hid it behind a "loading" card.
+                crow_platform.terminate_tree(proc)
+                _IMAGE_PROC = None
+                return ("the image server answered %s on /sdcpp/v1/capabilities "
+                        "(working directory %s). Its last lines:\n%s"
+                        % (refused, work, _image_log_tail(log)))
             if INTERRUPT.is_set():
                 return STOPPED + " while the image server was starting"
             time.sleep(IMAGE_POLL_S)

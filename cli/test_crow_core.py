@@ -25026,6 +25026,108 @@ class TheImageServerArgvTests(unittest.TestCase):
                 self.assertEqual(self.argv(windows), self.linux_argv() + ["--probe"])
 
 
+class TheImageServerRunsInItsOwnFolderTests(unittest.TestCase):
+    """#324. sd-server walks its working directory on every capabilities
+    probe (`--lora-model-dir` defaults to `.`); started from the home folder on
+    Windows the walk threw and the probe answered HTTP 500 forever. Crow gives
+    it an empty folder of its own, and a 5xx ends the boot wait with its text.
+    Nothing here starts a process: Popen is a stand-in."""
+
+    WHAT = ('directory_entry::status: The file cannot be accessed by the system.: '
+            '".\\AppData\\Local\\Docker\\run\\dockerEthernetVfkit"')
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-image-cwd-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.log = os.path.join(self.dir, "runs", "sd-server-8097.log")
+        self.proc = mock.Mock(pid=4242)
+        self.proc.poll.return_value = None
+        self.popen = mock.Mock(return_value=self.proc)
+        self.terminate = mock.Mock()
+        for name, value in (("IMAGE_POLL_S", 0.005), ("_IMAGE_PROC", None),
+                            ("IMAGE_BOOT_WAIT", 3.0)):
+            self.addCleanup(setattr, crow_core, name, getattr(crow_core, name))
+            setattr(crow_core, name, value)
+        for target, attr, value in (
+                (crow_core, "image_server_log", mock.Mock(return_value=self.log)),
+                (crow_core, "image_tools_unavailable", mock.Mock(return_value=None)),
+                (crow_core, "image_server_command", mock.Mock(return_value=["SD"])),
+                (crow_core, "log_note", mock.Mock()),
+                (crow_core.subprocess, "Popen", self.popen),
+                (crow_platform, "state_dir", mock.Mock(return_value=self.dir)),
+                (crow_platform, "server_scope_prefix", mock.Mock(return_value=[])),
+                (crow_platform, "spawn_kwargs", mock.Mock(return_value={})),
+                (crow_platform, "terminate_tree", self.terminate)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        crow_core.INTERRUPT.clear()
+        self.addCleanup(crow_core.INTERRUPT.clear)
+
+    def serve_capabilities(self, code: int, what: str = "") -> None:
+        """A server whose capabilities route answers `code`, sd-server style."""
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(code)
+                if what:
+                    self.send_header("EXCEPTION_WHAT", what)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        self.addCleanup(setattr, crow_core, "IMAGE_SERVER_URL", crow_core.IMAGE_SERVER_URL)
+        crow_core.IMAGE_SERVER_URL = "http://127.0.0.1:%d" % httpd.server_address[1]
+
+    def test_sd_server_starts_in_an_empty_folder_crow_owns(self):
+        calls = iter([crow_core.urllib.error.URLError("refused"), {}])
+
+        def answer(*_a, **_k):
+            got = next(calls)
+            if isinstance(got, Exception):
+                raise got
+            return got
+
+        with mock.patch.object(crow_core, "_image_request", side_effect=answer):
+            self.assertIsNone(crow_core.image_server_start())
+        work = self.popen.call_args.kwargs.get("cwd")
+        self.assertEqual(work, os.path.join(self.dir, "image-server"))
+        self.assertTrue(os.path.isdir(work))
+        self.assertEqual(os.listdir(work), [])
+
+    def test_a_500_on_capabilities_ends_the_wait_with_its_text(self):
+        self.serve_capabilities(500, self.WHAT)
+        began = time.monotonic()
+        why = crow_core.image_server_start()
+        took = time.monotonic() - began
+        self.assertLess(took, 2.0, why)
+        self.assertIn("HTTP 500", why or "")
+        self.assertIn("dockerEthernetVfkit", why or "")
+        self.terminate.assert_called_once_with(self.proc)
+        self.assertIsNone(crow_core._IMAGE_PROC)
+
+    def test_only_a_5xx_is_a_refusal(self):
+        """A 4xx or no answer keeps the boot wait; a 5xx names itself."""
+        self.serve_capabilities(404)
+        self.assertEqual(crow_core._image_server_probe(timeout=2.0), "")
+        self.serve_capabilities(503)
+        self.assertEqual(crow_core._image_server_probe(timeout=2.0), "HTTP 503")
+
+    def test_a_relative_model_dir_is_resolved_where_crow_started(self):
+        rel = os.path.join("rel", "qwen-image-2.1")
+        with mock.patch.dict(os.environ, {crow_core.IMAGE_MODEL_DIR_ENV: rel}):
+            self.assertEqual(crow_core.image_model_dir(), os.path.abspath(rel))
+        for rooted in ("/elsewhere/q", "C:\\models\\q"):
+            with mock.patch.dict(os.environ, {crow_core.IMAGE_MODEL_DIR_ENV: rooted}):
+                self.assertEqual(crow_core.image_model_dir(), rooted)
+
+
 class AnOutOfMemoryJobSaysSoTests(_ImageServerCase):
     """#320. sd-server's job answers "generate_image returned no results";
     the log since the job's start says why, and the result names it."""
@@ -25212,3 +25314,76 @@ class ImageNotesKeepFactsNeverPixelsTests(unittest.TestCase):
     def test_other_kinds_carry_no_image_fields(self):
         kept = crow_core.clean_notes([{"k": "note", "at": 1, "t": "x", "path": "/a"}])
         self.assertEqual(kept, [{"k": "note", "at": 1, "t": "x"}])
+
+
+class SessionFileSurvivesACutWriteTests(unittest.TestCase):
+    """#325: the exit watchdog ended Crow inside `save_session`'s in-place
+    write and session.json was left at 0 bytes (robin's Windows machine,
+    2026-09-28 16:22). The old file must stay whole until the new one is
+    complete, and an unreadable file is said instead of opened silently."""
+
+    URL = "http://127.0.0.1:1/v1"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "session.json")
+
+    def _talk(self, text):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", text)
+        talk.append("assistant", "ok")
+        return talk
+
+    @staticmethod
+    def _dump_cut_halfway(obj, fh, **_kw):
+        fh.write('{"crow_session": ')
+        raise RuntimeError("process ended mid-write")
+
+    def test_a_save_cut_halfway_leaves_the_previous_file_byte_identical(self):
+        crow_core.save_session(self._talk("first"), self.URL, 10,
+                               path=self.path, with_kv=False)
+        with open(self.path, "rb") as fh:
+            before = fh.read()
+        with mock.patch.object(crow_core.json, "dump", self._dump_cut_halfway):
+            with self.assertRaises(RuntimeError):
+                crow_core.save_session(self._talk("second"), self.URL, 20,
+                                       path=self.path, with_kv=False)
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), before, "the old chat was cut")
+        self.assertFalse(os.path.exists(self.path + ".tmp"), "tmp left behind")
+
+    def test_the_kv_withdrawal_rewrite_cut_halfway_leaves_the_file_whole(self):
+        """load_session's other writer: a promised cache that is gone is
+        withdrawn by rewriting the same file."""
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"version": "x", "kv": True, "kv_tokens": 5,
+                       "prefix": crow_core.prefix_fingerprint(None, None),
+                       "messages": [{"role": "user", "content": "hi"}]}, fh)
+        with open(self.path, "rb") as fh:
+            before = fh.read()
+        with mock.patch.object(crow_core, "post_json",
+                               side_effect=OSError("no server")), \
+             mock.patch.object(crow_core.json, "dump", self._dump_cut_halfway):
+            restored = crow_core.load_session(self.URL, None, self.path)
+        self.assertIsNotNone(restored)
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), before, "the rewrite truncated the chat")
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+
+    def test_an_empty_session_file_is_said_once_and_kept_aside(self):
+        open(self.path, "w").close()
+        self.assertIsNone(crow_core.load_session(self.URL, None, self.path))
+        note = crow_core.set_aside_unreadable_session(self.path)
+        self.assertIn("could not be read", note)
+        self.assertIn("0 bytes", note)
+        self.assertFalse(os.path.exists(self.path))
+        self.assertTrue(os.path.exists(self.path + ".unreadable"))
+        self.assertIsNone(crow_core.set_aside_unreadable_session(self.path),
+                          "said twice")
+
+    def test_a_readable_session_file_is_left_alone(self):
+        crow_core.save_session(self._talk("fine"), self.URL, 10,
+                               path=self.path, with_kv=False)
+        self.assertIsNone(crow_core.set_aside_unreadable_session(self.path))
+        self.assertTrue(os.path.exists(self.path))
