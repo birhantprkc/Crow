@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Changed
+
+- **The 27B's 1024 reasoning cap is measured now, and it stays** (#245, 2026-09-30). `qwen38-27b-cnq` carries `_reasoning_budget_status`: 1024 against 2048 on crow-nest's `serve.exe` under Windows (RTX 5090), replaying robin's Windows session of 2026-09-15 at the two turns where 1024 closed the think block in a screening pass (K=10, 19,172 prompt tokens; K=45, 41,254), 8 seeds + greedy per arm and point, criteria fixed first (crow-nest `decode_out/meas-245/PREREG.md`). 1024: 1 of 18 rounds without a tool call, 0 corrupt, median 20.9 s per round; 2048: 0 of 18, 0 corrupt, 36.35 s. 2048 fails the pre-set wall-clock limit (1.74x against 1.5x), so nothing on the wire changes. Not decided by it: Flash-Next's 1024.
+
 ## 2.8.3 — 2026-09-30
 
 **Windows closes cleanly and the browser panel behaves.** Closing the window can no longer leave an empty
