@@ -12811,6 +12811,92 @@ class ThePanelLeavesATraceOnWindowsTests(ApiCase):
         self.assertIs(self.EdgeChrome.on_script_notify, wrapped)
 
 
+class _FakeForm:
+    """A WinForms form in short: `Owner`, and `Invoke` as the GUI thread."""
+
+    def __init__(self, invoke_required: bool = True) -> None:
+        self.Owner, self.InvokeRequired, self.invoked = None, invoke_required, 0
+
+    def Invoke(self, fn):
+        self.invoked += 1
+        fn()
+
+
+class _FakeWinPane(_FakePaneWindow):
+    """pywebview's Window on WinForms: `native`, and the URL WebView2 is on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.native, self.url = _FakeForm(), "about:blank"
+
+    def get_current_url(self):
+        return self.url
+
+
+class TheWindowsPanelIsCrowsOwnTests(ApiCase):
+    """#329 #330. On Windows the panel is an owned window of Crow's form, not
+    a TopMost one over every app, and each `loaded` tells the page the
+    address with the same `brnav` message Linux sends."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.windows: list = []
+        self.kwargs: list = []
+
+        def create_window(*_a, **k):
+            self.kwargs.append(k)
+            self.windows.append(_FakeWinPane())
+            return self.windows[-1]
+
+        for p in (mock.patch.dict(sys.modules, {
+                      "webview": types.SimpleNamespace(create_window=create_window),
+                      "System": types.SimpleNamespace(
+                          Func={"Type": lambda fn: fn}, Type="Type")}),
+                  mock.patch.object(crow_platform, "IS_WINDOWS", True),
+                  mock.patch.object(crow_core, "log_note")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_the_panel_is_owned_by_crow_and_not_topmost(self):
+        api = self.api()
+        main = _FakeForm()
+        api._window = types.SimpleNamespace(native=main)
+        api.pane_go("https://google.de/")
+        self.assertIs(self.kwargs[0]["on_top"], False)
+        pane = self.windows[0].native
+        self.assertIs(pane.Owner, main)
+        self.assertEqual(pane.invoked, 1)              # on the GUI thread
+        # Linux: on_top as before, nobody's owner.
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            other = self.api()
+            other._window = types.SimpleNamespace(native=_FakeForm())
+            other.pane_go("https://example.com/")
+        self.assertIs(self.kwargs[1]["on_top"], True)
+        self.assertIsNone(self.windows[1].native.Owner)
+
+    def test_each_load_tells_the_page_the_address(self):
+        api = self.api()
+        pushed: list = []
+        api.push = lambda m, to=None: pushed.append(m)
+        api.pane_go("https://google.de/")
+        win = self.windows[0]
+        win.events.loaded.set()                        # the blank of the build
+        win.url = "https://www.google.de/"             # Crow's load, redirected
+        win.events.loaded.set()
+        win.url = "https://my.playstation.com/login"   # the page went itself
+        win.events.loaded.set()
+        win.events.loaded.set()                        # nothing new
+        api.pane_go("https://www.google.de/")          # Back: Crow's own again
+        win.url = "https://www.google.de/"
+        win.events.loaded.set()
+        nav = [m for m in pushed if m.get("k") == "brnav"]
+        self.assertEqual(nav, [
+            {"k": "brnav", "url": "https://www.google.de/", "how": "replace"},
+            {"k": "brnav", "url": "https://my.playstation.com/login",
+             "how": "push"},
+            {"k": "brnav", "url": "https://www.google.de/", "how": "replace"}])
+
+
 class ThePageFollowsThePaneTests(unittest.TestCase):
     """#201 #227, auf der Seite: die Meldungen haben Empfaenger, ein Render
     macht keinen neuen Reiter je Aufruf, und GitHub bleibt draussen."""
