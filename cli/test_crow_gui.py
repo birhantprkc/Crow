@@ -12207,7 +12207,31 @@ class ThePageArrivesWithABaseUriTests(unittest.TestCase):
         Renderer wechseln."""
         self.assertIn('webview.start(styles, window, gui="gtk", icon=',
                       self.source)
-        self.assertIn("webview.start(styles, window)\n", self.source)
+        self.assertIn("webview.start(styles, window, "
+                      "**crow_platform.webview_start_kwargs())\n", self.source)
+
+
+class TheWindowsWebviewKeepsItsProfileTests(unittest.TestCase):
+    """#326: pywebview's private default made every login in the browser panel
+    vanish on restart. `private_mode` and `storage_path` are process-wide."""
+
+    def test_the_windows_start_is_persistent_and_in_crows_state_dir(self):
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            kw = crow_platform.webview_start_kwargs()
+            self.assertIs(kw["private_mode"], False)
+            self.assertEqual(
+                kw["storage_path"],
+                os.path.join(crow_platform.state_dir(), "webview"))
+
+    def test_linux_passes_nothing_extra(self):
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(crow_platform.webview_start_kwargs(), {})
+
+    def test_the_windows_branch_of_the_start_call_uses_them(self):
+        src = Path(crow_gui.__file__).read_text(encoding="utf-8")
+        self.assertIn(
+            "webview.start(styles, window, **crow_platform.webview_start_kwargs())",
+            src)
 
 
 class TheBrowserPaneOnACompositorTests(ApiCase):
@@ -12645,6 +12669,232 @@ class ThePanelCountsOnTheCardTests(ApiCase):
         body = body[:body.index("    def _park(self)")]
         self.assertIn("set_hardware_acceleration_policy(", body)
         self.assertIn("p.NEVER if self.throttled else p.ALWAYS", body)
+
+
+class _FakePaneEvent:
+    """pywebview's `Event`, as far as the pane uses it: `+=`, `set`, `is_set`."""
+
+    def __init__(self) -> None:
+        self.items, self.flag = [], False
+
+    def __iadd__(self, fn):
+        self.items.append(fn)
+        return self
+
+    def set(self) -> None:
+        self.flag = True
+        for fn in self.items:
+            fn()
+
+    def is_set(self) -> bool:
+        return self.flag
+
+
+class _FakePaneWindow:
+    def __init__(self) -> None:
+        self.events = types.SimpleNamespace(shown=_FakePaneEvent(),
+                                            loaded=_FakePaneEvent())
+        self.real_url, self.hidden = "about:blank", True
+
+    def load_url(self, url):
+        self.real_url = url
+
+    def show(self):
+        pass
+
+    def hide(self):
+        pass
+
+
+class _FakeWebMessage:
+    def __init__(self, raw: str, source: str) -> None:
+        self.raw, self.source = raw, source
+
+    def get_WebMessageAsJson(self):
+        return self.raw
+
+    def get_Source(self):
+        return self.source
+
+
+class ThePanelLeavesATraceOnWindowsTests(ApiCase):
+    """#327 step 1. On Windows every event of the browser panel is a crow.log
+    line, and a WebView2 message pywebview cannot unpack is ONE line naming
+    the message and its page instead of a traceback on the terminal."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.notes: list = []
+        self.windows: list = []
+        calls = self.calls = []
+
+        class EdgeChrome:                      # edgechromium.py:225, in short
+            def __init__(self, window):
+                self.pywebview_window, self.url = window, "https://x.test/"
+
+            def on_script_notify(self, sender, args):
+                try:
+                    a, b, c = json.loads(args.get_WebMessageAsJson())
+                    calls.append(("bridge", a))
+                except Exception:              # noqa: BLE001
+                    calls.append(("traceback", args.get_WebMessageAsJson()))
+
+        self.EdgeChrome = EdgeChrome
+        edge = types.ModuleType("webview.platforms.edgechromium")
+        edge.EdgeChrome = EdgeChrome
+
+        def create_window(*_a, **_k):
+            self.windows.append(_FakePaneWindow())
+            return self.windows[-1]
+
+        for p in (mock.patch.dict(sys.modules, {
+                      "webview": types.SimpleNamespace(create_window=create_window),
+                      "webview.platforms.edgechromium": edge}),
+                  mock.patch.object(crow_platform, "IS_WINDOWS", True),
+                  mock.patch.object(crow_core, "log_note", side_effect=(
+                      lambda t, k="note": self.notes.append("[%s] %s" % (k, t))))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_panel_events_are_crow_log_lines(self):
+        api = self.api()
+        api.pane_show()
+        self.assertEqual(self.notes, [
+            "[pane] browser pane: show asked before any page: no window yet"])
+        self.assertEqual(api.pane_go("https://www.google.com/"),
+                         "https://www.google.com/")
+        win = self.windows[0]
+        win.events.shown.set()
+        win.events.loaded.set()
+        api.pane_hide()
+        api.pane_show()
+        self.assertEqual(self.notes[1:], [
+            "[pane] browser pane: created (hidden, about:blank)",
+            "[pane] browser pane: go https://www.google.com/ "
+            "(window shown False, panel shown False)",
+            "[pane] browser pane: show via go, rect None",
+            "[pane] browser pane: window shown",
+            "[pane] browser pane: loaded https://www.google.com/",
+            "[pane] browser pane: hide",
+            "[pane] browser pane: show https://www.google.com/, rect None"])
+        # Linux: not one line more.
+        del self.notes[:]
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            other = self.api()
+            other.pane_go("https://example.com/")
+            other.pane_hide()
+            other.pane_show()
+        self.assertEqual(self.notes, [])
+
+    def test_only_a_malformed_panel_message_is_diverted_to_the_log(self):
+        api = self.api()
+        api.pane_go("https://www.google.com/")
+        pane = self.EdgeChrome(self.windows[0])
+        main = self.EdgeChrome(object())                 # Crow's own page
+        bad = _FakeWebMessage('["x", "y"]', "https://www.google.com/search")
+        pane.on_script_notify(None, bad)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.notes[-1],
+                         "[pane] browser pane: malformed web message from "
+                         'https://www.google.com/search: ["x", "y"]')
+        long = _FakeWebMessage(json.dumps(["z" * 500, 1]), "https://a.test/")
+        pane.on_script_notify(None, long)
+        self.assertTrue(self.notes[-1].endswith('["' + "z" * 198))
+        # well-formed on the panel, and anything on the main window: pywebview's.
+        pane.on_script_notify(None, _FakeWebMessage('["f", "{}", 1]', "u"))
+        main.on_script_notify(None, bad)
+        self.assertEqual(self.calls, [("bridge", "f"),
+                                      ("traceback", '["x", "y"]')])
+        # installed once, whatever the number of panes.
+        wrapped = self.EdgeChrome.on_script_notify
+        crow_gui.Api._pane_guard_bridge()
+        self.assertIs(self.EdgeChrome.on_script_notify, wrapped)
+
+
+class _FakeForm:
+    """A WinForms form in short: `Owner`, and `Invoke` as the GUI thread."""
+
+    def __init__(self, invoke_required: bool = True) -> None:
+        self.Owner, self.InvokeRequired, self.invoked = None, invoke_required, 0
+
+    def Invoke(self, fn):
+        self.invoked += 1
+        fn()
+
+
+class _FakeWinPane(_FakePaneWindow):
+    """pywebview's Window on WinForms: `native`, and the URL WebView2 is on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.native, self.url = _FakeForm(), "about:blank"
+
+    def get_current_url(self):
+        return self.url
+
+
+class TheWindowsPanelIsCrowsOwnTests(ApiCase):
+    """#329 #330. On Windows the panel is an owned window of Crow's form, not
+    a TopMost one over every app, and each `loaded` tells the page the
+    address with the same `brnav` message Linux sends."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.windows: list = []
+        self.kwargs: list = []
+
+        def create_window(*_a, **k):
+            self.kwargs.append(k)
+            self.windows.append(_FakeWinPane())
+            return self.windows[-1]
+
+        for p in (mock.patch.dict(sys.modules, {
+                      "webview": types.SimpleNamespace(create_window=create_window),
+                      "System": types.SimpleNamespace(
+                          Func={"Type": lambda fn: fn}, Type="Type")}),
+                  mock.patch.object(crow_platform, "IS_WINDOWS", True),
+                  mock.patch.object(crow_core, "log_note")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_the_panel_is_owned_by_crow_and_not_topmost(self):
+        api = self.api()
+        main = _FakeForm()
+        api._window = types.SimpleNamespace(native=main)
+        api.pane_go("https://google.de/")
+        self.assertIs(self.kwargs[0]["on_top"], False)
+        pane = self.windows[0].native
+        self.assertIs(pane.Owner, main)
+        self.assertEqual(pane.invoked, 1)              # on the GUI thread
+        # Linux: on_top as before, nobody's owner.
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            other = self.api()
+            other._window = types.SimpleNamespace(native=_FakeForm())
+            other.pane_go("https://example.com/")
+        self.assertIs(self.kwargs[1]["on_top"], True)
+        self.assertIsNone(self.windows[1].native.Owner)
+
+    def test_each_load_tells_the_page_the_address(self):
+        api = self.api()
+        pushed: list = []
+        api.push = lambda m, to=None: pushed.append(m)
+        api.pane_go("https://google.de/")
+        win = self.windows[0]
+        win.events.loaded.set()                        # the blank of the build
+        win.url = "https://www.google.de/"             # Crow's load, redirected
+        win.events.loaded.set()
+        win.url = "https://my.playstation.com/login"   # the page went itself
+        win.events.loaded.set()
+        win.events.loaded.set()                        # nothing new
+        api.pane_go("https://www.google.de/")          # Back: Crow's own again
+        win.url = "https://www.google.de/"
+        win.events.loaded.set()
+        nav = [m for m in pushed if m.get("k") == "brnav"]
+        self.assertEqual(nav, [
+            {"k": "brnav", "url": "https://www.google.de/", "how": "replace"},
+            {"k": "brnav", "url": "https://my.playstation.com/login",
+             "how": "push"},
+            {"k": "brnav", "url": "https://www.google.de/", "how": "replace"}])
 
 
 class ThePageFollowsThePaneTests(unittest.TestCase):
@@ -16457,6 +16707,170 @@ class TheWindowWarmsTheImageServerTests(unittest.TestCase):
         source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
         body = source[source.index("def main("):]
         self.assertLess(body.index("target=api.pump"), body.index("warm_image_server()"))
+
+
+
+class TheCloseSavesThenEndsTests(unittest.TestCase):
+    """#325: the exit watchdog must not end the process inside a session save.
+    #328: a second pywebview window (the Windows browser panel) kept
+    `webview.start` from returning, so the watchdog was never armed."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # create=True: without the fix these names do not exist, and the
+        # tests must then fail on their assertions, not in setUp.
+        # a fresh one of the module's own kind (#325: a count of saves)
+        self.persisting = type(getattr(crow_gui, "PERSISTING",
+                                       threading.Event()))()
+        for name, value in (("_EXIT_WATCHDOG", []),
+                            ("PERSISTING", self.persisting),
+                            ("EXIT_PERSIST_WAIT", 10.0)):
+            patcher = mock.patch.object(crow_gui, name, value, create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.logged = []
+        for target, attr, value in (
+                (crow_core, "LOG_FILE", os.path.join(self.dir, "crow.log")),
+                (crow_core, "log_note", lambda t, k="note": self.logged.append(t)),
+                (crow_core, "forget_mcp_servers", lambda: None)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        was = crow_gui.INTERRUPT.is_set()
+        self.addCleanup(lambda: crow_gui.INTERRUPT.set() if was
+                        else crow_gui.INTERRUPT.clear())
+
+    def test_the_watchdog_waits_for_a_running_save_then_ends(self):
+        ended = threading.Event()
+        self.persisting.set()
+        crow_gui.arm_exit_watchdog(grace=0.05, end=lambda _c: ended.set())
+        self.assertFalse(ended.wait(0.6), "ended the process inside the save")
+        self.persisting.clear()
+        self.assertTrue(ended.wait(3), "did not end once the save was done")
+        self.assertTrue(any(t.startswith("exit: waited ") and
+                            "for the session save" in t for t in self.logged),
+                        self.logged)
+
+    def test_the_wait_for_the_save_is_bounded(self):
+        ended = threading.Event()
+        self.persisting.set()
+        crow_gui.EXIT_PERSIST_WAIT = 0.2
+        crow_gui.arm_exit_watchdog(grace=0.05, end=lambda _c: ended.set())
+        self.assertTrue(ended.wait(3), "a save that never ends held the exit")
+        self.assertTrue(any("ending anyway" in t for t in self.logged), self.logged)
+
+    def test_persist_live_holds_the_flag_for_its_save_only(self):
+        seen = []
+        stub = types.SimpleNamespace(
+            _args=types.SimpleNamespace(session=True),
+            _endpoint=lambda: {"base_url": "http://127.0.0.1:1/v1", "remote": True},
+            _conversation=None, _context_tokens=0, _model=None,
+            _reasoning=None, _tools_cleared=0, _notes=[], _timings=[],
+            _stamp=lambda *a, **k: seen.append(("stamp", self.persisting.is_set())))
+        with mock.patch.object(crow_gui, "save_session",
+                               lambda *a, **k: seen.append(("save", self.persisting.is_set()))):
+            crow_gui.Api._persist_live(stub, with_kv=True)
+        self.assertEqual(seen, [("save", True), ("stamp", True)])
+        self.assertFalse(self.persisting.is_set())
+
+    def test_two_overlapping_saves_hold_the_exit_until_the_last_ends(self):
+        """A turn's save and close's save overlap; the first ends while the
+        second still writes. The watchdog must wait for the second."""
+        gates = {"turn": threading.Event(), "close": threading.Event()}
+        started = []
+
+        def save(*_a, **k):
+            name = k["notes"][0]
+            started.append(name)
+            gates[name].wait(10)
+
+        def stub(name):
+            return types.SimpleNamespace(
+                _args=types.SimpleNamespace(session=True),
+                _endpoint=lambda: {"base_url": "http://127.0.0.1:1/v1", "remote": True},
+                _conversation=None, _context_tokens=0, _model=None,
+                _reasoning=None, _tools_cleared=0, _notes=[name], _timings=[],
+                _stamp=lambda *a, **k: None)
+        ended = threading.Event()
+        with mock.patch.object(crow_gui, "save_session", save):
+            runs = [threading.Thread(target=crow_gui.Api._persist_live,
+                                     args=(stub(n),), daemon=True)
+                    for n in ("turn", "close")]
+            for run in runs:
+                run.start()
+            deadline = time.monotonic() + 5
+            while len(started) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(sorted(started), ["close", "turn"])
+            gates["turn"].set()
+            runs[0].join(5)
+            crow_gui.arm_exit_watchdog(grace=0.05, end=lambda _c: ended.set())
+            self.assertFalse(ended.wait(0.6),
+                             "ended the process inside the second save")
+            gates["close"].set()
+            runs[1].join(5)
+            self.assertTrue(ended.wait(3), "did not end once both saves were done")
+
+    def _closing(self, panel_fails=False):
+        order = []
+
+        class Win:
+            def __init__(self, name, fails=False):
+                self.name, self.fails = name, fails
+
+            def destroy(self):
+                order.append("destroy " + self.name)
+                if self.fails:
+                    raise RuntimeError("already gone")
+
+        main = Win("main")
+        stub = types.SimpleNamespace(
+            _remote=None, _current_path=None, _window=main,
+            _browser_win=Win("panel", panel_fails),
+            _persist_live=lambda with_kv=False: order.append("persist"))
+        import webview
+        with mock.patch.object(webview, "windows", [main]), \
+             mock.patch.object(crow_gui, "arm_exit_watchdog",
+                               lambda *a, **k: order.append("arm")):
+            crow_gui.Api.close(stub)
+        return order
+
+    def test_close_destroys_the_panel_window_before_the_main_one(self):
+        order = self._closing()
+        self.assertIn("destroy panel", order)
+        self.assertLess(order.index("persist"), order.index("destroy panel"))
+        self.assertLess(order.index("destroy panel"), order.index("destroy main"))
+
+    def test_a_panel_that_will_not_go_does_not_stop_the_close(self):
+        order = self._closing(panel_fails=True)
+        self.assertEqual(order[-2:], ["arm", "destroy main"])
+        self.assertIn("destroy panel", order)
+
+    def test_close_arms_the_watchdog_after_the_save_before_the_window_goes(self):
+        order = self._closing()
+        self.assertIn("arm", order, "armed only after webview.start returns")
+        self.assertLess(order.index("persist"), order.index("arm"))
+        self.assertLess(order.index("arm"), order.index("destroy main"))
+
+    def test_the_watchdog_is_armed_once_per_process(self):
+        # a grace no suite reaches: the daemon timers must never fire here
+        first = crow_gui.arm_exit_watchdog(grace=3600, end=lambda _c: None)
+        self.assertIs(crow_gui.arm_exit_watchdog(grace=3600, end=lambda _c: None),
+                      first)
+
+    def test_an_empty_session_file_is_said_at_start(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = source[source.index("        if not restored:\n            # #119"):]
+        body = body[:body.index("        messages, tokens, kv = restored")]
+        self.assertIn("set_aside_unreadable_session(SESSION_FILE)", body)
+
+    def test_the_window_says_it_is_saving_while_it_closes(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        button = source[source.index('<div class="wb close"'):]
+        button = button[:button.index("</div>")]
+        self.assertIn("classList.add('closing')", button)
+        self.assertIn('body.closing::after{content:"saving the chat', source)
 
 
 if __name__ == "__main__":

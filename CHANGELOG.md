@@ -11,7 +11,21 @@ The reasoning is in the commit and on the issue.
   - sd-server now starts in `<state>/image-server`, a folder Crow creates and keeps empty. Same machine, started from an empty folder: capabilities 200 in 29 ms. The argv is unchanged on both systems.
   - A 5xx on capabilities ends the start at once with `the image server answered HTTP 500 on /sdcpp/v1/capabilities` and the server's exception text, instead of waiting 180 s.
   - A relative `CROW_IMAGE_MODEL_DIR` is resolved against the folder Crow was started in.
-  - The fixed build in the window from the home folder: not measured yet (robin's live check).
+  - robin's live check (2026-09-30, Windows, window started from `C:\Users\robin`, beside the 27B serve): the tile read `sampling 1/40` after 21 s, the picture came in 314.7 s (2752×1536). n = 1.
+- **Closing the window can no longer empty the saved chat** (#325, 2026-09-30). On Windows the exit watchdog ended Crow while the close was still writing `session.json`, and the file was left at 0 bytes (2026-09-28 16:22); the next start opened an empty chat and said nothing.
+  - `session.json` is written to `session.json.tmp` and then moved over the old file, so an end at any moment (watchdog, Ctrl+C) leaves the previous file whole. The same for the rewrite that withdraws the KV half on load.
+  - The exit watchdog waits while any session save is running, up to 30 s, and logs `exit: waited N s for the session save`.
+  - The window says `saving the chat and the cache...` from the X until it is gone.
+  - An empty or unreadable `session.json` is moved aside to `session.json.unreadable` and the start says so once, instead of an empty chat without a word.
+  - Not measured: a real close on Windows with the fix installed (robin's live check).
+- **Crow ends after the X on Windows when the browser panel was used** (#328, 2026-09-30). The panel's second window outlived the main one, pywebview only ends its loop when the last window is gone, and the exit watchdog is armed after that loop: the process stayed until Ctrl+C (3 of 3 closes after using the panel, > 60 s). `close()` now destroys the panel window before the main one and arms the watchdog itself after the save. Not measured live yet.
+- **Windows: the browser panel keeps logins across a restart** (#326, 2026-09-30). pywebview starts in private mode by default, for every window; Crow now starts it with `private_mode=False` and its own storage in `%LOCALAPPDATA%\Crow\webview`. Crow's page keeps its one `localStorage` key (`crow.theme`). Not measured live yet.
+- **Windows: the browser panel stays above Crow only** (#329, 2026-09-30). It was created `on_top`, which is TopMost over every application (seen over Discord with Crow behind it); it is now owned by Crow's window instead, so it goes behind other apps with Crow and minimises with it. Not measured live yet.
+- **Windows: the panel's tab and address follow the page** (#330, 2026-09-30). A link or redirect inside the page left the tab and the address on the first URL; each load now reports its URL the way Linux does. `pushState` and `#hash` changes fire no load on Windows and are still not followed.
+
+### Added
+
+- **Windows: the browser panel leaves a trace in `crow.log`** (#327 step 1, 2026-09-30): `[pane] browser pane:` lines for created, go, show, hide and loaded, and a malformed WebView2 message becomes one `malformed web message from <origin>` line instead of a traceback on the terminal. Measurement for the blank panel after a restart (2 of 2 restarts on 2026-09-30); the fix follows the trace.
 
 ## 2.8.2 — 2026-09-28
 

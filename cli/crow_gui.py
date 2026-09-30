@@ -1206,6 +1206,12 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #remotetoggle{margin-left:auto;position:relative}
 #remotetoggle + #codetoggle{margin-left:0}
 #wbtns{display:flex;-webkit-app-region:no-drag}
+/* #325: the close saves the chat and the cache first, which can take seconds;
+   said, so nobody interrupts it. */
+body.closing::after{content:"saving the chat and the cache...";position:fixed;
+  left:50%;top:50%;transform:translate(-50%,-50%);z-index:99999;
+  padding:12px 18px;border-radius:8px;background:var(--raised);
+  border:1px solid var(--line)}
 /* The buttons sit inside the drag region, so they opt out of it again --
    without this a click on 'close' starts a drag instead of closing. */
 .wb{width:42px;height:33px;display:grid;place-items:center;color:var(--dimmer);
@@ -3433,7 +3439,8 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   <div id="wbtns" class="pywebview-no-drag">
     <div class="wb" onclick="pywebview.api.minimise()">&#8211;</div>
     <div class="wb" onclick="pywebview.api.maximise()">&#9633;</div>
-    <div class="wb close" onclick="pywebview.api.close()">&#10005;</div>
+    <div class="wb close" onclick="document.body.classList.add('closing');
+         pywebview.api.close()">&#10005;</div>
   </div>
 </div>
 
@@ -13076,6 +13083,10 @@ class Api:
             # which is why the greeting is its own message and not a field.
             self._pin_memory(SESSION_FILE)
             self._hello()
+            # #325: an empty or broken session.json is said, not opened silently.
+            unreadable = crow_core.set_aside_unreadable_session(SESSION_FILE)
+            if unreadable:
+                self.push({"k": "fail", "t": unreadable})
             self._reload_rail()
             return
         messages, tokens, kv = restored
@@ -14888,24 +14899,30 @@ class Api:
         """
         if not self._args.session:
             return
+        # #325: the exit watchdog waits while this is set (EXIT_PERSIST_WAIT),
+        # the pointer stamp included -- it rewrites the same file.
+        PERSISTING.set()
         try:
-            # A REMOTE ENDPOINT HAS NO SLOT TO SAVE. `with_kv` is the caller's
-            # half of the same contract `load_session` now reads: the messages
-            # are still written, the cache half is not attempted, and the file
-            # says `kv: false` so the next start does not try to restore one.
-            spot = self._endpoint()
-            save_session(self._conversation, spot["base_url"],
-                         self._context_tokens,
-                         with_kv=with_kv and not spot["remote"],
-                         model=self._model, reasoning=self._reasoning,
-                         tools_cleared=self._tools_cleared,
-                         # #173/#171: je Zug mitgeschrieben, wie die Nachrichten
-                         # -- ein Fensterneustart mitten in einem langen Lauf ist
-                         # genau der Fall, fuer den die Baender existieren.
-                         notes=self._notes, timings=self._timings)
-        except Exception:                  # noqa: BLE001 - a turn survives it
-            return
-        self._stamp(SESSION_FILE, pointer=True)
+            try:
+                # A REMOTE ENDPOINT HAS NO SLOT TO SAVE. `with_kv` is the caller's
+                # half of the same contract `load_session` now reads: the messages
+                # are still written, the cache half is not attempted, and the file
+                # says `kv: false` so the next start does not try to restore one.
+                spot = self._endpoint()
+                save_session(self._conversation, spot["base_url"],
+                             self._context_tokens,
+                             with_kv=with_kv and not spot["remote"],
+                             model=self._model, reasoning=self._reasoning,
+                             tools_cleared=self._tools_cleared,
+                             # #173/#171: je Zug mitgeschrieben, wie die Nachrichten
+                             # -- ein Fensterneustart mitten in einem langen Lauf ist
+                             # genau der Fall, fuer den die Baender existieren.
+                             notes=self._notes, timings=self._timings)
+            except Exception:              # noqa: BLE001 - a turn survives it
+                return
+            self._stamp(SESSION_FILE, pointer=True)
+        finally:
+            PERSISTING.clear()
 
     @staticmethod
     def _forget_live() -> None:
@@ -16778,6 +16795,54 @@ class Api:
     # die Seite meldet das CSS-Rechteck, Python legt die Fensterecke darauf.
     # Das Hauptfenster ist rahmenlos, also ist seine Ecke zugleich die Ecke der
     # Zeichenflaeche; ein Titelbalken haette hier einen Versatz erzwungen.
+    #
+    # #327 SCHRITT 1, NUR MESSUNG: auf Windows schreibt jedes Ereignis der
+    # Scheibe eine Zeile nach crow.log (`[pane] browser pane: ...`), damit ein
+    # leeres Panel nach einem Neustart eine Spur hinterlaesst. Linux bleibt
+    # stumm wie bisher.
+    @staticmethod
+    def _pane_note(text: str) -> None:
+        if crow_platform.IS_WINDOWS:
+            crow_core.log_note("browser pane: " + text, "pane")
+
+    @staticmethod
+    def _pane_guard_bridge() -> None:
+        """#327. pywebviews `EdgeChrome.on_script_notify` entpackt jede
+        WebView2-Nachricht als `[name, param, id]`; eine fremde Seite, die
+        etwas anderes an `chrome.webview` schickt, wird dort zum Traceback im
+        Terminal. Fuer Fenster mit `_crow_pane_watch` wird genau DIESER Fall
+        (Zeile 244: `json.loads` plus Entpacken scheitert) zu einer Zeile in
+        crow.log; alles andere geht unveraendert an pywebview. Einmal
+        installiert, und nur, wenn der Renderer schon geladen ist."""
+        mod = sys.modules.get("webview.platforms.edgechromium")
+        cls = getattr(mod, "EdgeChrome", None)
+        orig = getattr(cls, "on_script_notify", None)
+        if orig is None or getattr(orig, "_crow_327", False):
+            return
+
+        def on_script_notify(self, sender, args) -> "object":
+            if getattr(getattr(self, "pywebview_window", None),
+                       "_crow_pane_watch", False):
+                try:
+                    raw = args.get_WebMessageAsJson()
+                except Exception:      # noqa: BLE001 -- pywebview sagt es selbst
+                    raw = None
+                if isinstance(raw, str) and raw != '"FilesDropped"':
+                    try:
+                        _name, _param, _vid = json.loads(raw)
+                    except (ValueError, TypeError):
+                        try:
+                            origin = str(args.get_Source())
+                        except Exception:  # noqa: BLE001
+                            origin = str(getattr(self, "url", None))
+                        Api._pane_note("malformed web message from %s: %s"
+                                       % (origin, raw[:200]))
+                        return None
+            return orig(self, sender, args)
+
+        on_script_notify._crow_327 = True
+        cls.on_script_notify = on_script_notify
+
     def _pane(self) -> "object":
         """Die Scheibe, beim ersten Gebrauch erzeugt. Nie im Voraus.
 
@@ -16810,11 +16875,86 @@ class Api:
             # gemappt). `pane_show` setzt die Fahne darum vor jedem `show()`
             # zurueck; auf Windows aendert das nichts, weil die Fahne dort
             # ohnehin nur den ersten Aufbau steuert.
-            self._browser_win = webview.create_window(
+            #
+            # #329: AUF WINDOWS NICHT `on_top`. Das wird in WinForms zu
+            # `TopMost`, und ein TopMost-Fenster liegt ueber JEDER Anwendung --
+            # Discord vorn, Crow dahinter, das Panel trotzdem obenauf. Statt
+            # dessen wird die Scheibe ein BESESSENES Fenster von Crows Form
+            # (`_pane_own`): ueber Crow, mit Crow hinter anderen Programmen,
+            # mit Crow minimiert. Linux behaelt `on_top` wie bisher.
+            if crow_platform.IS_WINDOWS:
+                self._pane_guard_bridge()                 # #327
+            win = webview.create_window(
                 "crow-browser", url="about:blank", frameless=True,
-                easy_drag=False, hidden=True, on_top=True, focus=True,
+                easy_drag=False, hidden=True,
+                on_top=not crow_platform.IS_WINDOWS, focus=True,
                 width=600, height=400, background_color="#ffffff")
+            self._browser_win = win
+            if crow_platform.IS_WINDOWS:                  # #327
+                win._crow_pane_watch = True
+                win._crow_own, win._crow_last = 0, ""     # #330
+                note = self._pane_note
+                win.events.shown += lambda: note("window shown")
+                win.events.loaded += lambda: self._pane_loaded(win)
+                note("created (hidden, about:blank)")
+                self._pane_own(win, self._window)         # #329
         return self._browser_win
+
+    @staticmethod
+    def _pane_own(panel, main) -> None:
+        """#329. `panel.native.Owner = main.native`, auf dem GUI-Thread.
+
+        pywebview 6.2.1 hat kein Eltern-Argument; die WinForms-Form liegt als
+        `window.native` offen. Ein Fenster, das aus einem Bruecken-Thread
+        erzeugt wird, ist beim Ruecksprung von `create_window` fertig
+        (winforms.py `create_window`: `i.Invoke(create)`), also existieren
+        hier beide Formen. `Owner` ist eine Form-Eigenschaft und wird wie
+        pywebviews eigenes `show()` ueber `Invoke` gesetzt."""
+        if main is None:
+            return
+        form = getattr(panel, "native", None)
+        owner = getattr(main, "native", None)
+        if form is None or owner is None:
+            Api._pane_note("owner not set: native form missing (panel %s, "
+                           "main %s)" % (form is not None, owner is not None))
+            return
+
+        def _own() -> None:
+            form.Owner = owner
+
+        try:
+            if getattr(form, "InvokeRequired", False):
+                from System import Func, Type     # pythonnet, wie winforms.py
+                form.Invoke(Func[Type](_own))
+            else:
+                _own()
+        except Exception as exc:       # noqa: BLE001 -- sagen, nicht fallen
+            Api._pane_note("owner not set: %s" % exc)
+
+    def _pane_loaded(self, win) -> None:
+        """#327 die Zeile, #330 die Meldung. Jedes `loaded` der Scheibe sagt
+        der Seite die Adresse, mit derselben Meldung wie Linux
+        (`InWindowPane.committed`, `{"k": "brnav", ...}`): "replace", wenn die
+        Last von Crow kam (`pane_go` zaehlt `_crow_own` hoch), "push", wenn
+        die Seite selbst ging. Der Reitername folgt daraus, er ist auf beiden
+        Plattformen der Hostname (`brName`). `about:blank` ist der Aufbau der
+        Scheibe und keine Navigation eines Reiters."""
+        self._pane_note("loaded %s" % getattr(win, "real_url", None))
+        try:
+            uri = win.get_current_url() or ""
+        except Exception:              # noqa: BLE001 -- ein Fenster im Abbau
+            uri = getattr(win, "real_url", None) or ""
+        if not uri or uri == "about:blank":
+            return
+        if getattr(win, "_crow_own", 0) > 0:
+            win._crow_own = 0
+            how = "replace"
+        elif uri == getattr(win, "_crow_last", ""):
+            return
+        else:
+            how = "push"
+        win._crow_last = uri
+        self.push({"k": "brnav", "url": uri, "how": how})
 
     def pane_place(self, left: float, top: float,
                    width: float, height: float) -> bool:
@@ -16869,13 +17009,21 @@ class Api:
             return url
         try:
             win = self._pane()
+            shown_ev = getattr(getattr(win, "events", None), "shown", None)
+            self._pane_note("go %s (window shown %s, panel shown %s)" % (
+                url, shown_ev.is_set() if shown_ev is not None else None,
+                self._browser_shown))
+            if crow_platform.IS_WINDOWS:              # #330: Crows eigene Last
+                win._crow_own = getattr(win, "_crow_own", 0) + 1
             win.load_url(url)
             if not self._browser_shown:
                 self._browser_shown = True
                 self._pane_unhide(win)
                 win.show()
+                self._pane_note("show via go, rect %s" % (self._browser_rect,))
             self._pane_apply()
         except Exception as exc:       # noqa: BLE001
+            self._pane_note("go %s failed: %s" % (url, exc))
             self.push({"k": "note",
                        "t": "the browser pane could not open %s: %s" % (url, exc)})
             return "error: %s" % exc
@@ -16889,24 +17037,30 @@ class Api:
             return True
         self._browser_shown = False
         if self._browser_win is not None:
+            self._pane_note("hide")
             try:
                 self._browser_win.hide()
-            except Exception:          # noqa: BLE001
-                pass
+            except Exception as exc:   # noqa: BLE001
+                self._pane_note("hide failed: %s" % exc)
         return True
 
     def pane_show(self) -> bool:
         if self._inwin is not None:
             self._inwin.show()
             return True
-        if self._browser_win is None or self._browser_shown:
+        if self._browser_win is None:
+            self._pane_note("show asked before any page: no window yet")
+            return True
+        if self._browser_shown:
             return True
         self._browser_shown = True
+        self._pane_note("show %s, rect %s" % (
+            getattr(self._browser_win, "real_url", None), self._browser_rect))
         try:
             self._pane_unhide(self._browser_win)
             self._browser_win.show()
-        except Exception:              # noqa: BLE001
-            pass
+        except Exception as exc:       # noqa: BLE001
+            self._pane_note("show failed: %s" % exc)
         self._pane_apply()
         return True
 
@@ -17727,6 +17881,24 @@ class Api:
             pass
         try:
             self._persist_live(with_kv=True)
+        except Exception:                  # noqa: BLE001 - closing anyway
+            pass
+        # #328: THE PANEL WINDOW GOES FIRST. It is a second pywebview toplevel,
+        # and WinForms ends `webview.start` only when the LAST window is gone
+        # (winforms.py:396) -- a panel that was opened once and only hidden
+        # kept the process alive after the X (2 of 2 closes, 2026-09-30).
+        if self._browser_win is not None:
+            try:
+                self._browser_win.destroy()
+            except Exception:              # noqa: BLE001 - closing anyway
+                pass
+        # #328: ARMED HERE TOO, after the persist, so any window that outlives
+        # the main one can no longer hold the process. Only for a real
+        # pywebview window; the save it must not cut is covered by PERSISTING.
+        try:
+            import webview
+            if self._window in webview.windows:
+                arm_exit_watchdog()
         except Exception:                  # noqa: BLE001 - closing anyway
             pass
         self._window.destroy()
@@ -18589,7 +18761,7 @@ def main(argv: list[str] | None = None) -> int:
     # the app id. It is passed anyway: under X11 and XWayland (CROW_GDK_BACKEND
     # =x11) it is what puts the bird on the window.
     if crow_platform.IS_WINDOWS:
-        webview.start(styles, window)
+        webview.start(styles, window, **crow_platform.webview_start_kwargs())
     else:
         webview.start(styles, window, gui="gtk", icon=icon_png(256) or None)
     arm_exit_watchdog()
@@ -18624,15 +18796,64 @@ def daemon_bridge_threads() -> None:
 # there, with their stacks, in Crow's log, runs the one atexit hook Crow owns
 # (the MCP children) and ends the process.
 EXIT_GRACE = 5.0
+# #325: SET WHILE `_persist_live` WRITES THE CHAT. The watchdog's grace ran over
+# a close-time save on Windows (crow.log 2026-09-28 16:22, stack in
+# save_session) and the chat was lost. The watchdog waits up to
+# EXIT_PERSIST_WAIT for it -- the messages half; the KV half is best-effort,
+# and the tmp + os.replace write keeps the old file whole if it is cut anyway.
+
+
+class _SavesRunning:
+    """#325: how many `_persist_live` calls are running -- A COUNT, NOT A FLAG.
+    A turn's save and close's save can overlap; a single Event was cleared by
+    the first to end while the second still wrote, and the watchdog could cut
+    it. Event-shaped on purpose: `set()` is one save started, `clear()` one
+    save ended, `is_set()` is true while any runs."""
+
+    def __init__(self) -> None:
+        self._lock, self._n = threading.Lock(), 0
+
+    def set(self) -> None:
+        with self._lock:
+            self._n += 1
+
+    def clear(self) -> None:
+        with self._lock:
+            self._n = max(0, self._n - 1)
+
+    def is_set(self) -> bool:
+        with self._lock:
+            return self._n > 0
+
+
+PERSISTING = _SavesRunning()
+EXIT_PERSIST_WAIT = 30.0
+# #328: the one watchdog of this process -- `close()` and `main` both arm it.
+_EXIT_WATCHDOG: "list[threading.Thread]" = []
 # #312: how old the GTK drag data may be when the drop takes it (a drag that
 # left the window without dropping leaves it behind)
 DRAG_URIS_FRESH = 30.0
 
 
 def arm_exit_watchdog(grace: float = EXIT_GRACE, end=os._exit) -> threading.Thread:
-    """Start the daemon timer that ends a process the window has already left."""
+    """Start the daemon timer that ends a process the window has already left.
+
+    ONCE PER PROCESS (#328): `close()` arms it after its save, `main` again when
+    the window loop returns; the second call gets the first timer back."""
+    if _EXIT_WATCHDOG and _EXIT_WATCHDOG[0].is_alive():
+        return _EXIT_WATCHDOG[0]
+
     def fire() -> None:
         time.sleep(grace)
+        if PERSISTING.is_set():                    # #325
+            start = time.monotonic()
+            while (PERSISTING.is_set()
+                   and time.monotonic() - start < EXIT_PERSIST_WAIT):
+                time.sleep(0.05)
+            crow_core.log_note("exit: waited %.1f s for the session save%s" % (
+                time.monotonic() - start,
+                " -- still running, ending anyway" if PERSISTING.is_set() else ""),
+                "exit")
         try:
             alive = [t for t in threading.enumerate()
                      if t is not threading.current_thread()]
@@ -18651,6 +18872,7 @@ def arm_exit_watchdog(grace: float = EXIT_GRACE, end=os._exit) -> threading.Thre
             pass
         end(0)
     watchdog = threading.Thread(target=fire, name="crow-exit-watchdog", daemon=True)
+    _EXIT_WATCHDOG[:] = [watchdog]
     watchdog.start()
     return watchdog
 

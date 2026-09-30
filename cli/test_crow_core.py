@@ -25314,3 +25314,76 @@ class ImageNotesKeepFactsNeverPixelsTests(unittest.TestCase):
     def test_other_kinds_carry_no_image_fields(self):
         kept = crow_core.clean_notes([{"k": "note", "at": 1, "t": "x", "path": "/a"}])
         self.assertEqual(kept, [{"k": "note", "at": 1, "t": "x"}])
+
+
+class SessionFileSurvivesACutWriteTests(unittest.TestCase):
+    """#325: the exit watchdog ended Crow inside `save_session`'s in-place
+    write and session.json was left at 0 bytes (robin's Windows machine,
+    2026-09-28 16:22). The old file must stay whole until the new one is
+    complete, and an unreadable file is said instead of opened silently."""
+
+    URL = "http://127.0.0.1:1/v1"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "session.json")
+
+    def _talk(self, text):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", text)
+        talk.append("assistant", "ok")
+        return talk
+
+    @staticmethod
+    def _dump_cut_halfway(obj, fh, **_kw):
+        fh.write('{"crow_session": ')
+        raise RuntimeError("process ended mid-write")
+
+    def test_a_save_cut_halfway_leaves_the_previous_file_byte_identical(self):
+        crow_core.save_session(self._talk("first"), self.URL, 10,
+                               path=self.path, with_kv=False)
+        with open(self.path, "rb") as fh:
+            before = fh.read()
+        with mock.patch.object(crow_core.json, "dump", self._dump_cut_halfway):
+            with self.assertRaises(RuntimeError):
+                crow_core.save_session(self._talk("second"), self.URL, 20,
+                                       path=self.path, with_kv=False)
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), before, "the old chat was cut")
+        self.assertFalse(os.path.exists(self.path + ".tmp"), "tmp left behind")
+
+    def test_the_kv_withdrawal_rewrite_cut_halfway_leaves_the_file_whole(self):
+        """load_session's other writer: a promised cache that is gone is
+        withdrawn by rewriting the same file."""
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"version": "x", "kv": True, "kv_tokens": 5,
+                       "prefix": crow_core.prefix_fingerprint(None, None),
+                       "messages": [{"role": "user", "content": "hi"}]}, fh)
+        with open(self.path, "rb") as fh:
+            before = fh.read()
+        with mock.patch.object(crow_core, "post_json",
+                               side_effect=OSError("no server")), \
+             mock.patch.object(crow_core.json, "dump", self._dump_cut_halfway):
+            restored = crow_core.load_session(self.URL, None, self.path)
+        self.assertIsNotNone(restored)
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), before, "the rewrite truncated the chat")
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+
+    def test_an_empty_session_file_is_said_once_and_kept_aside(self):
+        open(self.path, "w").close()
+        self.assertIsNone(crow_core.load_session(self.URL, None, self.path))
+        note = crow_core.set_aside_unreadable_session(self.path)
+        self.assertIn("could not be read", note)
+        self.assertIn("0 bytes", note)
+        self.assertFalse(os.path.exists(self.path))
+        self.assertTrue(os.path.exists(self.path + ".unreadable"))
+        self.assertIsNone(crow_core.set_aside_unreadable_session(self.path),
+                          "said twice")
+
+    def test_a_readable_session_file_is_left_alone(self):
+        crow_core.save_session(self._talk("fine"), self.URL, 10,
+                               path=self.path, with_kv=False)
+        self.assertIsNone(crow_core.set_aside_unreadable_session(self.path))
+        self.assertTrue(os.path.exists(self.path))
