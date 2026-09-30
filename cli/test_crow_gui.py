@@ -12647,6 +12647,146 @@ class ThePanelCountsOnTheCardTests(ApiCase):
         self.assertIn("p.NEVER if self.throttled else p.ALWAYS", body)
 
 
+class _FakePaneEvent:
+    """pywebview's `Event`, as far as the pane uses it: `+=`, `set`, `is_set`."""
+
+    def __init__(self) -> None:
+        self.items, self.flag = [], False
+
+    def __iadd__(self, fn):
+        self.items.append(fn)
+        return self
+
+    def set(self) -> None:
+        self.flag = True
+        for fn in self.items:
+            fn()
+
+    def is_set(self) -> bool:
+        return self.flag
+
+
+class _FakePaneWindow:
+    def __init__(self) -> None:
+        self.events = types.SimpleNamespace(shown=_FakePaneEvent(),
+                                            loaded=_FakePaneEvent())
+        self.real_url, self.hidden = "about:blank", True
+
+    def load_url(self, url):
+        self.real_url = url
+
+    def show(self):
+        pass
+
+    def hide(self):
+        pass
+
+
+class _FakeWebMessage:
+    def __init__(self, raw: str, source: str) -> None:
+        self.raw, self.source = raw, source
+
+    def get_WebMessageAsJson(self):
+        return self.raw
+
+    def get_Source(self):
+        return self.source
+
+
+class ThePanelLeavesATraceOnWindowsTests(ApiCase):
+    """#327 step 1. On Windows every event of the browser panel is a crow.log
+    line, and a WebView2 message pywebview cannot unpack is ONE line naming
+    the message and its page instead of a traceback on the terminal."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.notes: list = []
+        self.windows: list = []
+        calls = self.calls = []
+
+        class EdgeChrome:                      # edgechromium.py:225, in short
+            def __init__(self, window):
+                self.pywebview_window, self.url = window, "https://x.test/"
+
+            def on_script_notify(self, sender, args):
+                try:
+                    a, b, c = json.loads(args.get_WebMessageAsJson())
+                    calls.append(("bridge", a))
+                except Exception:              # noqa: BLE001
+                    calls.append(("traceback", args.get_WebMessageAsJson()))
+
+        self.EdgeChrome = EdgeChrome
+        edge = types.ModuleType("webview.platforms.edgechromium")
+        edge.EdgeChrome = EdgeChrome
+
+        def create_window(*_a, **_k):
+            self.windows.append(_FakePaneWindow())
+            return self.windows[-1]
+
+        for p in (mock.patch.dict(sys.modules, {
+                      "webview": types.SimpleNamespace(create_window=create_window),
+                      "webview.platforms.edgechromium": edge}),
+                  mock.patch.object(crow_platform, "IS_WINDOWS", True),
+                  mock.patch.object(crow_core, "log_note", side_effect=(
+                      lambda t, k="note": self.notes.append("[%s] %s" % (k, t))))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_panel_events_are_crow_log_lines(self):
+        api = self.api()
+        api.pane_show()
+        self.assertEqual(self.notes, [
+            "[pane] browser pane: show asked before any page: no window yet"])
+        self.assertEqual(api.pane_go("https://www.google.com/"),
+                         "https://www.google.com/")
+        win = self.windows[0]
+        win.events.shown.set()
+        win.events.loaded.set()
+        api.pane_hide()
+        api.pane_show()
+        self.assertEqual(self.notes[1:], [
+            "[pane] browser pane: created (hidden, about:blank)",
+            "[pane] browser pane: go https://www.google.com/ "
+            "(window shown False, panel shown False)",
+            "[pane] browser pane: show via go, rect None",
+            "[pane] browser pane: window shown",
+            "[pane] browser pane: loaded https://www.google.com/",
+            "[pane] browser pane: hide",
+            "[pane] browser pane: show https://www.google.com/, rect None"])
+        # Linux: not one line more.
+        del self.notes[:]
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            other = self.api()
+            other.pane_go("https://example.com/")
+            other.pane_hide()
+            other.pane_show()
+        self.assertEqual(self.notes, [])
+
+    def test_only_a_malformed_panel_message_is_diverted_to_the_log(self):
+        api = self.api()
+        api.pane_go("https://www.google.com/")
+        pane = self.EdgeChrome(self.windows[0])
+        main = self.EdgeChrome(object())                 # Crow's own page
+        bad = _FakeWebMessage('["x", "y"]', "https://www.google.com/search")
+        pane.on_script_notify(None, bad)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.notes[-1],
+                         "[pane] browser pane: malformed web message from "
+                         'https://www.google.com/search: ["x", "y"]')
+        long = _FakeWebMessage(json.dumps(["z" * 500, 1]), "https://a.test/")
+        pane.on_script_notify(None, long)
+        self.assertTrue(self.notes[-1].endswith('["' + "z" * 198))
+        # well-formed on the panel, and anything on the main window: pywebview's.
+        pane.on_script_notify(None, _FakeWebMessage('["f", "{}", 1]', "u"))
+        main.on_script_notify(None, bad)
+        self.assertEqual(self.calls, [("bridge", "f"),
+                                      ("traceback", '["x", "y"]')])
+        # installed once, whatever the number of panes.
+        wrapped = self.EdgeChrome.on_script_notify
+        crow_gui.Api._pane_guard_bridge()
+        self.assertIs(self.EdgeChrome.on_script_notify, wrapped)
+
+
 class ThePageFollowsThePaneTests(unittest.TestCase):
     """#201 #227, auf der Seite: die Meldungen haben Empfaenger, ein Render
     macht keinen neuen Reiter je Aufruf, und GitHub bleibt draussen."""
