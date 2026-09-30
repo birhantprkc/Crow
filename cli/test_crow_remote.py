@@ -839,6 +839,48 @@ class AudioUploadTests(unittest.TestCase):
         self.assertEqual(len(self.heard), 2)
 
 
+class ARefusalReadsTheBodyBeforeItClosesTests(unittest.TestCase):
+    """#334. A refusal closed the socket over an unread body, and when the body
+    arrived after the close the peer got a reset that also swallowed the answer
+    (CI windows-latest, v2.8.4 tag run: WinError 10053). Reproduced by sending
+    the body 0.1 s after the headers: 20 of 20 resets before the fix."""
+
+    def setUp(self):
+        self.h = Harness(self, audio=lambda *a, **k: None)
+
+    def _split(self, path, cookie=None, host=None):
+        body = b"clip"
+        head = ("POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nOrigin: %s\r\n"
+                "Content-Type: audio/webm\r\nContent-Length: %d\r\n%s\r\n" % (
+                    path, host or "%s:%d" % (self.h.host, self.h.remote.port),
+                    UA_IPHONE, self.h.origin, len(body),
+                    "Cookie: %s=%s\r\n" % (crow_remote.COOKIE, cookie) if cookie else "")).encode()
+        s = socket.create_connection((self.h.host, self.h.remote.port), timeout=5)
+        self.addCleanup(s.close)
+        s.sendall(head)
+        time.sleep(0.1)
+        s.sendall(body)
+        time.sleep(0.2)
+        got = b""
+        while True:                       # a reset raises here, a clean close ends with b""
+            chunk = s.recv(65536)
+            if not chunk:
+                return got
+            got += chunk
+
+    def test_a_partial_without_seq_answers_400_and_closes_cleanly(self):
+        _, cookie = self.h.pair()
+        self.assertTrue(self._split("/upload?kind=audio&partial=1", cookie=cookie)
+                        .startswith(b"HTTP/1.1 400"))
+
+    def test_an_unpaired_post_answers_401_and_closes_cleanly(self):
+        self.assertTrue(self._split("/upload?kind=audio&seq=1").startswith(b"HTTP/1.1 401"))
+
+    def test_a_wrong_host_answers_421_and_closes_cleanly(self):
+        self.assertTrue(self._split("/upload?kind=audio&seq=1", host="evil.example")
+                        .startswith(b"HTTP/1.1 421"))
+
+
 class DeviceNameTests(unittest.TestCase):
 
     def test_names(self):
