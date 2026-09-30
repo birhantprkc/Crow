@@ -16778,6 +16778,54 @@ class Api:
     # die Seite meldet das CSS-Rechteck, Python legt die Fensterecke darauf.
     # Das Hauptfenster ist rahmenlos, also ist seine Ecke zugleich die Ecke der
     # Zeichenflaeche; ein Titelbalken haette hier einen Versatz erzwungen.
+    #
+    # #327 SCHRITT 1, NUR MESSUNG: auf Windows schreibt jedes Ereignis der
+    # Scheibe eine Zeile nach crow.log (`[pane] browser pane: ...`), damit ein
+    # leeres Panel nach einem Neustart eine Spur hinterlaesst. Linux bleibt
+    # stumm wie bisher.
+    @staticmethod
+    def _pane_note(text: str) -> None:
+        if crow_platform.IS_WINDOWS:
+            crow_core.log_note("browser pane: " + text, "pane")
+
+    @staticmethod
+    def _pane_guard_bridge() -> None:
+        """#327. pywebviews `EdgeChrome.on_script_notify` entpackt jede
+        WebView2-Nachricht als `[name, param, id]`; eine fremde Seite, die
+        etwas anderes an `chrome.webview` schickt, wird dort zum Traceback im
+        Terminal. Fuer Fenster mit `_crow_pane_watch` wird genau DIESER Fall
+        (Zeile 244: `json.loads` plus Entpacken scheitert) zu einer Zeile in
+        crow.log; alles andere geht unveraendert an pywebview. Einmal
+        installiert, und nur, wenn der Renderer schon geladen ist."""
+        mod = sys.modules.get("webview.platforms.edgechromium")
+        cls = getattr(mod, "EdgeChrome", None)
+        orig = getattr(cls, "on_script_notify", None)
+        if orig is None or getattr(orig, "_crow_327", False):
+            return
+
+        def on_script_notify(self, sender, args) -> "object":
+            if getattr(getattr(self, "pywebview_window", None),
+                       "_crow_pane_watch", False):
+                try:
+                    raw = args.get_WebMessageAsJson()
+                except Exception:      # noqa: BLE001 -- pywebview sagt es selbst
+                    raw = None
+                if isinstance(raw, str) and raw != '"FilesDropped"':
+                    try:
+                        _name, _param, _vid = json.loads(raw)
+                    except (ValueError, TypeError):
+                        try:
+                            origin = str(args.get_Source())
+                        except Exception:  # noqa: BLE001
+                            origin = str(getattr(self, "url", None))
+                        Api._pane_note("malformed web message from %s: %s"
+                                       % (origin, raw[:200]))
+                        return None
+            return orig(self, sender, args)
+
+        on_script_notify._crow_327 = True
+        cls.on_script_notify = on_script_notify
+
     def _pane(self) -> "object":
         """Die Scheibe, beim ersten Gebrauch erzeugt. Nie im Voraus.
 
@@ -16810,10 +16858,20 @@ class Api:
             # gemappt). `pane_show` setzt die Fahne darum vor jedem `show()`
             # zurueck; auf Windows aendert das nichts, weil die Fahne dort
             # ohnehin nur den ersten Aufbau steuert.
-            self._browser_win = webview.create_window(
+            if crow_platform.IS_WINDOWS:
+                self._pane_guard_bridge()                 # #327
+            win = webview.create_window(
                 "crow-browser", url="about:blank", frameless=True,
                 easy_drag=False, hidden=True, on_top=True, focus=True,
                 width=600, height=400, background_color="#ffffff")
+            self._browser_win = win
+            if crow_platform.IS_WINDOWS:                  # #327
+                win._crow_pane_watch = True
+                note = self._pane_note
+                win.events.shown += lambda: note("window shown")
+                win.events.loaded += lambda: note(
+                    "loaded %s" % getattr(win, "real_url", None))
+                note("created (hidden, about:blank)")
         return self._browser_win
 
     def pane_place(self, left: float, top: float,
@@ -16869,13 +16927,19 @@ class Api:
             return url
         try:
             win = self._pane()
+            shown_ev = getattr(getattr(win, "events", None), "shown", None)
+            self._pane_note("go %s (window shown %s, panel shown %s)" % (
+                url, shown_ev.is_set() if shown_ev is not None else None,
+                self._browser_shown))
             win.load_url(url)
             if not self._browser_shown:
                 self._browser_shown = True
                 self._pane_unhide(win)
                 win.show()
+                self._pane_note("show via go, rect %s" % (self._browser_rect,))
             self._pane_apply()
         except Exception as exc:       # noqa: BLE001
+            self._pane_note("go %s failed: %s" % (url, exc))
             self.push({"k": "note",
                        "t": "the browser pane could not open %s: %s" % (url, exc)})
             return "error: %s" % exc
@@ -16889,24 +16953,30 @@ class Api:
             return True
         self._browser_shown = False
         if self._browser_win is not None:
+            self._pane_note("hide")
             try:
                 self._browser_win.hide()
-            except Exception:          # noqa: BLE001
-                pass
+            except Exception as exc:   # noqa: BLE001
+                self._pane_note("hide failed: %s" % exc)
         return True
 
     def pane_show(self) -> bool:
         if self._inwin is not None:
             self._inwin.show()
             return True
-        if self._browser_win is None or self._browser_shown:
+        if self._browser_win is None:
+            self._pane_note("show asked before any page: no window yet")
+            return True
+        if self._browser_shown:
             return True
         self._browser_shown = True
+        self._pane_note("show %s, rect %s" % (
+            getattr(self._browser_win, "real_url", None), self._browser_rect))
         try:
             self._pane_unhide(self._browser_win)
             self._browser_win.show()
-        except Exception:              # noqa: BLE001
-            pass
+        except Exception as exc:       # noqa: BLE001
+            self._pane_note("show failed: %s" % exc)
         self._pane_apply()
         return True
 
