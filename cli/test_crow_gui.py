@@ -12207,7 +12207,31 @@ class ThePageArrivesWithABaseUriTests(unittest.TestCase):
         Renderer wechseln."""
         self.assertIn('webview.start(styles, window, gui="gtk", icon=',
                       self.source)
-        self.assertIn("webview.start(styles, window)\n", self.source)
+        self.assertIn("webview.start(styles, window, "
+                      "**crow_platform.webview_start_kwargs())\n", self.source)
+
+
+class TheWindowsWebviewKeepsItsProfileTests(unittest.TestCase):
+    """#326: pywebview's private default made every login in the browser panel
+    vanish on restart. `private_mode` and `storage_path` are process-wide."""
+
+    def test_the_windows_start_is_persistent_and_in_crows_state_dir(self):
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            kw = crow_platform.webview_start_kwargs()
+            self.assertIs(kw["private_mode"], False)
+            self.assertEqual(
+                kw["storage_path"],
+                os.path.join(crow_platform.state_dir(), "webview"))
+
+    def test_linux_passes_nothing_extra(self):
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(crow_platform.webview_start_kwargs(), {})
+
+    def test_the_windows_branch_of_the_start_call_uses_them(self):
+        src = Path(crow_gui.__file__).read_text(encoding="utf-8")
+        self.assertIn(
+            "webview.start(styles, window, **crow_platform.webview_start_kwargs())",
+            src)
 
 
 class TheBrowserPaneOnACompositorTests(ApiCase):
