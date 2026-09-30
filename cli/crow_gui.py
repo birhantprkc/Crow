@@ -16858,21 +16858,86 @@ class Api:
             # gemappt). `pane_show` setzt die Fahne darum vor jedem `show()`
             # zurueck; auf Windows aendert das nichts, weil die Fahne dort
             # ohnehin nur den ersten Aufbau steuert.
+            #
+            # #329: AUF WINDOWS NICHT `on_top`. Das wird in WinForms zu
+            # `TopMost`, und ein TopMost-Fenster liegt ueber JEDER Anwendung --
+            # Discord vorn, Crow dahinter, das Panel trotzdem obenauf. Statt
+            # dessen wird die Scheibe ein BESESSENES Fenster von Crows Form
+            # (`_pane_own`): ueber Crow, mit Crow hinter anderen Programmen,
+            # mit Crow minimiert. Linux behaelt `on_top` wie bisher.
             if crow_platform.IS_WINDOWS:
                 self._pane_guard_bridge()                 # #327
             win = webview.create_window(
                 "crow-browser", url="about:blank", frameless=True,
-                easy_drag=False, hidden=True, on_top=True, focus=True,
+                easy_drag=False, hidden=True,
+                on_top=not crow_platform.IS_WINDOWS, focus=True,
                 width=600, height=400, background_color="#ffffff")
             self._browser_win = win
             if crow_platform.IS_WINDOWS:                  # #327
                 win._crow_pane_watch = True
+                win._crow_own, win._crow_last = 0, ""     # #330
                 note = self._pane_note
                 win.events.shown += lambda: note("window shown")
-                win.events.loaded += lambda: note(
-                    "loaded %s" % getattr(win, "real_url", None))
+                win.events.loaded += lambda: self._pane_loaded(win)
                 note("created (hidden, about:blank)")
+                self._pane_own(win, self._window)         # #329
         return self._browser_win
+
+    @staticmethod
+    def _pane_own(panel, main) -> None:
+        """#329. `panel.native.Owner = main.native`, auf dem GUI-Thread.
+
+        pywebview 6.2.1 hat kein Eltern-Argument; die WinForms-Form liegt als
+        `window.native` offen. Ein Fenster, das aus einem Bruecken-Thread
+        erzeugt wird, ist beim Ruecksprung von `create_window` fertig
+        (winforms.py `create_window`: `i.Invoke(create)`), also existieren
+        hier beide Formen. `Owner` ist eine Form-Eigenschaft und wird wie
+        pywebviews eigenes `show()` ueber `Invoke` gesetzt."""
+        if main is None:
+            return
+        form = getattr(panel, "native", None)
+        owner = getattr(main, "native", None)
+        if form is None or owner is None:
+            Api._pane_note("owner not set: native form missing (panel %s, "
+                           "main %s)" % (form is not None, owner is not None))
+            return
+
+        def _own() -> None:
+            form.Owner = owner
+
+        try:
+            if getattr(form, "InvokeRequired", False):
+                from System import Func, Type     # pythonnet, wie winforms.py
+                form.Invoke(Func[Type](_own))
+            else:
+                _own()
+        except Exception as exc:       # noqa: BLE001 -- sagen, nicht fallen
+            Api._pane_note("owner not set: %s" % exc)
+
+    def _pane_loaded(self, win) -> None:
+        """#327 die Zeile, #330 die Meldung. Jedes `loaded` der Scheibe sagt
+        der Seite die Adresse, mit derselben Meldung wie Linux
+        (`InWindowPane.committed`, `{"k": "brnav", ...}`): "replace", wenn die
+        Last von Crow kam (`pane_go` zaehlt `_crow_own` hoch), "push", wenn
+        die Seite selbst ging. Der Reitername folgt daraus, er ist auf beiden
+        Plattformen der Hostname (`brName`). `about:blank` ist der Aufbau der
+        Scheibe und keine Navigation eines Reiters."""
+        self._pane_note("loaded %s" % getattr(win, "real_url", None))
+        try:
+            uri = win.get_current_url() or ""
+        except Exception:              # noqa: BLE001 -- ein Fenster im Abbau
+            uri = getattr(win, "real_url", None) or ""
+        if not uri or uri == "about:blank":
+            return
+        if getattr(win, "_crow_own", 0) > 0:
+            win._crow_own = 0
+            how = "replace"
+        elif uri == getattr(win, "_crow_last", ""):
+            return
+        else:
+            how = "push"
+        win._crow_last = uri
+        self.push({"k": "brnav", "url": uri, "how": how})
 
     def pane_place(self, left: float, top: float,
                    width: float, height: float) -> bool:
@@ -16931,6 +16996,8 @@ class Api:
             self._pane_note("go %s (window shown %s, panel shown %s)" % (
                 url, shown_ev.is_set() if shown_ev is not None else None,
                 self._browser_shown))
+            if crow_platform.IS_WINDOWS:              # #330: Crows eigene Last
+                win._crow_own = getattr(win, "_crow_own", 0) + 1
             win.load_url(url)
             if not self._browser_shown:
                 self._browser_shown = True
