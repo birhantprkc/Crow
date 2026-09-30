@@ -1206,6 +1206,12 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #remotetoggle{margin-left:auto;position:relative}
 #remotetoggle + #codetoggle{margin-left:0}
 #wbtns{display:flex;-webkit-app-region:no-drag}
+/* #325: the close saves the chat and the cache first, which can take seconds;
+   said, so nobody interrupts it. */
+body.closing::after{content:"saving the chat and the cache...";position:fixed;
+  left:50%;top:50%;transform:translate(-50%,-50%);z-index:99999;
+  padding:12px 18px;border-radius:8px;background:var(--raised);
+  border:1px solid var(--line)}
 /* The buttons sit inside the drag region, so they opt out of it again --
    without this a click on 'close' starts a drag instead of closing. */
 .wb{width:42px;height:33px;display:grid;place-items:center;color:var(--dimmer);
@@ -3433,7 +3439,8 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   <div id="wbtns" class="pywebview-no-drag">
     <div class="wb" onclick="pywebview.api.minimise()">&#8211;</div>
     <div class="wb" onclick="pywebview.api.maximise()">&#9633;</div>
-    <div class="wb close" onclick="pywebview.api.close()">&#10005;</div>
+    <div class="wb close" onclick="document.body.classList.add('closing');
+         pywebview.api.close()">&#10005;</div>
   </div>
 </div>
 
@@ -13076,6 +13083,10 @@ class Api:
             # which is why the greeting is its own message and not a field.
             self._pin_memory(SESSION_FILE)
             self._hello()
+            # #325: an empty or broken session.json is said, not opened silently.
+            unreadable = crow_core.set_aside_unreadable_session(SESSION_FILE)
+            if unreadable:
+                self.push({"k": "fail", "t": unreadable})
             self._reload_rail()
             return
         messages, tokens, kv = restored
@@ -14888,24 +14899,30 @@ class Api:
         """
         if not self._args.session:
             return
+        # #325: the exit watchdog waits while this is set (EXIT_PERSIST_WAIT),
+        # the pointer stamp included -- it rewrites the same file.
+        PERSISTING.set()
         try:
-            # A REMOTE ENDPOINT HAS NO SLOT TO SAVE. `with_kv` is the caller's
-            # half of the same contract `load_session` now reads: the messages
-            # are still written, the cache half is not attempted, and the file
-            # says `kv: false` so the next start does not try to restore one.
-            spot = self._endpoint()
-            save_session(self._conversation, spot["base_url"],
-                         self._context_tokens,
-                         with_kv=with_kv and not spot["remote"],
-                         model=self._model, reasoning=self._reasoning,
-                         tools_cleared=self._tools_cleared,
-                         # #173/#171: je Zug mitgeschrieben, wie die Nachrichten
-                         # -- ein Fensterneustart mitten in einem langen Lauf ist
-                         # genau der Fall, fuer den die Baender existieren.
-                         notes=self._notes, timings=self._timings)
-        except Exception:                  # noqa: BLE001 - a turn survives it
-            return
-        self._stamp(SESSION_FILE, pointer=True)
+            try:
+                # A REMOTE ENDPOINT HAS NO SLOT TO SAVE. `with_kv` is the caller's
+                # half of the same contract `load_session` now reads: the messages
+                # are still written, the cache half is not attempted, and the file
+                # says `kv: false` so the next start does not try to restore one.
+                spot = self._endpoint()
+                save_session(self._conversation, spot["base_url"],
+                             self._context_tokens,
+                             with_kv=with_kv and not spot["remote"],
+                             model=self._model, reasoning=self._reasoning,
+                             tools_cleared=self._tools_cleared,
+                             # #173/#171: je Zug mitgeschrieben, wie die Nachrichten
+                             # -- ein Fensterneustart mitten in einem langen Lauf ist
+                             # genau der Fall, fuer den die Baender existieren.
+                             notes=self._notes, timings=self._timings)
+            except Exception:              # noqa: BLE001 - a turn survives it
+                return
+            self._stamp(SESSION_FILE, pointer=True)
+        finally:
+            PERSISTING.clear()
 
     @staticmethod
     def _forget_live() -> None:
@@ -17866,6 +17883,24 @@ class Api:
             self._persist_live(with_kv=True)
         except Exception:                  # noqa: BLE001 - closing anyway
             pass
+        # #328: THE PANEL WINDOW GOES FIRST. It is a second pywebview toplevel,
+        # and WinForms ends `webview.start` only when the LAST window is gone
+        # (winforms.py:396) -- a panel that was opened once and only hidden
+        # kept the process alive after the X (2 of 2 closes, 2026-09-30).
+        if self._browser_win is not None:
+            try:
+                self._browser_win.destroy()
+            except Exception:              # noqa: BLE001 - closing anyway
+                pass
+        # #328: ARMED HERE TOO, after the persist, so any window that outlives
+        # the main one can no longer hold the process. Only for a real
+        # pywebview window; the save it must not cut is covered by PERSISTING.
+        try:
+            import webview
+            if self._window in webview.windows:
+                arm_exit_watchdog()
+        except Exception:                  # noqa: BLE001 - closing anyway
+            pass
         self._window.destroy()
 
     # -- #143 E2: the delegation snapshot ----------------------------------
@@ -18761,15 +18796,64 @@ def daemon_bridge_threads() -> None:
 # there, with their stacks, in Crow's log, runs the one atexit hook Crow owns
 # (the MCP children) and ends the process.
 EXIT_GRACE = 5.0
+# #325: SET WHILE `_persist_live` WRITES THE CHAT. The watchdog's grace ran over
+# a close-time save on Windows (crow.log 2026-09-28 16:22, stack in
+# save_session) and the chat was lost. The watchdog waits up to
+# EXIT_PERSIST_WAIT for it -- the messages half; the KV half is best-effort,
+# and the tmp + os.replace write keeps the old file whole if it is cut anyway.
+
+
+class _SavesRunning:
+    """#325: how many `_persist_live` calls are running -- A COUNT, NOT A FLAG.
+    A turn's save and close's save can overlap; a single Event was cleared by
+    the first to end while the second still wrote, and the watchdog could cut
+    it. Event-shaped on purpose: `set()` is one save started, `clear()` one
+    save ended, `is_set()` is true while any runs."""
+
+    def __init__(self) -> None:
+        self._lock, self._n = threading.Lock(), 0
+
+    def set(self) -> None:
+        with self._lock:
+            self._n += 1
+
+    def clear(self) -> None:
+        with self._lock:
+            self._n = max(0, self._n - 1)
+
+    def is_set(self) -> bool:
+        with self._lock:
+            return self._n > 0
+
+
+PERSISTING = _SavesRunning()
+EXIT_PERSIST_WAIT = 30.0
+# #328: the one watchdog of this process -- `close()` and `main` both arm it.
+_EXIT_WATCHDOG: "list[threading.Thread]" = []
 # #312: how old the GTK drag data may be when the drop takes it (a drag that
 # left the window without dropping leaves it behind)
 DRAG_URIS_FRESH = 30.0
 
 
 def arm_exit_watchdog(grace: float = EXIT_GRACE, end=os._exit) -> threading.Thread:
-    """Start the daemon timer that ends a process the window has already left."""
+    """Start the daemon timer that ends a process the window has already left.
+
+    ONCE PER PROCESS (#328): `close()` arms it after its save, `main` again when
+    the window loop returns; the second call gets the first timer back."""
+    if _EXIT_WATCHDOG and _EXIT_WATCHDOG[0].is_alive():
+        return _EXIT_WATCHDOG[0]
+
     def fire() -> None:
         time.sleep(grace)
+        if PERSISTING.is_set():                    # #325
+            start = time.monotonic()
+            while (PERSISTING.is_set()
+                   and time.monotonic() - start < EXIT_PERSIST_WAIT):
+                time.sleep(0.05)
+            crow_core.log_note("exit: waited %.1f s for the session save%s" % (
+                time.monotonic() - start,
+                " -- still running, ending anyway" if PERSISTING.is_set() else ""),
+                "exit")
         try:
             alive = [t for t in threading.enumerate()
                      if t is not threading.current_thread()]
@@ -18788,6 +18872,7 @@ def arm_exit_watchdog(grace: float = EXIT_GRACE, end=os._exit) -> threading.Thre
             pass
         end(0)
     watchdog = threading.Thread(target=fire, name="crow-exit-watchdog", daemon=True)
+    _EXIT_WATCHDOG[:] = [watchdog]
     watchdog.start()
     return watchdog
 

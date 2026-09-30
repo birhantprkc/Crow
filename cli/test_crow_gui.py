@@ -16709,5 +16709,169 @@ class TheWindowWarmsTheImageServerTests(unittest.TestCase):
         self.assertLess(body.index("target=api.pump"), body.index("warm_image_server()"))
 
 
+
+class TheCloseSavesThenEndsTests(unittest.TestCase):
+    """#325: the exit watchdog must not end the process inside a session save.
+    #328: a second pywebview window (the Windows browser panel) kept
+    `webview.start` from returning, so the watchdog was never armed."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # create=True: without the fix these names do not exist, and the
+        # tests must then fail on their assertions, not in setUp.
+        # a fresh one of the module's own kind (#325: a count of saves)
+        self.persisting = type(getattr(crow_gui, "PERSISTING",
+                                       threading.Event()))()
+        for name, value in (("_EXIT_WATCHDOG", []),
+                            ("PERSISTING", self.persisting),
+                            ("EXIT_PERSIST_WAIT", 10.0)):
+            patcher = mock.patch.object(crow_gui, name, value, create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.logged = []
+        for target, attr, value in (
+                (crow_core, "LOG_FILE", os.path.join(self.dir, "crow.log")),
+                (crow_core, "log_note", lambda t, k="note": self.logged.append(t)),
+                (crow_core, "forget_mcp_servers", lambda: None)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        was = crow_gui.INTERRUPT.is_set()
+        self.addCleanup(lambda: crow_gui.INTERRUPT.set() if was
+                        else crow_gui.INTERRUPT.clear())
+
+    def test_the_watchdog_waits_for_a_running_save_then_ends(self):
+        ended = threading.Event()
+        self.persisting.set()
+        crow_gui.arm_exit_watchdog(grace=0.05, end=lambda _c: ended.set())
+        self.assertFalse(ended.wait(0.6), "ended the process inside the save")
+        self.persisting.clear()
+        self.assertTrue(ended.wait(3), "did not end once the save was done")
+        self.assertTrue(any(t.startswith("exit: waited ") and
+                            "for the session save" in t for t in self.logged),
+                        self.logged)
+
+    def test_the_wait_for_the_save_is_bounded(self):
+        ended = threading.Event()
+        self.persisting.set()
+        crow_gui.EXIT_PERSIST_WAIT = 0.2
+        crow_gui.arm_exit_watchdog(grace=0.05, end=lambda _c: ended.set())
+        self.assertTrue(ended.wait(3), "a save that never ends held the exit")
+        self.assertTrue(any("ending anyway" in t for t in self.logged), self.logged)
+
+    def test_persist_live_holds_the_flag_for_its_save_only(self):
+        seen = []
+        stub = types.SimpleNamespace(
+            _args=types.SimpleNamespace(session=True),
+            _endpoint=lambda: {"base_url": "http://127.0.0.1:1/v1", "remote": True},
+            _conversation=None, _context_tokens=0, _model=None,
+            _reasoning=None, _tools_cleared=0, _notes=[], _timings=[],
+            _stamp=lambda *a, **k: seen.append(("stamp", self.persisting.is_set())))
+        with mock.patch.object(crow_gui, "save_session",
+                               lambda *a, **k: seen.append(("save", self.persisting.is_set()))):
+            crow_gui.Api._persist_live(stub, with_kv=True)
+        self.assertEqual(seen, [("save", True), ("stamp", True)])
+        self.assertFalse(self.persisting.is_set())
+
+    def test_two_overlapping_saves_hold_the_exit_until_the_last_ends(self):
+        """A turn's save and close's save overlap; the first ends while the
+        second still writes. The watchdog must wait for the second."""
+        gates = {"turn": threading.Event(), "close": threading.Event()}
+        started = []
+
+        def save(*_a, **k):
+            name = k["notes"][0]
+            started.append(name)
+            gates[name].wait(10)
+
+        def stub(name):
+            return types.SimpleNamespace(
+                _args=types.SimpleNamespace(session=True),
+                _endpoint=lambda: {"base_url": "http://127.0.0.1:1/v1", "remote": True},
+                _conversation=None, _context_tokens=0, _model=None,
+                _reasoning=None, _tools_cleared=0, _notes=[name], _timings=[],
+                _stamp=lambda *a, **k: None)
+        ended = threading.Event()
+        with mock.patch.object(crow_gui, "save_session", save):
+            runs = [threading.Thread(target=crow_gui.Api._persist_live,
+                                     args=(stub(n),), daemon=True)
+                    for n in ("turn", "close")]
+            for run in runs:
+                run.start()
+            deadline = time.monotonic() + 5
+            while len(started) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(sorted(started), ["close", "turn"])
+            gates["turn"].set()
+            runs[0].join(5)
+            crow_gui.arm_exit_watchdog(grace=0.05, end=lambda _c: ended.set())
+            self.assertFalse(ended.wait(0.6),
+                             "ended the process inside the second save")
+            gates["close"].set()
+            runs[1].join(5)
+            self.assertTrue(ended.wait(3), "did not end once both saves were done")
+
+    def _closing(self, panel_fails=False):
+        order = []
+
+        class Win:
+            def __init__(self, name, fails=False):
+                self.name, self.fails = name, fails
+
+            def destroy(self):
+                order.append("destroy " + self.name)
+                if self.fails:
+                    raise RuntimeError("already gone")
+
+        main = Win("main")
+        stub = types.SimpleNamespace(
+            _remote=None, _current_path=None, _window=main,
+            _browser_win=Win("panel", panel_fails),
+            _persist_live=lambda with_kv=False: order.append("persist"))
+        import webview
+        with mock.patch.object(webview, "windows", [main]), \
+             mock.patch.object(crow_gui, "arm_exit_watchdog",
+                               lambda *a, **k: order.append("arm")):
+            crow_gui.Api.close(stub)
+        return order
+
+    def test_close_destroys_the_panel_window_before_the_main_one(self):
+        order = self._closing()
+        self.assertIn("destroy panel", order)
+        self.assertLess(order.index("persist"), order.index("destroy panel"))
+        self.assertLess(order.index("destroy panel"), order.index("destroy main"))
+
+    def test_a_panel_that_will_not_go_does_not_stop_the_close(self):
+        order = self._closing(panel_fails=True)
+        self.assertEqual(order[-2:], ["arm", "destroy main"])
+        self.assertIn("destroy panel", order)
+
+    def test_close_arms_the_watchdog_after_the_save_before_the_window_goes(self):
+        order = self._closing()
+        self.assertIn("arm", order, "armed only after webview.start returns")
+        self.assertLess(order.index("persist"), order.index("arm"))
+        self.assertLess(order.index("arm"), order.index("destroy main"))
+
+    def test_the_watchdog_is_armed_once_per_process(self):
+        # a grace no suite reaches: the daemon timers must never fire here
+        first = crow_gui.arm_exit_watchdog(grace=3600, end=lambda _c: None)
+        self.assertIs(crow_gui.arm_exit_watchdog(grace=3600, end=lambda _c: None),
+                      first)
+
+    def test_an_empty_session_file_is_said_at_start(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = source[source.index("        if not restored:\n            # #119"):]
+        body = body[:body.index("        messages, tokens, kv = restored")]
+        self.assertIn("set_aside_unreadable_session(SESSION_FILE)", body)
+
+    def test_the_window_says_it_is_saving_while_it_closes(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        button = source[source.index('<div class="wb close"'):]
+        button = button[:button.index("</div>")]
+        self.assertIn("classList.add('closing')", button)
+        self.assertIn('body.closing::after{content:"saving the chat', source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
