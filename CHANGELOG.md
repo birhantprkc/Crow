@@ -5,6 +5,11 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 2.8.5 — 2026-09-30
+
+**The phone remote answers a refused request instead of resetting the connection.** A test of it went red on
+CI windows-latest for the v2.8.4 tag; the cause was the server, not the test, and it is fixed here.
+
 ### Fixed
 
 - **The phone remote answers a refused request instead of resetting the connection** (#334, 2026-09-30). A refusal (400, 401, 403, 415, 421, 501) closed the socket while the request body was still unread; when the body arrived after the close, TCP sent a reset that also swallowed the answer (CI windows-latest on the v2.8.4 tag: WinError 10053). The server now reads an unread body of up to 1 MiB (2 s limit) before it answers. Reproduced with the body sent 0.1 s after the headers: 20 of 20 resets before, clean 400/401/421 after.
