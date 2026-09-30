@@ -53,6 +53,17 @@ so the thinking block is force-closed and the model keeps writing where it stood
 capped answers arrived mid-word. Crow sends its own message with every cap: 0 of 6 on the
 same seeds, and 185 s down to 81 s, because the cut answers were also the runaway ones.
 
+The message depends on what the turn answers (#245, measured 2026-09-30 on the 27B, crow-nest
+`decode_out/meas-245`):
+
+| the turn follows | message | why |
+|---|---|---|
+| a tool result | `That is enough analysis. I will now act on it.` | the answer sentence left 4 of 49 cut rounds without a call ("I'm starting that now." and stop); this one 0 of 49 |
+| your message | `That is enough analysis. I will now write the final answer for the user.` | the act sentence turned 12 of 31 cut text requests into a tool call (mostly `write_file`); this one 2 |
+
+Neither sentence was measured to cause mid-word starts (0 in 31 pairs each). That the switch on
+the last message keeps both halves is read from the same data, not measured on its own.
+
 `0` is refused as a number -- it is the `none` level under another name, and `none` measured
 as the most expensive of four settings: 3.6x the time and 1.8x the tokens of `low`. Use
 `/budget off` to lift the cap.

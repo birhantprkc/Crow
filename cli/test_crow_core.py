@@ -20409,6 +20409,72 @@ class TheThinkingCapTravelsAsAPairTests(unittest.TestCase):
         self.assertIn("/budget", crow_core.SLASH_COMMANDS)
 
 
+class TheCapsSentenceFollowsWhatTheTurnAnswersTests(unittest.TestCase):
+    """#245. Der Satz hinter dem Deckel haengt davon ab, worauf der Zug antwortet.
+
+    GEMESSEN 2026-09-30 am 27B (crow-nest decode_out/meas-245): nach einem
+    TOOL-ERGEBNIS liess "…write the final answer for the user" 4 von 49
+    gedeckelten Runden ohne Call enden -- das Modell kuendigte den naechsten
+    Schritt an und hoerte auf --, "…I will now act on it" 0 von 49. Nach einer
+    NUTZERNACHRICHT war es umgekehrt: "act on it" rief in 12 von 31 Paaren ein
+    Tool auf, wo der alte Satz den verlangten Text schrieb (umgekehrt 2).
+    """
+
+    def _turn_body(self, conversation, **kw) -> dict:
+        sent = {}
+
+        def fake(url, body, api_key, timeout, extra=None):
+            sent.update(body)
+            return iter(())
+
+        real, crow_core._post_stream = crow_core._post_stream, fake
+        self.addCleanup(lambda: setattr(crow_core, "_post_stream", real))
+        crow_core.stream_reply(conversation, base_url="http://127.0.0.1:1/v1",
+                               model="m", api_key="k", temperature=1.0,
+                               top_p=0.95, min_p=0.01, timeout=1,
+                               reasoning_budget=1024, **kw)
+        return sent
+
+    def _after_user(self):
+        conversation = crow_core.Conversation("be brief")
+        conversation.append("user", "write me a text about foundries")
+        return conversation
+
+    def _after_tool(self):
+        conversation = self._after_user()
+        conversation.append("assistant", "", tool_calls=[{
+            "id": "c1", "name": "list_dir", "arguments": "{\"path\": \".\"}"}])
+        conversation.append("tool", "a.txt\nb.txt", tool_call_id="c1")
+        return conversation
+
+    def test_after_a_tool_result_the_sentence_says_act(self):
+        sent = self._turn_body(self._after_tool())
+        self.assertEqual(sent["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_ACT_MESSAGE)
+        self.assertIn("act on it", sent["reasoning_budget_message"])
+
+    def test_after_a_user_message_the_sentence_stays_the_answer_one(self):
+        """NEGATIVPROBE: die Frage des Nutzers bekommt den Satz von #176."""
+        sent = self._turn_body(self._after_user())
+        self.assertEqual(sent["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_MESSAGE)
+
+    def test_a_given_sentence_still_wins(self):
+        sent = self._turn_body(self._after_tool(),
+                               reasoning_budget_message="stop now.")
+        self.assertEqual(sent["reasoning_budget_message"], "stop now.")
+
+    def test_the_rule_reads_the_last_message_only(self):
+        self.assertEqual(crow_core.reasoning_budget_message_for(
+            [{"role": "user", "content": "x"}, {"role": "tool", "content": "y"}]),
+            crow_core.REASONING_BUDGET_ACT_MESSAGE)
+        self.assertEqual(crow_core.reasoning_budget_message_for(
+            [{"role": "tool", "content": "y"}, {"role": "user", "content": "x"}]),
+            crow_core.REASONING_BUDGET_MESSAGE)
+        self.assertEqual(crow_core.reasoning_budget_message_for([]),
+                         crow_core.REASONING_BUDGET_MESSAGE)
+
+
 class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
     """#202. Die Teile, aus denen die Notbremse gebaut ist: was eine
     Wiederholung ist, was leer ist, und wo geschnitten werden muss.
