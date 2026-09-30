@@ -94,7 +94,7 @@ run live:
 | the pane | follows the window and the sidebar. It was TopMost over every application (`on_top=True`, seen over Discord); it is now **owned** by Crow's window: above Crow only, behind other apps with it, minimised with it (#329, fixed) |
 | profile | pywebview's private default dropped logins on every restart; Crow now starts it with its own storage in `%LOCALAPPDATA%\Crow\webview` (#326, fixed). #226's memory kill and sandbox stay Linux only |
 | address and tab | follow each page load (#330, fixed). `pushState` and `#hash` changes fire no load and are not followed |
-| after a restart | the panel stayed blank until closed and opened once (2 of 2); `crow.log` now has `[pane]` lines for each panel event to find out why (#327) |
+| after a restart | a panel restored open came up with no tab and stayed blank until `+`; it now starts with a tab, and Enter in the bar without a tab opens one (#327, fixed). `crow.log` has `[pane]` lines for each panel event |
 | copy and menu | Ctrl+C and the context menu copy into Notepad with umlauts intact; checked |
 | Show in file manager | `explorer /select,<path>` opens the folder with the file selected, also for a path with a space; checked |
 | edge grips | the window follows a fast drag and stops on release (#238); checked |

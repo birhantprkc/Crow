@@ -23,9 +23,11 @@ The reasoning is in the commit and on the issue.
 - **Windows: the browser panel stays above Crow only** (#329, 2026-09-30). It was created `on_top`, which is TopMost over every application (seen over Discord with Crow behind it); it is now owned by Crow's window instead, so it goes behind other apps with Crow and minimises with it. Not measured live yet.
 - **Windows: the panel's tab and address follow the page** (#330, 2026-09-30). A link or redirect inside the page left the tab and the address on the first URL; each load now reports its URL the way Linux does. `pushState` and `#hash` changes fire no load on Windows and are still not followed.
 
+- **A browser panel restored open has a tab** (#327, 2026-09-30). The panel came back open after a restart with no tab ("no tab open -- press + for one"), and Enter in its address bar did nothing until `+` was pressed. The start now gives an open, empty panel its first tab, as unfolding it always did, and Enter without a tab opens one with that address. Not measured live yet.
+
 ### Added
 
-- **Windows: the browser panel leaves a trace in `crow.log`** (#327 step 1, 2026-09-30): `[pane] browser pane:` lines for created, go, show, hide and loaded, and a malformed WebView2 message becomes one `malformed web message from <origin>` line instead of a traceback on the terminal. Measurement for the blank panel after a restart (2 of 2 restarts on 2026-09-30); the fix follows the trace.
+- **Windows: the browser panel leaves a trace in `crow.log`** (#327, 2026-09-30): `[pane] browser pane:` lines for created, go, show, hide and loaded, and a malformed WebView2 message becomes one `malformed web message from <origin>` line instead of a traceback on the terminal. The trace showed that the panel loaded its page on every restart; the blank was the missing tab (above). The traceback came from Sony's sign-in page posting to `window.chrome.webview`.
 
 ## 2.8.2 — 2026-09-28
 

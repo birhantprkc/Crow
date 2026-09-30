@@ -13661,6 +13661,29 @@ class TheBlankTabHasABlankBarTests(unittest.TestCase):
         self.assertLess(blank.index('$("#brurl").value=""'), blank.index('$("#brurl").focus()'))
 
 
+class AnOpenPanelStartsWithATabTests(unittest.TestCase):
+    """#327. A panel restored open (`browser_open`) came up with no tab:
+    "no tab open -- press + for one", and Enter in the address bar did nothing
+    (`brGo` returned without a tab) until `+` was pressed (robin, Windows,
+    2026-09-30, screenshots). Only `toggleBrowser` made a first tab."""
+
+    def setUp(self):
+        self.src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_start_gives_an_open_empty_panel_its_first_tab(self):
+        start = self.src[self.src.index("crow.brDraw();\n"):]
+        start = start[:start.index("// #175. DIE SCHEIBE FOLGT DER FLAECHE")]
+        self.assertIn('dataset.browser!=="shut"', start)
+        self.assertIn("!crow.tabs.length", start)
+        self.assertIn("crow.brNew()", start)
+
+    def test_enter_without_a_tab_opens_one_with_that_address(self):
+        go = self.src[self.src.index("  brGo(raw){"):]
+        go = go[:go.index("\n  brShow(")]
+        self.assertIn("if(!t){ this.brNew(raw); return; }", go)
+        self.assertNotIn("if(!t) return;", go)
+
+
 class TheCodeBlockKeepsItsCopyButtonTests(unittest.TestCase):
     """#239. codeFinish emptied `.cwh`, which also holds the copy button."""
 

@@ -8081,7 +8081,9 @@ const crow = {
   // wurde zu `https:///srv/bau.html`, was nirgendwo hinfuehrt. Auf
   // Windows tippt niemand so etwas, also nimmt die Zeile dort nichts weg.
   brGo(raw){
-    const t=this.brTab(this.tabOn); if(!t) return;
+    // #327: Enter in the bar of a panel with no tab opens one with that
+    // address; it used to do nothing until `+` was pressed.
+    const t=this.brTab(this.tabOn); if(!t){ this.brNew(raw); return; }
     let url=(raw||"").trim(); if(!url) return;
     if(/^[a-zA-Z]:[\\/]/.test(url) || url.charAt(0)==="/") url=this.fileUrl(url);
     else if(!/^[a-z][a-z0-9+.-]*:/i.test(url)) url="https://"+url;
@@ -8936,6 +8938,11 @@ crow.toolsCount();
 // sagen, wie man einen bekommt. `brDraw` zeichnet genau das, wenn die Liste
 // leer ist -- und nichts, sobald sie es nicht mehr ist.
 crow.brDraw();
+// #327: A PANEL RESTORED OPEN GETS ITS FIRST TAB, as `toggleBrowser` gives
+// one on unfolding. Without it the panel came up with no tab and stayed blank
+// until `+` (robin, Windows, 2026-09-30). The bar's focus is taken back by
+// `pywebviewready` (input.focus), which fires after this.
+if(document.body.dataset.browser!=="shut" && !crow.tabs.length) crow.brNew();
 // #175. DIE SCHEIBE FOLGT DER FLAECHE. Fenstergroesse, Code-Panel, der Griff --
 // drei Wege, auf denen sich `#brbody` verschiebt, ohne dass jemand eine Adresse
 // tippt. Ein Beobachter auf dem Element erwischt alle drei; ihn an `resize` zu
