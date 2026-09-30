@@ -829,6 +829,27 @@ REASONING_BUDGET_MESSAGE = (
     "\n\nThat is enough analysis. I will now write the final answer "
     "for the user.\n")
 
+# #245. DER SATZ HAENGT DAVON AB, WORAUF DER ZUG ANTWORTET. Gemessen 2026-09-30
+# am 27B (crow-nest decode_out/meas-245, PREREG Amendments 2 und 3): nach einem
+# TOOL-ERGEBNIS nahm das Modell den Satz oben woertlich -- es kuendigte den
+# naechsten Schritt an ("Ich starte das jetzt.") und hoerte ohne Call auf, 4 von
+# 49 gedeckelten Runden; mit diesem Satz 0 von 49, bei gleichem Seed und damit
+# gleichem Schnitt. Nach einer NUTZERNACHRICHT ist es umgekehrt: dieser Satz rief
+# in 12 von 31 Paaren ein Tool auf (meist write_file), wo der obere den
+# verlangten Text schrieb, umgekehrt 2. Darum keiner der beiden fuer alle Zuege.
+# Dass die Weiche nach der letzten Rolle beide Seiten traegt, ist aus denselben
+# Daten abgelesen, nicht eigens gemessen.
+REASONING_BUDGET_ACT_MESSAGE = (
+    "\n\nThat is enough analysis. I will now act on it.\n")
+
+
+def reasoning_budget_message_for(messages: "list[dict]") -> str:
+    """#245: the sentence the cap injects -- act after a tool result, answer otherwise."""
+    last = messages[-1] if messages else {}
+    if last.get("role") == "tool":
+        return REASONING_BUDGET_ACT_MESSAGE
+    return REASONING_BUDGET_MESSAGE
+
 
 def reasoning_groups_for(model: str | None) -> tuple[tuple[str, ...], ...]:
     """Which of this model's levels render the SAME prompt. Measured, from the manifest.
@@ -6934,9 +6955,10 @@ def stream_reply(
         # Unterschied zur Stufe, und der Grund, warum `budget_command` keine
         # Kostenzeile hat.
         body["reasoning_budget_tokens"] = capped
+        # #245: nach einem Tool-Ergebnis "act on it", sonst der Satz von #176.
         body["reasoning_budget_message"] = (
-            REASONING_BUDGET_MESSAGE if reasoning_budget_message is None
-            else reasoning_budget_message)
+            reasoning_budget_message_for(body["messages"])
+            if reasoning_budget_message is None else reasoning_budget_message)
     # EXTRA FIELDS THE ENDPOINT ITSELF ASKED FOR, and only on the dialect that
     # knows them. `turn_routing` decides what they are; this is where they land.
     # Empty for the machine and for every direct connection, which is every turn

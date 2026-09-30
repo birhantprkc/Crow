@@ -5,6 +5,27 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 2.8.4 — 2026-09-30
+
+**Crow keeps working when its thinking is cut after a tool result.** When the 1024 reasoning cap ended a
+think block, the sentence Crow injected told the model to write the final answer, so a working agent could
+announce its next step and stop. After a tool result the sentence now tells it to act; after your own message
+it still tells it to answer. Both halves were measured on the 27B under Windows on 2026-09-30; the switch
+between them waits for robin's next long run.
+
+### Fixed
+
+- **Crow no longer announces the next step and stops when its thinking is cut after a tool result** (#245, 2026-09-30). When the 1024 reasoning cap closes the think block, Crow injects a sentence; after a tool result it is now "…I will now act on it." instead of "…I will now write the final answer for the user.", which the model took literally ("Ich starte das jetzt." and no call). Measured on the 27B under Windows, same seeds and cut points: 4 of 49 cut rounds without a call before, 0 of 49 after. After your own message the old sentence stays: the new one turned 12 of 31 cut text requests into a tool call (mostly `write_file`), the old one 2. The switch on the last message is read from those two measurements, not measured on its own; watch for it in the next long run. `docs/reference/reasoning-levels.md` has the table.
+
+### Changed
+
+- **The 27B's 1024 reasoning cap is measured now, and it stays** (#245, 2026-09-30). `qwen38-27b-cnq` carries `_reasoning_budget_status`: 1024 against 2048 on crow-nest's `serve.exe` under Windows (RTX 5090), replaying robin's Windows session of 2026-09-15 at the two turns where 1024 closed the think block in a screening pass (K=10, 19,172 prompt tokens; K=45, 41,254), 8 seeds + greedy per arm and point, criteria fixed first (crow-nest `decode_out/meas-245/PREREG.md`). 1024: 1 of 18 rounds without a tool call, 0 corrupt, median 20.9 s per round; 2048: 0 of 18, 0 corrupt, 36.35 s. 2048 fails the pre-set wall-clock limit (1.74x against 1.5x), so nothing on the wire changes. Not decided by it: Flash-Next's 1024.
+
+### Known limitations
+
+- **The sentence switch is not measured on its own** (#245). It is read from two measurements that each held one sentence fixed: on tool turns (4 of 49 cut rounds without a call with the answer sentence, 0 of 49 with the act sentence) and on turns that need no tool (12 of 31 cut text requests became tool calls with the act sentence, 2 with the answer sentence). robin's next long goal run is the live check.
+- **Flash-Next's 1024 cap is still unmeasured against another value** (#245); both measurements above ran on the 27B only.
+
 ## 2.8.3 — 2026-09-30
 
 **Windows closes cleanly and the browser panel behaves.** Closing the window can no longer leave an empty
