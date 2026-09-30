@@ -16470,7 +16470,9 @@ class TheCloseSavesThenEndsTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         # create=True: without the fix these names do not exist, and the
         # tests must then fail on their assertions, not in setUp.
-        self.persisting = threading.Event()
+        # a fresh one of the module's own kind (#325: a count of saves)
+        self.persisting = type(getattr(crow_gui, "PERSISTING",
+                                       threading.Event()))()
         for name, value in (("_EXIT_WATCHDOG", []),
                             ("PERSISTING", self.persisting),
                             ("EXIT_PERSIST_WAIT", 10.0)):
@@ -16521,6 +16523,44 @@ class TheCloseSavesThenEndsTests(unittest.TestCase):
             crow_gui.Api._persist_live(stub, with_kv=True)
         self.assertEqual(seen, [("save", True), ("stamp", True)])
         self.assertFalse(self.persisting.is_set())
+
+    def test_two_overlapping_saves_hold_the_exit_until_the_last_ends(self):
+        """A turn's save and close's save overlap; the first ends while the
+        second still writes. The watchdog must wait for the second."""
+        gates = {"turn": threading.Event(), "close": threading.Event()}
+        started = []
+
+        def save(*_a, **k):
+            name = k["notes"][0]
+            started.append(name)
+            gates[name].wait(10)
+
+        def stub(name):
+            return types.SimpleNamespace(
+                _args=types.SimpleNamespace(session=True),
+                _endpoint=lambda: {"base_url": "http://127.0.0.1:1/v1", "remote": True},
+                _conversation=None, _context_tokens=0, _model=None,
+                _reasoning=None, _tools_cleared=0, _notes=[name], _timings=[],
+                _stamp=lambda *a, **k: None)
+        ended = threading.Event()
+        with mock.patch.object(crow_gui, "save_session", save):
+            runs = [threading.Thread(target=crow_gui.Api._persist_live,
+                                     args=(stub(n),), daemon=True)
+                    for n in ("turn", "close")]
+            for run in runs:
+                run.start()
+            deadline = time.monotonic() + 5
+            while len(started) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(sorted(started), ["close", "turn"])
+            gates["turn"].set()
+            runs[0].join(5)
+            crow_gui.arm_exit_watchdog(grace=0.05, end=lambda _c: ended.set())
+            self.assertFalse(ended.wait(0.6),
+                             "ended the process inside the second save")
+            gates["close"].set()
+            runs[1].join(5)
+            self.assertTrue(ended.wait(3), "did not end once both saves were done")
 
     def _closing(self, panel_fails=False):
         order = []

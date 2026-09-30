@@ -18664,7 +18664,32 @@ EXIT_GRACE = 5.0
 # save_session) and the chat was lost. The watchdog waits up to
 # EXIT_PERSIST_WAIT for it -- the messages half; the KV half is best-effort,
 # and the tmp + os.replace write keeps the old file whole if it is cut anyway.
-PERSISTING = threading.Event()
+
+
+class _SavesRunning:
+    """#325: how many `_persist_live` calls are running -- A COUNT, NOT A FLAG.
+    A turn's save and close's save can overlap; a single Event was cleared by
+    the first to end while the second still wrote, and the watchdog could cut
+    it. Event-shaped on purpose: `set()` is one save started, `clear()` one
+    save ended, `is_set()` is true while any runs."""
+
+    def __init__(self) -> None:
+        self._lock, self._n = threading.Lock(), 0
+
+    def set(self) -> None:
+        with self._lock:
+            self._n += 1
+
+    def clear(self) -> None:
+        with self._lock:
+            self._n = max(0, self._n - 1)
+
+    def is_set(self) -> bool:
+        with self._lock:
+            return self._n > 0
+
+
+PERSISTING = _SavesRunning()
 EXIT_PERSIST_WAIT = 30.0
 # #328: the one watchdog of this process -- `close()` and `main` both arm it.
 _EXIT_WATCHDOG: "list[threading.Thread]" = []
