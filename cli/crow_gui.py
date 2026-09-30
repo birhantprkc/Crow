@@ -18589,7 +18589,7 @@ def main(argv: list[str] | None = None) -> int:
     # the app id. It is passed anyway: under X11 and XWayland (CROW_GDK_BACKEND
     # =x11) it is what puts the bird on the window.
     if crow_platform.IS_WINDOWS:
-        webview.start(styles, window)
+        webview.start(styles, window, **crow_platform.webview_start_kwargs())
     else:
         webview.start(styles, window, gui="gtk", icon=icon_png(256) or None)
     arm_exit_watchdog()
