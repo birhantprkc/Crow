@@ -12207,7 +12207,8 @@ class ThePageArrivesWithABaseUriTests(unittest.TestCase):
         Renderer wechseln."""
         self.assertIn('webview.start(styles, window, gui="gtk", icon=',
                       self.source)
-        self.assertIn("webview.start(styles, window)\n", self.source)
+        self.assertIn("webview.start(styles, window, "
+                      "**crow_platform.webview_start_kwargs())\n", self.source)
 
 
 class TheWindowsWebviewKeepsItsProfileTests(unittest.TestCase):
