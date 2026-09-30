@@ -97,6 +97,12 @@ COALESCE = 0.25
 
 MAX_BODY = 8 * 1024 * 1024          # /pair and /api: a prompt, not a file
 MAX_UPLOAD = 20 * 1024 * 1024       # /upload: one phone photo, with room
+# #334: a refusal reads an unread body up to this before it closes. Closing over
+# pending data makes TCP send a reset (RFC 1122 4.2.2.13) that also swallows the
+# answer on the peer -- CI windows-latest, WinError 10053. Go's net/http drains
+# up to 256 KiB the same way; 1 MiB covers a partial audio clip.
+DRAIN_LIMIT = 1024 * 1024
+DRAIN_TIMEOUT = 2.0
 _IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
               "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif"}
 # #290: A PHONE'S RECORDING, `/upload?kind=audio`. iOS Safari's MediaRecorder
@@ -713,7 +719,29 @@ class _Handler(BaseHTTPRequestHandler):
         for k, v in _SECURITY_HEADERS:
             self.send_header(k, v)
 
+    def _discard_body(self) -> None:
+        """#334: read a refused POST's body, bounded, so the close is not a reset."""
+        if self.command != "POST" or getattr(self, "_body_read", True):
+            return
+        self._body_read = True
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if not 0 < length <= DRAIN_LIMIT:
+            return
+        old = self.connection.gettimeout()
+        self.connection.settimeout(DRAIN_TIMEOUT)
+        try:
+            self.rfile.read(length)
+        except OSError:
+            pass
+        finally:
+            self.connection.settimeout(old)
+
     def body(self, code: int, data: bytes, ctype: str, extra=()) -> None:
+        if code >= 400:
+            self._discard_body()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -795,6 +823,7 @@ class _Handler(BaseHTTPRequestHandler):
         if length < 0 or length > limit:
             self.plain(413, "too large")
             return None
+        self._body_read = True
         return self.rfile.read(length)
 
     # ------------------------------------------------------------- routes --
@@ -849,6 +878,7 @@ class _Handler(BaseHTTPRequestHandler):
         return self.plain(404, "not found")
 
     def do_POST(self):
+        self._body_read = False            # #334: per request, the handler serves a kept-alive connection
         path = urlsplit(self.path).path
         if not self._host_ok():
             return self.plain(421, "misdirected request")
