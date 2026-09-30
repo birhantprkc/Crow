@@ -122,7 +122,7 @@ def webview_start_kwargs() -> dict:
     """#326: what `webview.start` gets on Windows so a login survives a restart.
 
     pywebview defaults `private_mode=True` (nothing kept between sessions) and
-    keeps its profile in `%APPDATA%\pywebview`, shared with other pywebview apps.
+    keeps its profile in `%APPDATA%/pywebview`, shared with other pywebview apps.
     Both are process-wide, so this holds for Crow's page and the browser panel
     alike. Crow's own folder under `state_dir()`. Linux has its own WebKit
     profile for the panel (#226) and needs none of this: empty there.
