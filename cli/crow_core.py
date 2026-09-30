@@ -3082,6 +3082,44 @@ def forget_session(path: str | None = None) -> bool:
         return False
 
 
+class _ReplaceWhole:
+    """#325: write `path` through `path + ".tmp"` and `os.replace` -- the goal
+    file's shape. Use as `with _ReplaceWhole(path) as fh:`.
+
+    `open(path, "w")` truncates first and writes second; the exit watchdog
+    ending the process in between left session.json at 0 bytes and the chat
+    lost (robin's Windows machine, 2026-09-28 16:22), and a Ctrl+C during the
+    close does the same. With the tmp the old file stays whole until the new
+    one is complete. A failed write removes the tmp and still raises, so the
+    caller sees the failure it always saw.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path, self.tmp, self.fh = path, path + ".tmp", None
+
+    def __enter__(self):
+        self.fh = open(self.tmp, "w", encoding="utf-8")
+        return self.fh
+
+    def __exit__(self, kind, value, trace) -> bool:
+        try:
+            self.fh.close()
+            if kind is None:
+                os.replace(self.tmp, self.path)
+                return False
+        except BaseException:
+            self._drop()
+            raise
+        self._drop()
+        return False
+
+    def _drop(self) -> None:
+        try:
+            os.remove(self.tmp)
+        except OSError:
+            pass
+
+
 def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
                  path: str | None = None, with_kv: bool = True,
                  pretty: bool = False, model: str | None = None,
@@ -3148,7 +3186,8 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
             # worth keeping; the next start just pays a prefill for them.
             pass
 
-    with open(path, "w", encoding="utf-8") as fh:
+    # #325: through a tmp and os.replace, never truncated in place.
+    with _ReplaceWhole(path) as fh:
         # SESSION_FORMAT_KEY is ADDED, and `version` keeps the meaning it has
         # had since 0.2.0 -- the client that wrote the file. Renaming or
         # re-purposing an existing key would break the way back: an older build
@@ -3428,11 +3467,41 @@ def load_session(base_url: str, system: str | None = None,
         if not kv:
             try:
                 saved["kv"] = False
-                with open(path, "w", encoding="utf-8") as fh:
+                with _ReplaceWhole(path) as fh:      # #325: never truncated
                     json.dump(saved, fh)
             except Exception:
                 pass
     return messages, int(saved.get("context_tokens") or 0), kv
+
+
+def set_aside_unreadable_session(path: str | None = None) -> str | None:
+    """#325: the line for a session file that exists and cannot be read, or None.
+
+    `load_session` answers None for it, the same as for "no session", so the
+    window opened an empty chat and said nothing -- measured on robin's 0-byte
+    session.json (2026-09-28). The file is MOVED ASIDE to `<path>.unreadable`,
+    not deleted: that says it once (the next start finds no file) and keeps
+    whatever is left of it for whoever wants to look.
+    """
+    path = path or SESSION_FILE
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            if isinstance(json.load(fh), dict):
+                return None
+        why = "not a chat file"
+    except (OSError, ValueError):
+        why = "0 bytes" if size == 0 else "%d bytes, not valid JSON" % size
+    aside = path + ".unreadable"
+    try:
+        os.replace(path, aside)
+    except OSError:
+        return "the saved chat could not be read (%s): %s" % (why, path)
+    return ("the saved chat could not be read (%s) -- kept as %s"
+            % (why, os.path.basename(aside)))
 
 
 def should_roll(context_tokens: int, n_ctx: int, at: float = ROLLOVER_AT) -> bool:
