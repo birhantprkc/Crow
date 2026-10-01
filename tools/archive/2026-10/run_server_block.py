@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """E14: the one run against the SHIPPED operating point. Five probes, one block.
 
+ARCHIVED 2026-10-01 with #187 (the terminal client was removed). This tool
+drives cli/crow.py, which no longer exists, so it cannot run from this tree;
+it is kept as the record of how E14 was measured.
+
 WHY THIS FILE EXISTS. Every [gemessen] mark in #90's plan comes from text
 analysis, regex control, AST counting, package inspection or a serverless
 checker run. NOT ONE behavioural statement about the shipped operating point

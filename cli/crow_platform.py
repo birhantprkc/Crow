@@ -9,13 +9,13 @@ This file is the seam: every OS-dependent fact is answered here, the core asks
 and does not branch, and a reader who wants to know what changes between the two
 platforms reads ONE file.
 
-WHY THE NAME IS `crow_platform` AND NOT `platform`. `python cli/crow.py` puts
-cli/ on sys.path[0], so a file called cli/platform.py would shadow the standard
+WHY THE NAME IS `crow_platform` AND NOT `platform`. `python cli/crow_gui.py`
+puts cli/ on sys.path[0], so a file called cli/platform.py would shadow the standard
 library's `platform` module for every client that starts from this directory --
 the same trap crow_core.py's own docstring records for cli/json.py.
 
-STANDARD LIBRARY ONLY, like the core: the terminal client's stdlib-only
-invariant runs through here, and `/proc` plus `shutil.which` answer everything
+STANDARD LIBRARY ONLY, like the core: the core's stdlib-only invariant runs
+through here, and `/proc` plus `shutil.which` answer everything
 `psutil` would have.
 
 THE LAYOUT, and Windows does not move:

@@ -21,7 +21,7 @@ hold it together:
      Everything here draws at 82-94 % alpha so the grain underneath stays
      faintly visible, which is what makes it sit IN the image.
 
-EVERY NUMBER HERE IS THE README'S, and the version comes from `crow.VERSION`
+EVERY NUMBER HERE IS THE README'S, and the version comes from `crow_core.VERSION`
 rather than being retyped: the card that shipped before v0.0.5 still claimed
 v0.0.3, because a literal in a picture is a literal nobody greps.
 
@@ -37,7 +37,7 @@ HERE = Path(__file__).resolve().parent.parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "cli"))
 
-import crow  # noqa: E402 - the single source of the version
+import crow_core  # noqa: E402 - the single source of the version (#187)
 
 SRC = HERE / "Crow_social_new.jpg"
 OUT = HERE / "social-preview.png"
@@ -240,7 +240,7 @@ def main() -> int:
         x += tracked(d, (x, 600 * SS), fact, small, MUTED + (225,), track=1.6)
 
     ver = load(13, 500.0)
-    vtxt = f"v{crow.VERSION}"
+    vtxt = f"v{crow_core.VERSION}"
     d.text(((W - M) * SS - tracked_width(d, vtxt, ver), 600 * SS),
            vtxt, font=ver, fill=MUTED + (190,))
 

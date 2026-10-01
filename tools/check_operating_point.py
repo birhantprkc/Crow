@@ -328,9 +328,11 @@ def check_versions(repo, manifest_version):
     has no repository to read. So it is checked rather than deleted.
     """
     out = []
-    crow = read(os.path.join(repo, "cli", "crow.py"))
-    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', crow, re.M)
-    out.append(("cli/crow.py", m.group(1) if m else None))
+    # #187: the literal moved out of cli/crow.py (removed with the terminal
+    # client) into the core, which is what the installers read now.
+    core = read(os.path.join(repo, "cli", "crow_core.py"))
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', core, re.M)
+    out.append(("cli/crow_core.py", m.group(1) if m else None))
 
     inst = read(os.path.join(repo, "install.ps1"))
     m = re.search(r'\[string\]\s*\$Version\s*=\s*"([^"]+)"', inst)
@@ -350,7 +352,8 @@ def check_versions(repo, manifest_version):
 # WHY THIS RULE COUNTS AND DOES NOT COMPARE. The triple is not a flag in a
 # command line a human copies; it is written into the client. On 2026-08-12 it
 # stood in three places: cli/crow.py's stream_reply signature, cli/crow.py's
-# argparse defaults, and the manifest. A second client would make it five.
+# argparse defaults, and the manifest (cli/crow.py, the terminal client, went
+# with #187). A second client would make it five.
 # A comparing predicate - "every copy equals the manifest" - reports two clients
 # that BOTH hard-write 0.95 as green, because both do equal the manifest. It
 # only goes red after one of them has been edited, i.e. after the damage: the
@@ -373,11 +376,9 @@ def check_versions(repo, manifest_version):
 # the moment it lands in one of these directories.
 CLIENT_DIRS = ("cli", "gui")
 
-# The one file the single copy has to sit in. First entry that exists wins, so
-# this survives the core extraction without an edit: while cli/crow_core.py does
-# not exist the core IS cli/crow.py, and the day it appears, a value left behind
-# in cli/crow.py stops being "the one copy, in the core" and goes red.
-CORE_FILES = ("cli/crow_core.py", "cli/crow.py")
+# The one file the single copy has to sit in. A tuple, first entry that exists
+# wins; it listed cli/crow.py as the fallback until #187 removed that file.
+CORE_FILES = ("cli/crow_core.py",)
 
 # Signed, because a sampling value may legitimately be 0 and a future one may
 # not be a float at all.

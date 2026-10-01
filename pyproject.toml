@@ -1,9 +1,8 @@
 # Packaging metadata and the lint configuration. NOT a change of how Crow is
-# installed: install.ps1 and install.sh copy files, and the terminal client
-# still needs nothing but the standard library. This file exists so that
+# installed: install.ps1 and install.sh copy files. This file exists so that
 #
 #   * `ruff check .` has one configuration instead of a flag on every caller,
-#   * the version number has exactly one home (cli/crow.py) on the packaging
+#   * the version number has exactly one home (cli/crow_core.py) on the packaging
 #     side as well -- hatch reads the literal out of it rather than carrying a
 #     second copy that tools/check_operating_point.py would then have to police,
 #   * `pip install -e .[voice]` is a way to get the window's optional extras
@@ -55,22 +54,21 @@ Homepage = "https://github.com/nibor1896/Crow"
 Documentation = "https://github.com/nibor1896/Crow/tree/main/docs"
 
 [project.scripts]
-crow = "crow:main"
 crow-gui = "crow_gui:main"
 
-# ONE version literal, in cli/crow.py, which is where cli/crow.py's own
-# `VERSION` already is and where tools/check_operating_point.py looks for it.
+# ONE version literal, in cli/crow_core.py (since #187, when the terminal
+# client cli/crow.py went), where tools/check_operating_point.py looks for it.
 # hatchling's default regex reads `VERSION = "x.y.z"`; the pattern is written
 # out anyway, because a default that changes upstream would silently start
 # reading something else.
 [tool.hatch.version]
-path = "cli/crow.py"
+path = "cli/crow_core.py"
 pattern = '^VERSION\s*=\s*"(?P<version>[^"]+)"'
 
 # The clients are TOP-LEVEL MODULES and not a package, because that is how they
 # import each other: cli/crow_gui.py says `import crow_core`, and re-rooting
 # them under a package name would break every one of those imports as well as
-# the `python cli/crow.py` start line the README prints.
+# the `python cli/crow_gui.py` start line.
 [tool.hatch.build.targets.wheel]
 sources = ["cli"]
 only-include = ["cli"]

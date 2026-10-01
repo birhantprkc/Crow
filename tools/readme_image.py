@@ -6,7 +6,7 @@ crow-mobile-light.svg, one column and larger type for phones (880 px scaled to a
 theme, max-width for the phone.
 
 Every figure in it is copied from docs/ (operating points, features, tools, images). The version
-pill reads cli/crow.py's VERSION and the tool count is len(crow_core.BUILTIN_TOOLS), so a release
+pill reads crow_core.VERSION and the tool count is len(crow_core.BUILTIN_TOOLS), so a release
 re-runs this and commits the four files. TOOLS below must name every built-in tool, or this stops.
 Fonts: GitHub's own stacks, nothing embedded. Usage:  python3 tools/readme_image.py"""
 import os, pathlib, re, subprocess, sys
@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CLI = ROOT / "cli"
 OUT = ROOT / "docs" / "images" / "readme"
 sys.path.insert(0, str(CLI))
-import crow_core  # noqa: E402  (the tool list; the import has no side effects)
+import crow_core  # noqa: E402  (the version and the tool list; the import has no side effects)
 BUILTIN = [tool["function"]["name"] for tool in crow_core.BUILTIN_TOOLS]
 NTOOLS = str(len(BUILTIN))
 
@@ -157,7 +157,7 @@ def desktop():
              f'<tspan fill="{C["mark"]}">▍<animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.5;.5;1" '
              f'dur="1.1s" repeatCount="indefinite"/></tspan></text>')
     x = 342
-    VERSION = re.search(r'^VERSION = "([^"]+)"', (CLI / "crow.py").read_text(), re.M).group(1)
+    VERSION = crow_core.VERSION
     for label, acc in (("v" + VERSION, "mark"), ("MIT", "faint"), ("Windows · Linux · CUDA", "sub")):
         x = pill(x, 258, label, C[acc])
 
@@ -268,7 +268,7 @@ def mobile():
     global W, X0, X1
     W, X0, X1 = 440, 10, 430
     CW = X1 - X0
-    VERSION = re.search(r'^VERSION = "([^"]+)"', (CLI / "crow.py").read_text(), re.M).group(1)
+    VERSION = crow_core.VERSION
 
     def msection(y, title, acc):
         o.append(f'<rect x="{X0}" y="{y}" width="4" height="22" rx="2" fill="{C[acc]}"/>')
