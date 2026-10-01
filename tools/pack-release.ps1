@@ -250,7 +250,8 @@ function Resolve-BuildDir {
 # ---------------------------------------------------------------------------
 $SHIP_ROOT_FILES   = @('LICENSE', 'NOTICE', 'README.md')
 $SHIP_TOP_DIRS     = @('bin', 'cli', 'kits')
-$SHIP_SINGLE_FILES = @('templates\0731-chat-template.jinja', 'manifests\operating-point.json', 'manifests\stack.json')
+$SHIP_SINGLE_FILES = @('templates\0731-chat-template.jinja', 'manifests\operating-point.json', 'manifests\stack.json',
+                       'tools\te_rename.py')
 $EXCLUDE_DIRS      = @('runs', '__pycache__', '.crow', 'digests', 'sessions')
 $EXCLUDE_FILES     = @('*.log', '*.pyc', '*.pyo', '*.jsonl', 'test_*.py', '.env*', 'secrets.json',
                        'session*.json', 'state*.json', 'settings.json', '*_tokens.json')
@@ -317,6 +318,27 @@ function Copy-ManifestFiles {
         $out += $dest
     }
     return ,@($out)
+}
+
+function Copy-ToolFiles {
+    <#
+    Stages tools\te_rename.py (#196 phase 2): CrowSetup's convert step runs it
+    from <install>\tools\ to build the Image Stack's text_encoder_sdcli\ on the
+    machine. Required: without it the Image Stack cannot be installed. Copied
+    byte for byte; returns the staged path.
+    #>
+    param([string] $Repo, [string] $Stage)
+    $src = Join-Path $Repo 'tools\te_rename.py'
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+        throw "tools/te_rename.py missing -- CrowSetup's Image Stack convert step runs it from the package"
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'tools') | Out-Null
+    $dest = Join-Path $Stage 'tools\te_rename.py'
+    Copy-Item -LiteralPath $src -Destination $dest
+    if ((Get-FileHash -LiteralPath $dest).Hash -ne (Get-FileHash -LiteralPath $src).Hash) {
+        throw "tools/te_rename.py changed on the way into the package"
+    }
+    return $dest
 }
 
 function Copy-ShippedTree {
@@ -910,6 +932,14 @@ function Invoke-Selftest {
         $mfStaged = Copy-ManifestFiles -Repo $mfRepo -Stage (Join-Path $pkRoot 'mf-stage')
         Check "manifests\stack.json is staged and in the shipped set (#196 P1)" ((Test-Path -LiteralPath (Join-Path $pkRoot 'mf-stage\manifests\stack.json')) -and $mfStaged.Count -eq 2 -and (Get-ShippedSetViolations -Paths @('manifests\stack.json')).Count -eq 0)
         Check "NEGATIVE: anything outside it or on an exclude rule is named" ((Get-ShippedSetViolations -Paths $badSet).Count -eq $badSet.Count)
+        $teRepo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+        $teStaged = Copy-ToolFiles -Repo $teRepo -Stage (Join-Path $pkRoot 'te-stage')
+        Check "tools\te_rename.py is staged byte for byte and in the shipped set (#196 P2)" ((Test-Path -LiteralPath $teStaged) -and (Get-FileHash -LiteralPath $teStaged).Hash -eq (Get-FileHash -LiteralPath (Join-Path $teRepo 'tools\te_rename.py')).Hash -and (Get-ShippedSetViolations -Paths @('tools\te_rename.py')).Count -eq 0)
+        Check "NEGATIVE: any other tools\ file is outside the shipped set" ((Get-ShippedSetViolations -Paths @('tools\pack-release.ps1', 'tools\check_stack.py')).Count -eq 2)
+        Check "te_rename.py passes the privacy gate"                     ((Find-PrivateData -Root (Join-Path $pkRoot 'te-stage') -Patterns $fake.Patterns).Count -eq 0)
+        $teThrew = $false
+        try { Copy-ToolFiles -Repo $mfRepo -Stage (Join-Path $pkRoot 'te-stage2') | Out-Null } catch { $teThrew = $true }
+        Check "NEGATIVE: a checkout without tools\te_rename.py is refused" $teThrew
 
         # the gate, one spelling at a time
         $scan = Join-Path $pkRoot 'scan'
@@ -1278,6 +1308,9 @@ if ((Get-Item (Join-Path $stage 'templates\0731-chat-template.jinja')).Length -n
 # manifests\stack.json rides along (#196 P1, the boot menu); Copy-ManifestFiles
 # stages and reads back both.
 Copy-ManifestFiles -Repo $repo -Stage $stage | Out-Null
+# tools\te_rename.py (#196 phase 2): CrowSetup runs it from <install>\tools\ to
+# build the Image Stack's text_encoder_sdcli\. The only file of tools\ that ships.
+Copy-ToolFiles -Repo $repo -Stage $stage | Out-Null
 
 # The OFL is not a formality: without it, redistributing the typeface is a licence
 # violation. Refuse rather than ship a package that breaks it.

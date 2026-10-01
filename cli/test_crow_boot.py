@@ -633,5 +633,80 @@ class TheTerminalTests(unittest.TestCase):
         self.assertIn(crow_boot.flight_frame(5, fancy=False), "|/-\\")
 
 
+class ThePlanAsJsonTests(BootCase):
+    """#196 phase 2: `--plan <point> --json` is what CrowSetup's check step reads.
+    It must be the menu's own resolution, not a second copy of it."""
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ), mock.patch.object(sys, "stdout", out), \
+                mock.patch.object(sys, "stderr", err):
+            code = crow_boot.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_27b_plan_is_plan_point_with_the_point_s_files(self):
+        doc = crow_boot.plan_json(STACK, "27b", self.install, self.models)
+        plan = crow_boot.plan_point(STACK, "27b", self.install, self.models)
+        self.assertEqual(doc["point"], "27b")
+        self.assertEqual(doc["serve"]["binary"], plan["serve"]["argv"][0])
+        self.assertEqual(doc["serve"]["argv"], plan["serve"]["argv"][1:])
+        self.assertEqual(doc["serve"]["cwd"], self.install)
+        self.assertEqual(doc["serve"]["port"], 8099)
+        self.assertEqual(doc["serve"]["readiness"]["json"], {"status": "ok"})
+        point = next(p for p in STACK["points"] if p["id"] == "27b")
+        # only the point's own env keys, never the shell's
+        self.assertEqual(set(doc["serve"]["env"]), set(point["engine"]["env"]))
+        self.assertIsNone(doc["image"])
+        self.assertEqual([f["id"] for f in doc["files"]], point["files"])
+        by_id = {f["id"]: f for f in STACK["files"]}
+        for f in doc["files"]:
+            self.assertEqual(f["bytes"], by_id[f["id"]]["bytes"])
+            self.assertEqual(f["sha256"], by_id[f["id"]]["sha256"])
+            self.assertTrue(f["dest"].startswith(self.models), f["dest"])
+        cnq = next(f for f in doc["files"] if f["id"] == "27b-cnq")
+        self.assertEqual(cnq["dest"], doc["serve"]["env"]["CROW_CNQ"])
+        self.assertEqual(doc["derived"], [])
+        self.assertNotIn("${", json.dumps(doc), "a placeholder was left unresolved")
+
+    def test_the_image_stack_carries_sd_server_and_the_derived_encoder(self):
+        doc = crow_boot.plan_json(STACK, "image-stack", self.install, self.models)
+        plan = crow_boot.plan_point(STACK, "image-stack", self.install, self.models)
+        self.assertEqual(doc["image"]["binary"], os.path.join(self.install, "bin", "sd-server.exe"))
+        self.assertEqual(doc["image"]["argv"], plan["image"]["argv"][1:])
+        self.assertEqual(doc["image"]["port"], 8097)
+        self.assertEqual(doc["crow_env"], plan["crow_env"])
+        (derived,) = doc["derived"]
+        sdcli = os.path.join(self.models, "qwen-image-2.1", "text_encoder_sdcli")
+        self.assertEqual(derived["dest"], sdcli)
+        self.assertIn("qi-text-encoder-1", derived["inputs"])
+        index = os.path.join(sdcli, "model.safetensors.index.json")
+        self.assertIn(index, [o["dest"] for o in derived["outputs"]])
+        # sd-server's --llm is one of those outputs: the check verifies what it loads
+        llm = doc["image"]["argv"][doc["image"]["argv"].index("--llm") + 1]
+        self.assertEqual(llm, index)
+
+    def test_main_prints_only_the_json_and_honours_install_root_and_models(self):
+        code, out, err = self.run_main(["--install-root", self.install, "--models", self.models,
+                                        "--plan", "27b", "--json"])
+        self.assertEqual(code, crow_boot.EXIT_OK, err)
+        doc = json.loads(out)
+        self.assertEqual(doc, crow_boot.plan_json(STACK, "27b", os.path.abspath(self.install),
+                                                  os.path.abspath(self.models)))
+        self.assertEqual(doc["install_root"], os.path.abspath(self.install))
+        self.assertEqual(doc["models_root"], os.path.abspath(self.models))
+
+    def test_an_unknown_point_is_exit_2_with_nothing_on_stdout(self):
+        code, out, err = self.run_main(["--install-root", self.install, "--plan", "nope", "--json"])
+        self.assertEqual(code, crow_boot.EXIT_SETUP)
+        self.assertEqual(out, "")
+        self.assertIn("nope", err)
+
+    def test_plan_and_json_only_go_together(self):
+        for argv in (["--plan", "27b"], ["--json"]):
+            with self.assertRaises(SystemExit) as cm:
+                self.run_main(argv)
+            self.assertEqual(cm.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

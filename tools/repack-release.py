@@ -18,7 +18,8 @@ MANIFEST.json before a byte is reused, and stages everything else from the
 checkout exactly as pack-release.ps1 does: cli/ and kits/ without test_*.py,
 __pycache__ and runs/ logs (2.1.0 and 2.8.5 each shipped ten of them),
 templates/0731-chat-template.jinja, manifests/operating-point.json,
-manifests/stack.json (the boot menu's, #196 P1), the three root files. MANIFEST.json is written in the shape install.ps1 reads: a JSON
+manifests/stack.json (the boot menu's, #196 P1), tools/te_rename.py (CrowSetup's
+Image Stack convert step, #196 P2), the three root files. MANIFEST.json is written in the shape install.ps1 reads: a JSON
 array of {path, bytes, sha256}, backslash paths, upper-case hex.
 
 HOW IT IS CHECKED. --verify re-reads the finished zip the way install.ps1 does
@@ -72,7 +73,7 @@ REPO = os.path.dirname(HERE)
 SHIP_ROOT_FILES = ("LICENSE", "NOTICE", "README.md")
 SHIP_TOP_DIRS = ("bin", "cli", "kits")
 SHIP_SINGLE_FILES = ("templates\\0731-chat-template.jinja", "manifests\\operating-point.json",
-                     "manifests\\stack.json")
+                     "manifests\\stack.json", "tools\\te_rename.py")
 EXCLUDE_DIRS = ("runs", "__pycache__", ".crow", "digests", "sessions")
 EXCLUDE_FILES = ("*.log", "*.pyc", "*.pyo", "*.jsonl", "test_*.py", ".env*", "secrets.json",
                  "session*.json", "state*.json", "settings.json", "*_tokens.json")
@@ -363,6 +364,13 @@ def stage_from_checkout(repo: str = REPO) -> dict[str, bytes]:
     data = read_bytes(stack)
     json.loads(data.decode("utf-8-sig"))  # must survive as readable JSON
     files["manifests\\stack.json"] = data
+    # #196 P2: CrowSetup's convert step runs <install>\tools\te_rename.py to build
+    # the Image Stack's text_encoder_sdcli\. pack-release.ps1 refuses a checkout
+    # without it; here a checkout without it ships without it, because the
+    # synthetic checkouts of tools/test_repack_release.py predate the file.
+    te = os.path.join(repo, "tools", "te_rename.py")
+    if os.path.isfile(te):
+        files["tools\\te_rename.py"] = read_bytes(te)
     if "cli\\fonts\\OFL.txt" not in files:
         raise SystemExit("cli/fonts/OFL.txt missing -- the typeface may not ship without it")
     # The voxel kit (#298) ships in every package, beside cli\ -- pack-release.ps1 does the same.

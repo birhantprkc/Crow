@@ -13,6 +13,8 @@ a menu, for a script or a test.
     python cli/crow_boot.py --stop                stop the running point
     python cli/crow_boot.py --start-crow          open the window against the running point
     python cli/crow_boot.py --create-shortcut DIR a Windows shortcut to this menu in DIR
+    python cli/crow_boot.py --plan 27b --json     what --start 27b would use, as JSON (the
+                                                  installer's check step reads it)
 
 Exit codes: 0 done, 1 failed (or, for --status, nothing runs), 2 setup error
 (no stack.json, unknown point, no engine binary), 3 refused because another
@@ -284,6 +286,63 @@ def missing_files(plan: dict, install: str, models: str) -> list:
         if not os.path.exists(path) and path not in out:
             out.append(path)
     return out
+
+
+def plan_json(stack: dict, point_id: str, install: str, models: str) -> dict:
+    """`--plan <point> --json`: what the menu starts for a point, for CrowSetup's check.
+
+    Built from plan_point and resolve, the menu's own resolution, so the
+    installer checks exactly what a start would use. `env` is the point's own
+    keys only (the inherited environment is not part of the plan). `files` are
+    the point's stack.json files with dest resolved; `derived` names the files
+    built on the machine (the Image Stack's text_encoder_sdcli/), with the
+    input ids they consume and their outputs.
+    """
+    plan = plan_point(stack, point_id, install, models)
+    point = next(p for p in stack["points"] if p.get("id") == point_id)
+
+    def r(value):
+        return resolve(value, install, models)
+
+    def lookup(kind: str, ids) -> list:
+        known = {e.get("id"): e for e in stack.get(kind) or []}
+        out = []
+        for ref in ids or []:
+            if ref not in known:
+                raise SetupError("%s lists %s %r, which stack.json does not define"
+                                 % (point_id, {"files": "file"}.get(kind, "derived entry"), ref))
+            out.append(known[ref])
+        return out
+
+    files = [{"id": f["id"], "dest": r(f["dest"]), "bytes": int(f["bytes"]),
+              "sha256": f.get("sha256")} for f in lookup("files", point.get("files"))]
+    derived = []
+    for d in lookup("derived", point.get("derived")):
+        dest = r(d["dest"])
+        derived.append({
+            "id": d["id"], "dest": dest, "inputs": list(d.get("inputs") or []),
+            "outputs": [{"dest": os.path.normpath(os.path.join(dest, o["path"])),
+                         "bytes": int(o["bytes"]), "sha256": o.get("sha256")}
+                        for o in d.get("outputs") or []],
+        })
+    serve = plan["serve"]
+    image = plan["image"]
+    return {
+        "point": plan["id"],
+        "title": plan["title"],
+        "install_root": install,
+        "models_root": models,
+        "base_url": plan["base_url"],
+        "serve": {"binary": serve["argv"][0], "argv": serve["argv"][1:], "cwd": serve["cwd"],
+                  "env": serve["env"], "dirs": serve["dirs"], "port": serve["port"],
+                  "readiness": serve["readiness"]},
+        "image": None if image is None else {
+            "binary": image["argv"][0], "argv": image["argv"][1:], "port": image["port"],
+            "readiness": image["readiness"]},
+        "crow_env": plan["crow_env"],
+        "files": files,
+        "derived": derived,
+    }
 
 
 # ------------------------------------------------------------- the terminal ---
@@ -1202,7 +1261,11 @@ def main(argv=None) -> int:
     group.add_argument("--stop", action="store_true", help="stop the running operating point")
     group.add_argument("--start-crow", action="store_true", help="open the window on the running point")
     group.add_argument("--create-shortcut", metavar="DIR", help="write a Windows shortcut to this menu")
+    group.add_argument("--plan", metavar="POINT", help="print what --start POINT would use (needs --json)")
+    ap.add_argument("--json", action="store_true", help="with --plan: the plan as JSON on stdout")
     args = ap.parse_args(argv)
+    if bool(args.plan) != bool(args.json):
+        ap.error("--plan and --json go together: --plan POINT --json")
 
     style = Style.detect(sys.stdout)
     install = os.path.abspath(args.install_root) if args.install_root else crow_platform.install_dir()
@@ -1220,8 +1283,17 @@ def main(argv=None) -> int:
     try:
         stack = load_stack(os.path.abspath(args.stack) if args.stack else DEFAULT_STACK)
     except SetupError as exc:
-        print("%s %s" % (style.icon("fail"), exc))
+        print("%s %s" % (style.icon("fail"), exc), file=sys.stderr if args.plan else sys.stdout)
         return EXIT_SETUP
+    if args.plan:
+        # stdout carries the JSON and nothing else; a setup error goes to stderr
+        try:
+            doc = plan_json(stack, args.plan, install, models)
+        except SetupError as exc:
+            print("%s %s" % (style.icon("fail"), exc), file=sys.stderr)
+            return EXIT_SETUP
+        sys.stdout.write(json.dumps(doc, indent=2) + "\n")
+        return EXIT_OK
     boot = Boot(stack, install, models, style=style, forwarded_args=forwarded)
     if args.status:
         return boot.status()
