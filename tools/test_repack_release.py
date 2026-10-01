@@ -14,6 +14,7 @@ import re
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PS1 = os.path.join(HERE, "pack-release.ps1")
@@ -126,6 +127,14 @@ class ShippedSetTest(unittest.TestCase):
         self.assertEqual(ps_list("EXCLUDE_FILES"), rr.EXCLUDE_FILES)
         self.assertEqual(ps_list("KIT_REQUIRED"), rr.KIT_REQUIRED)
 
+    def test_the_privacy_allowlist_matches_the_one_in_pack_release_ps1(self):
+        # The closing paren of the list is on a line of its own: the regexes hold parens.
+        with open(PS1, encoding="utf-8") as fh:
+            ps = fh.read()
+        m = re.search(r"\$PRIVACY_ALLOW\s*=\s*@\(\s*\n(.*?)\n\)", ps, re.S)
+        self.assertTrue(m, "$PRIVACY_ALLOW not declared in pack-release.ps1")
+        self.assertEqual(tuple(re.findall(r"'([^']*)'", m.group(1))), rr.PRIVACY_ALLOW)
+
 
 class PrivacyGateTest(unittest.TestCase):
     def pats(self, extra=()):
@@ -179,6 +188,117 @@ class PrivacyGateTest(unittest.TestCase):
         pats, notes = rr.private_patterns(profile=FAKE_PROFILE, user="fakebuilder", host="pc")
         self.assertNotIn("pc", pats)
         self.assertTrue(notes)
+
+
+# What the real, rebuilt binaries carry (measured 2026-10-01): "round-robin" twice in the
+# embedded web UI of llama-server-impl.dll, and tokenizer vocabulary (BPE merges, vocab
+# JSON) in the two sd binaries, 29 hits each. These lines are verbatim from sd-cli.exe.
+VOCAB = (b"\nrobin son</w>\n", b"\n\xe2\x96\x81Robins on\n", b"\n\xe2\x96\x81 Robinson\n",
+         b"\n\xc4\xa0 Robin\n", b'"\xe2\x96\x81Robinson":29149,', b'"Robin": 101068,',
+         b'"\xc4\xa0probing": 109172,', b'"\xe2\x96\x81odrobin",', b'"\xe2\x96\x81robinet",')
+ROUND_ROBIN = b"east-stats random round-robin source-hash static-port"
+
+
+class PrivacyAllowlistTest(unittest.TestCase):
+    """The bare-name check stays, with a scoped allowlist: an upstream word that merely
+    contains the owner's name is allowed in one named file, in one named context, up to
+    a maximum count. Everything else refuses. The fake owner here is "robin" because the
+    allowlist is about that name; no check depends on who runs the suite."""
+
+    OWNER = "C:\\Users\\robin"
+    IMPL = "bin\\llama-server-impl.dll"
+
+    def gate(self, files, user="robin", profile=None):
+        pats, notes = rr.private_patterns(profile=profile or self.OWNER, user=user, host=FAKE_HOST)
+        buf = io.StringIO()
+        with mock.patch.object(rr, "private_patterns", return_value=(pats, notes)), \
+                contextlib.redirect_stdout(buf):
+            ok = rr.privacy_gate(files)
+        return ok, buf.getvalue()
+
+    def impl(self, n=2, extra=b""):
+        return {self.IMPL: b"MZ" + (ROUND_ROBIN + b"\x00") * n + extra}
+
+    def test_round_robin_in_llama_server_impl_passes_and_is_logged(self):
+        ok, out = self.gate(self.impl(2))
+        self.assertTrue(ok, out)
+        self.assertIn("INFO", out)
+        self.assertIn(self.IMPL, out)
+        self.assertIn("round-robin", out)
+        self.assertIn("x2", out)
+
+    def test_the_same_word_in_another_file_refuses(self):
+        self.assertTrue(self.gate(self.impl(2))[0])  # control: the allowed shape
+        ok, out = self.gate({"bin\\llama-server.exe": b"MZ" + ROUND_ROBIN})
+        self.assertFalse(ok, out)
+        self.assertIn("bin\\llama-server.exe", out)
+        self.assertIn("REFUSING TO PACK", out)
+
+    def test_a_third_occurrence_beyond_the_maximum_refuses(self):
+        self.assertTrue(self.gate(self.impl(2))[0])
+        ok, out = self.gate(self.impl(3))
+        self.assertFalse(ok, out)
+        self.assertIn("maximum", out)
+
+    def test_a_bare_name_outside_any_allowed_context_refuses(self):
+        self.assertTrue(self.gate(self.impl(1))[0])
+        ok, out = self.gate(self.impl(1, b" Write a report for Robin about the run"))
+        self.assertFalse(ok, out)
+        self.assertIn(self.IMPL, out)
+
+    def test_the_allowed_word_as_utf16le_is_not_allowed(self):
+        self.assertTrue(self.gate(self.impl(2))[0])
+        ok, out = self.gate({self.IMPL: b"MZ" + ROUND_ROBIN.decode().encode("utf-16le")})
+        self.assertFalse(ok, out)
+
+    def test_a_profile_path_in_an_allowed_file_refuses(self):
+        self.assertTrue(self.gate(self.impl(2))[0])
+        for path in (b"C:\\Users\\robin\\dev\\llama.cpp\\x.cpp", b"/home/robin/src", b"\\Users\\robin\\"):
+            ok, out = self.gate(self.impl(2, b" " + path))
+            self.assertFalse(ok, (path, out))
+            self.assertIn("REFUSING TO PACK", out)
+
+    def test_the_host_name_is_not_allowlisted(self):
+        self.assertTrue(self.gate(self.impl(2))[0])
+        ok, out = self.gate(self.impl(2, b" " + FAKE_HOST.encode()))
+        self.assertFalse(ok, out)
+
+    def test_tokenizer_vocabulary_passes_in_the_sd_binaries_only(self):
+        blob = b"MZ" + b"".join(VOCAB)
+        for name in ("bin\\sd-cli.exe", "bin\\sd-server.exe"):
+            ok, out = self.gate({name: blob})
+            self.assertTrue(ok, (name, out))
+            self.assertIn("INFO", out)
+        ok, out = self.gate({"bin\\llama.dll": blob})
+        self.assertFalse(ok, out)
+
+    def test_tokenizer_vocabulary_has_a_maximum_and_a_shape(self):
+        line = b"\n\xe2\x96\x81 Robinson\n"
+        self.assertTrue(self.gate({"bin\\sd-cli.exe": line * 29})[0])
+        ok, out = self.gate({"bin\\sd-cli.exe": line * 30})
+        self.assertFalse(ok, out)
+        ok, out = self.gate({"bin\\sd-cli.exe": line + b"Write a report for Robin about the run"})
+        self.assertFalse(ok, out)
+
+    def test_the_allowlist_is_about_the_owner_robin_only(self):
+        # control: for the owner robin the shape passes; for a machine whose user is someone
+        # else it is not a word the allowlist was written for (round-robin contains "round")
+        self.assertTrue(self.gate(self.impl(2))[0])
+        ok, out = self.gate(self.impl(2), user="round", profile="C:\\Users\\round")
+        self.assertFalse(ok, out)
+
+    def test_a_pack_with_the_allowed_words_in_bin_packs(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(os.path.join(d, "repo"))
+            prev = os.path.join(d, "prev.zip")
+            rr.write_package(prev, {"bin\\llama-server-impl.dll": b"MZ" + ROUND_ROBIN * 2,
+                                    "bin\\sd-cli.exe": b"MZ" + b"".join(VOCAB)})
+            pats, notes = rr.private_patterns(profile=self.OWNER, user="robin", host=FAKE_HOST)
+            with mock.patch.object(rr, "private_patterns", return_value=(pats, notes)):
+                code, out = run_main(["--previous", prev, "--repo", repo, "--out", os.path.join(d, "out"),
+                                      "--version", "9.9.9"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("INFO", out)
 
 
 class EndToEndTest(unittest.TestCase):
