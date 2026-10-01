@@ -365,12 +365,11 @@ def stage_from_checkout(repo: str = REPO) -> dict[str, bytes]:
     json.loads(data.decode("utf-8-sig"))  # must survive as readable JSON
     files["manifests\\stack.json"] = data
     # #196 P2: CrowSetup's convert step runs <install>\tools\te_rename.py to build
-    # the Image Stack's text_encoder_sdcli\. pack-release.ps1 refuses a checkout
-    # without it; here a checkout without it ships without it, because the
-    # synthetic checkouts of tools/test_repack_release.py predate the file.
+    # the Image Stack's text_encoder_sdcli\. Required, as in pack-release.ps1.
     te = os.path.join(repo, "tools", "te_rename.py")
-    if os.path.isfile(te):
-        files["tools\\te_rename.py"] = read_bytes(te)
+    if not os.path.isfile(te):
+        raise SystemExit("tools/te_rename.py missing -- CrowSetup's Image Stack step needs it")
+    files["tools\\te_rename.py"] = read_bytes(te)
     if "cli\\fonts\\OFL.txt" not in files:
         raise SystemExit("cli/fonts/OFL.txt missing -- the typeface may not ship without it")
     # The voxel kit (#298) ships in every package, beside cli\ -- pack-release.ps1 does the same.

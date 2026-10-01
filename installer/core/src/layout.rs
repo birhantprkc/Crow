@@ -33,7 +33,6 @@
 //! inside; the version in the summary comes from the zip's name and "up to date"
 //! means every engine file on disk already matches.
 
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -152,23 +151,14 @@ pub fn engine_version_from_name(zip: &Path) -> Option<String> {
 }
 
 fn sha256_reader(mut r: impl Read) -> io::Result<(u64, String)> {
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut n = 0u64;
-    loop {
-        let k = r.read(&mut buf)?;
-        if k == 0 {
-            break;
-        }
-        h.update(&buf[..k]);
-        n += k as u64;
-    }
-    Ok((n, hex::encode(h.finalize())))
+    let mut h = crate::verify::Sha256Stream::new();
+    let n = h.update_reader(&mut r)?;
+    Ok((n, h.finish()))
 }
 
 /// Lower-case hex sha256 of a whole file (streamed).
 pub fn sha256_file_hex(path: &Path) -> io::Result<String> {
-    Ok(sha256_reader(fs::File::open(path)?)?.1)
+    crate::verify::sha256_file(path)
 }
 
 /// A relative path from a zip entry or a manifest, `\` or `/`, refused when it

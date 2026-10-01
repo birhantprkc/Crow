@@ -166,13 +166,19 @@ pub fn nearest_existing(path: &Path) -> Option<PathBuf> {
     path.ancestors().find(|p| !p.as_os_str().is_empty() && p.exists()).map(Path::to_path_buf)
 }
 
+/// Free bytes on the volume of `install_root` (its nearest existing ancestor),
+/// without the rest of the probe: run.rs checks space before every large file.
+pub fn disk_free(install_root: &Path) -> u64 {
+    nearest_existing(install_root).map(|p| sys::disk_free(&p)).unwrap_or(0)
+}
+
 /// Reads this machine. Never fails: what cannot be read is None / 0 / false.
 pub fn probe(install_root: &Path) -> Facts {
     Facts {
         os_64bit: sys::os_64bit(),
         gpus: nvidia_smi().map(|o| parse_nvidia_smi(&o)).unwrap_or_default(),
         ram_bytes: sys::ram_total(),
-        disk_free_bytes: nearest_existing(install_root).map(|p| sys::disk_free(&p)).unwrap_or(0),
+        disk_free_bytes: disk_free(install_root),
         webview2: sys::webview2(),
     }
 }

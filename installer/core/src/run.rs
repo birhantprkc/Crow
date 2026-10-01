@@ -665,7 +665,7 @@ impl Steps for RealSteps {
         job.dest.is_file()
     }
     fn disk_free(&mut self, dir: &Path) -> u64 {
-        crate::preflight::probe(dir).disk_free_bytes
+        crate::preflight::disk_free(dir)
     }
     fn download(
         &mut self,
@@ -814,7 +814,7 @@ pub mod testing {
     }
 
     pub fn python() -> PythonInfo {
-        PythonInfo { exe: PathBuf::from("python.exe"), version: "3.13.7".into(), bundled: false }
+        PythonInfo { exe: PathBuf::from("python.exe"), version: "3.13.7".into(), bundled: false, warnings: vec![] }
     }
 
     impl FakeSteps {

@@ -46,6 +46,7 @@ def make_repo(root):
     put(root, "manifests/0731-chat-template.jinja", b"{{ x }}")
     put(root, "manifests/operating-point.json", b"{}")
     put(root, "manifests/stack.json", b"{}")
+    put(root, "tools/te_rename.py", b"# te_rename\n")
     put(root, "manifests/shared-core.json", b"{}")
     put(root, "kits/pathtracer/crow-pathtracer.js", bundle)
     put(root, "kits/pathtracer/kit.json", kit.encode())
@@ -406,6 +407,14 @@ class TheTextEncoderConverterShipsTest(unittest.TestCase):
             files = {"tools\\te_rename.py": fh.read()}
         pats, _ = rr.private_patterns(profile=FAKE_PROFILE, user="fakebuilder", host=FAKE_HOST)
         self.assertEqual(rr.scan_private(files, pats + ["\\Users\\", "/Users/", "/home/"]), [])
+
+    def test_a_checkout_without_it_is_refused(self):
+        # pack-release.ps1 refuses too; a package without it breaks the Image Stack step
+        with tempfile.TemporaryDirectory() as d:
+            make_repo(d)
+            os.remove(os.path.join(d, "tools", "te_rename.py"))
+            with self.assertRaises(SystemExit):
+                rr.stage_from_checkout(d)
 
     def test_pack_release_ps1_stages_it_in_the_packing_path(self):
         with open(PS1, encoding="utf-8") as fh:
