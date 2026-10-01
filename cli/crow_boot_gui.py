@@ -26,6 +26,9 @@ THE DECISIONS, and why each is this way:
 * CLOSING WHILE A POINT STARTS hides the window and lets the start finish, so
   the contract file is still written: the bar says "You can close this window.
   The model keeps loading.", and that has to stay true.
+* THE CROW ON THE TASKBAR: crow_gui's own icon code (`shell_buttons`, which
+  hangs cli/crow.ico on the window; `icon_png` on Linux), under this window's
+  own AppUserModelID, APP_ID, so it is not stacked with the chat window.
 * THE PAGE GETS THE CROW INLINED (a data: URI): pywebview hands HTML to
   WebView2 and WebKitGTK without a base folder, so a relative file would not load.
 
@@ -70,19 +73,20 @@ OPENED_S = 5.0
 
 IDLE, STARTING, LANDED, REFUSED, STOPPING = "idle", "starting", "landed", "refused", "stopping"
 
+# THE TASKBAR IDENTITY. Without one a pythonw.exe window is Python's button
+# with Python's icon (crow_gui.taskbar_identity says why). Its own id and not
+# crow_gui's "Crow.Window": the chat window and this one are two windows the
+# user switches between, and one id would stack them under one button.
+APP_ID = "Crow.OperatingPoints"
+TITLE = "Crow"
+DRESS_S = 5.0
 
-def calm_line(line: str) -> str:
-    """A stack.json menu line in the window's wording.
 
-    The menu's line is terminal copy ("128k context, a dash, great speed, awesome for
-    coding & vision"); the window says it in sentences, without dashes, "&" or
-    "awesome": "128k context. Great speed, coding and vision."
-    """
-    text = re.sub(r"(?i)\bawesome\s+(for\s+)?", "", line or "")
-    text = text.replace(" & ", " and ").replace(" + ", " with ")
-    parts = [p.strip() for p in re.split(r"\s+[\u2014\u2013]\s+|\s+--\s+", text) if p.strip()]
-    parts = [p[0].upper() + p[1:] for p in parts]
-    return " ".join(p if p.endswith(".") else p + "." for p in parts)
+def gui_line(menu: dict) -> str:
+    """A point's line in this window: stack.json's `menu.gui` (the approved
+    window text, held by tools/check_stack.py), `menu.line` only without one.
+    The terminal menu keeps `menu.line`."""
+    return menu.get("gui") or menu.get("line") or ""
 
 
 def short_title(title: str) -> str:
@@ -131,7 +135,7 @@ class Controller:
         for p in self.boot.stack["points"]:
             menu = p.get("menu") or {}
             out.append({"id": p.get("id"), "title": menu.get("title") or p.get("id"),
-                        "detail": calm_line(menu.get("line") or ""), "optional": False})
+                        "detail": gui_line(menu), "optional": False})
         for line in self.boot.optional_lines():
             out.append({"id": line["key"], "title": "%s (optional)" % line["title"],
                         "detail": "llama.cpp, port %d" % line["port"], "optional": True,
@@ -445,22 +449,66 @@ def _log_failure(boot) -> None:
         pass
 
 
+def taskbar_identity(shell32=None) -> bool:
+    """APP_ID for this process, before the window exists (the shell reads it
+    when it registers the button). Windows only; a test hands in `shell32`."""
+    if shell32 is None:
+        if not crow_platform.IS_WINDOWS:
+            return False
+        try:
+            import ctypes
+            shell32 = ctypes.windll.shell32
+        except Exception:                     # noqa: BLE001 - cosmetic, never fatal
+            return False
+    try:
+        shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+        return True
+    except Exception:                         # noqa: BLE001
+        return False
+
+
+def start_kwargs(gui) -> dict:
+    """What `webview.start` gets. Linux: GTK and the crow PNG (crow_gui.icon_png;
+    pywebview's `icon=` is GTK/Qt only). Windows: nothing, the icon goes on the
+    window itself (`dress_window`)."""
+    if crow_platform.IS_WINDOWS:
+        return {}
+    return {"gui": "gtk", "icon": gui.icon_png(256) or None}
+
+
+def dress_window(gui, sleep=time.sleep, clock=time.monotonic) -> bool:
+    """crow_gui.shell_buttons on this window: crow.ico on the caption and the
+    taskbar, and the minimise style a frameless window lacks. Retried, because
+    at first the window has no caption to be found by (crow_gui does the same)."""
+    if not crow_platform.IS_WINDOWS:
+        return False
+    deadline = clock() + DRESS_S
+    while clock() < deadline:
+        if gui.shell_buttons(TITLE):
+            return True
+        sleep(0.2)
+    return False
+
+
 def open_window(boot: "crow_boot.Boot") -> int:
-    """`crow_boot.py --gui`: the window over this Boot, until it is closed."""
+    """`crow_boot.py --gui`: the window over this Boot, until it is closed.
+
+    The crow on the taskbar and the caption is crow_gui's own code (icon files,
+    `shell_buttons`), imported here and not copied; only the id is this window's.
+    """
     try:
         import webview
+        import crow_gui
         ctl = Controller(boot)
         ctl.refresh()
         api = Api(ctl)
+        taskbar_identity()
         window = webview.create_window(
-            "Crow", html=page(), js_api=api, width=620, height=660, min_size=(520, 560),
+            TITLE, html=page(), js_api=api, width=620, height=660, min_size=(520, 560),
             frameless=True, easy_drag=False, background_color="#181818")
         api._window = window
         _thread(api._watch)
-        if crow_platform.IS_WINDOWS:
-            webview.start()
-        else:
-            webview.start(gui="gtk")
+        webview.start(dress_window, (crow_gui,), **start_kwargs(crow_gui))
     except Exception:                         # noqa: BLE001 - said in the log
         _log_failure(boot)
         return crow_boot.EXIT_FAILED

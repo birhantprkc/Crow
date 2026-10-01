@@ -14,6 +14,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -40,17 +41,20 @@ class GuiCase(BootCase):
         crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1", {"serve": 5151, "image": None})
 
 
-class TheWindowSaysTheStackLinesCalmlyTests(unittest.TestCase):
-    def test_the_three_menu_lines_read_as_the_approved_mockup(self):
-        lines = {p["id"]: crow_boot_gui.calm_line(p["menu"]["line"]) for p in STACK["points"]}
-        self.assertEqual(lines, {
-            "flash-next": "200k context. Great for coding and vision.",
-            "27b": "128k context. Great speed, coding and vision.",
-            "image-stack": "27B with Qwen-Image 2.1. Create pictures.",
-        })
-        for text in lines.values():
-            self.assertNotIn("\u2014", text)
-            self.assertNotIn("&", text)
+class TheWindowShowsTheStacksGuiLineTests(GuiCase):
+    def test_the_rows_carry_menu_gui_and_the_terminal_keeps_menu_line(self):
+        ctl = self.controller()
+        ctl.refresh()
+        shown = {r["id"]: r["detail"] for r in ctl.view()["rows"]}
+        self.assertEqual(shown, {p["id"]: p["menu"]["gui"] for p in STACK["points"]})
+        self.assertEqual(shown["27b"], "128k context. Great speed, coding and vision.")
+        menu = {r[2]: r[3] for r in ctl.boot.entries()}
+        self.assertEqual(menu["Qwen3.8-27B"], next(p["menu"]["line"] for p in STACK["points"]
+                                                   if p["id"] == "27b"))
+
+    def test_without_a_gui_line_the_menu_line_is_shown(self):
+        self.assertEqual(crow_boot_gui.gui_line({"line": "plain"}), "plain")
+        self.assertEqual(crow_boot_gui.gui_line({"line": "plain", "gui": "Window."}), "Window.")
 
     def test_the_refusal_names_a_point_without_its_family(self):
         self.assertEqual(crow_boot_gui.short_title("Qwen3.8-Flash-Next"), "Flash-Next")
@@ -254,6 +258,45 @@ class ThePageTests(unittest.TestCase):
         for text in (raw, src):
             # ASCII only: no emoji, no em or en dash, in the page or its wording
             self.assertEqual([c for c in text if ord(c) > 127], [])
+
+
+class FakeShell32:
+    def __init__(self):
+        self.ids = []
+
+    def SetCurrentProcessExplicitAppUserModelID(self, app_id):  # noqa: N802 - the Win32 name
+        self.ids.append(app_id)
+
+
+class TheCrowOnTheTaskbarTests(unittest.TestCase):
+    def test_the_window_has_its_own_id_not_the_chat_windows(self):
+        shell = FakeShell32()
+        self.assertTrue(crow_boot_gui.taskbar_identity(shell32=shell))
+        self.assertEqual(shell.ids, ["Crow.OperatingPoints"])
+        with open(os.path.join(str(HERE), "crow_gui.py"), encoding="utf-8") as fh:
+            self.assertIn('AppUserModelID("Crow.Window")', fh.read(),
+                          "the chat window's id, which this one must not share")
+
+    def test_the_icon_is_crow_guis(self):
+        import crow_gui
+        with mock.patch.object(crow_boot_gui.crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(crow_boot_gui.start_kwargs(crow_gui),
+                             {"gui": "gtk", "icon": crow_gui.icon_png(256) or None})
+            self.assertTrue(crow_gui.icon_png(256).endswith(os.path.join("icons", "crow-256.png")))
+            self.assertFalse(crow_boot_gui.dress_window(crow_gui))
+        with mock.patch.object(crow_boot_gui.crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(crow_boot_gui.start_kwargs(crow_gui), {})
+        self.assertTrue(os.path.isfile(crow_gui.ICON_FILE))
+
+    def test_dress_window_asks_shell_buttons_until_the_window_has_a_caption(self):
+        answers = iter([False, False, True])
+        asked = []
+        gui = mock.Mock(shell_buttons=lambda title: asked.append(title) or next(answers))
+        clock = iter(x * 0.2 for x in range(100))
+        with mock.patch.object(crow_boot_gui.crow_platform, "IS_WINDOWS", True):
+            done = crow_boot_gui.dress_window(gui, sleep=lambda s: None, clock=lambda: next(clock))
+        self.assertTrue(done)
+        self.assertEqual(asked, ["Crow", "Crow", "Crow"])
 
 
 class FakeWindow:

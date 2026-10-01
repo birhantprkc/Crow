@@ -10,7 +10,7 @@ Starts one operating point, then Crow. The three crow-nest points are the baseli
 python cli\crow_boot.py --gui
 ```
 
-Header **CROW · Operating points**. The shortcut runs it with `pythonw.exe`, so no console opens.
+Header **CROW · Operating points**. The shortcut runs it with `pythonw.exe`, so no console opens. On Windows it has its own taskbar button with the crow (AppUserModelID `Crow.OperatingPoints`), apart from Crow's chat window. Each point's line is `menu.gui` from `manifests/stack.json`; the terminal menu shows `menu.line`.
 
 | State | What it shows |
 |---|---|
