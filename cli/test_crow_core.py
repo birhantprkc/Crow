@@ -119,22 +119,6 @@ crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
 # #262: Crow's own log file, never the real one under the state dir.
 crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 
-# THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102). `crow_core._TTY` is decided
-# ONCE, at import, out of `sys.stdout.isatty()`, and the colour constants are
-# materialised from it on the spot -- so this file answered differently in a
-# console than through a pipe, with no line of code between the two runs. One
-# case here compared a bare string against an escape sequence and was red on
-# robin's machine while green in every automated run.
-#
-# DERIVED, NEVER LISTED: every module-level string beginning with ESC. A
-# hard-coded palette in a test is a copy of the product that goes stale silently.
-#
-# The positive direction -- a terminal still gets its colour -- is asked by
-# `ThePaletteFollowsTheTerminalTests` below, which cannot use this fixture: it
-# needs an import that has not happened yet.
-_PINNED: dict = {}
-
-
 # #297: NO CASE LENDS A REAL SERVE'S VRAM. render_page asks this turn's
 # local endpoint for a loan below the VRAM bound, and a turn case leaves
 # `_TURN_SPOT` pointing at 127.0.0.1:<port> -- on robin's machine a live
@@ -145,25 +129,10 @@ _REAL_LEND_ROOT = crow_core._render_lend_root
 
 def setUpModule() -> None:
     crow_core._render_lend_root = lambda: None
-    for module in (crow_core,):
-        for name, value in list(vars(module).items()):
-            if isinstance(value, str) and value.startswith("\033"):
-                _PINNED[(module.__name__, name)] = value
-                setattr(module, name, "")
-        # AND THE FLAG WITH IT. An emptied palette beside a `_TTY` that still
-        # says "terminal" is a state the product can never be in, and a case
-        # that branches on the flag would then assert against the emptiness
-        # this fixture created.
-        if hasattr(module, "_TTY"):
-            _PINNED[(module.__name__, "_TTY")] = module._TTY
-            module._TTY = False
 
 
 def tearDownModule() -> None:
     crow_core._render_lend_root = _REAL_LEND_ROOT
-    for (module_name, name), value in _PINNED.items():
-        setattr(sys.modules[module_name], name, value)
-    _PINNED.clear()
 
 
 def _source(name: str) -> str:
@@ -171,71 +140,20 @@ def _source(name: str) -> str:
         return fh.read()
 
 
-class ThePaletteFollowsTheTerminalTests(unittest.TestCase):
-    """#102's other half: the repair must not be "switch the colour off".
+class TheCoreCarriesNoColourTests(unittest.TestCase):
+    """#187: the terminal client is gone, and with it the ANSI palette.
 
-    The nine cases that ticket repaired are pinned to the COLOURLESS palette, so
-    a change that disabled colour everywhere would leave every one of them green
-    -- and take the product's colour with it, invisibly. Two checkers reporting
-    the same thing for opposite reasons is the shape this project has already
-    been bitten by; this is the case that goes red for exactly that.
-
-    IT IMPORTS THE CORE AGAIN rather than patching the shared one. `_TTY` is read
-    at import and never again, so the only honest way to ask "what does this
-    module look like on a terminal" is to give it a terminal and import it. The
-    two module objects below are private to this case -- neither is the one the
-    rest of the suite holds, and neither outlives it.
+    The core used to materialise DIM/BOLD/RESET and seven colours out of
+    `sys.stdout.isatty()` for the terminal to print (#102 pinned them for this
+    suite). The window renders HTML; an SGR sequence in a string the core hands
+    it would arrive as literal garbage. So the source carries none -- the one
+    escape left is `_SD_SPLIT`'s erase-line, which the core strips OUT of
+    sd-server's log rather than writes.
     """
 
-    @staticmethod
-    def _imported_with_tty(is_tty: bool):
-        class _Stdout:
-            def __init__(self, real) -> None:
-                self._real = real
-
-            def __getattr__(self, name):
-                return getattr(self._real, name)
-
-            def isatty(self) -> bool:
-                return is_tty
-
-        spec = importlib.util.spec_from_file_location(
-            "crow_core_tty_%s" % is_tty, crow_core.__file__)
-        module = importlib.util.module_from_spec(spec)
-        real = sys.stdout
-        sys.stdout = _Stdout(real)
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            sys.stdout = real
-        return module
-
-    def test_a_terminal_gets_the_palette_and_a_pipe_gets_none(self):
-        """POSITIVE and NEGATIVE in one run, which is what makes it worth having.
-
-        The floor catches "colour switched off globally" -- the repair that
-        passes every other case in this suite and quietly ships a grey client.
-        The loop catches the opposite: escape sequences leaking into a redirected
-        transcript, which is the thing `crow_core.py:310` exists to prevent and
-        the reason the gate is there at all.
-        """
-        on = self._imported_with_tty(True)
-        off = self._imported_with_tty(False)
-
-        coloured = sorted(name for name, value in vars(on).items()
-                          if isinstance(value, str) and value.startswith("\033"))
-        self.assertGreaterEqual(
-            len(coloured), 10,
-            "a terminal got %d escape sequences: the colour was switched off "
-            "globally, and every case pinned to the colourless palette stayed "
-            "green while it happened" % len(coloured))
-        self.assertTrue(on._TTY)
-        self.assertFalse(off._TTY)
-        for name in coloured:
-            self.assertEqual(
-                getattr(off, name), "",
-                "%s carries an escape sequence through a pipe -- a redirected "
-                "transcript is no longer greppable" % name)
+    def test_the_core_source_writes_no_sgr_sequence(self):
+        sgr = re.findall(r"\\(?:033|x1b|u001b)\[[0-9;]*m", _source("crow_core.py"))
+        self.assertEqual(sgr, [], "an ANSI colour sequence is back in crow_core.py")
 
 
 class TheVersionLivesInTheCoreTests(unittest.TestCase):
@@ -295,8 +213,8 @@ class TheCoreStandsAloneTests(unittest.TestCase):
 
     def test_nothing_in_the_core_writes_to_the_terminal(self):
         """The rule the whole stage is cut along: only blocks with 0 terminal
-        lines moved. The one exception sits behind install_font(verbose=True),
-        which nothing in this repository passes.
+        lines moved. The one exception that sat behind install_font(verbose=True)
+        went with #187, so the count is zero now.
 
         stderr IS COUNTED THE SAME WAY (#193). `print()` was never the only way
         out of this module, and the notice that names a secret still sitting in
@@ -305,11 +223,8 @@ class TheCoreStandsAloneTests(unittest.TestCase):
         lines = _source("crow_core.py").splitlines()
         printing = [n for n, line in enumerate(lines, 1)
                     if re.search(r"\bprint\(", line) and not line.lstrip().startswith("#")]
-        self.assertEqual(len(printing), 1,
+        self.assertEqual(printing, [],
                          f"unexpected print() in crow_core.py at lines {printing}")
-        for n in printing:
-            self.assertIn("verbose", "\n".join(lines[max(0, n - 3):n]),
-                          f"the print at line {n} is not behind `verbose`")
         owner = "<module>"
         writing = []
         for n, line in enumerate(lines, 1):
@@ -12439,7 +12354,6 @@ class TheStickyRoutingTests(unittest.TestCase):
         return seen
 
 
-
 class TheLocalOnlyFieldsStayHomeTests(unittest.TestCase):
     """llama.cpp's own fields do not travel, and neither does a sampler almost
     nobody out there implements.
@@ -12554,7 +12468,6 @@ class TheLocalOnlyFieldsStayHomeTests(unittest.TestCase):
         # Chat waeren zwei Prompt-Stile.
         self.assertEqual(sent["reasoning_effort"], "high")
         self.assertNotIn("chat_template_kwargs", sent)
-
 
 
 class TheParameterFilterTests(unittest.TestCase):
@@ -12714,7 +12627,6 @@ class TheParameterFilterTests(unittest.TestCase):
         self.assertEqual(by_id["a/quiet"]["params"], [])
 
 
-
 class TheMarkdownIsCutInTheCoreTests(unittest.TestCase):
     """WHERE A BOLD RUN BEGINS IS A DECISION, and every decision in this client
     belongs to the core -- the same sentence `CodeFences` already carries. The
@@ -12833,7 +12745,6 @@ class TheMarkdownIsCutInTheCoreTests(unittest.TestCase):
         self.assertEqual(crow_core.markdown_blocks("   \n\n  "), [])
 
 
-
 class TheUnderscoreIsNotEmphasisInsideAWordTests(unittest.TestCase):
     """#229. A URL or a snake_case word is not cut by emphasis.
 
@@ -12874,9 +12785,9 @@ class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
     and prints the line to run. A window cannot print a line to run -- the
     person is not at a prompt -- so it has to be able to DO it.
 
-    THE PIECES ARE THE ONES THAT ARE ALREADY THERE. `fetch_latest_version`,
-    `is_newer` and `UPDATE_COMMAND` were written for the CLI and are not copied
-    here; what is new is the part a button needs and a printed line does not.
+    THE PIECES ARE THE ONES THAT ARE ALREADY THERE. `fetch_latest_version`
+    and `is_newer` are not copied here; what is new is the part a button needs
+    and a printed line does not.
     """
 
     def test_the_installer_is_run_as_a_file_and_told_not_to_wait(self):
@@ -12926,7 +12837,7 @@ class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
         self.assertTrue(state["newer"])
 
     def test_a_check_that_could_not_run_offers_nothing(self):
-        """NEGATIVE, and it is the same rule `update_notice` already follows: no
+        """NEGATIVE: no
         network, a rate limit or a shape nobody recognises is None, and None
         must never become a button that promises a version."""
         real = crow_core.fetch_latest_version
@@ -12949,13 +12860,12 @@ class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
 
     def test_the_script_comes_off_the_repository_and_lands_in_a_file(self):
         """The same URL install.ps1 prints when it needs to be re-run with a
-        switch, and the same one `UPDATE_COMMAND` pipes into iex. ONE INSTALLER
+        switch. ONE INSTALLER
         PER PLATFORM and one contract: install.ps1 on Windows, install.sh on
         Linux, and the printed line is the same line in the other shell."""
         self.assertIn(crow_core.REPO, crow_core.INSTALL_SCRIPT_URL)
         self.assertTrue(crow_core.INSTALL_SCRIPT_URL.endswith(
             "install.ps1" if sys.platform == "win32" else "install.sh"))
-        self.assertIn(crow_core.INSTALL_SCRIPT_URL, crow_core.UPDATE_COMMAND)
 
         class _Resp:
             def read(self_inner):
@@ -21312,12 +21222,6 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
             self.assertEqual(store, os.path.join(
                 os.path.expanduser("~"), ".local", "share", "fonts", "crow"))
 
-    def test_the_font_install_is_a_no_op_without_a_bundle(self):
-        """NEGATIVKONTROLLE: keine Dateien, kein Erfolg -- und nichts wird
-        angelegt. Ohne sie wuerde `ensure_font` 'installiert' ueber ein leeres
-        Verzeichnis melden."""
-        self.assertEqual(crow_platform.install_fonts(self.dir, []), 2)
-
     def test_the_updater_is_data_and_never_a_call(self):
         """Ein Fenster muss den Befehl ZEIGEN koennen, bevor es ihn ausfuehrt --
         deshalb ist das hier eine Liste und kein Start."""
@@ -21645,11 +21549,6 @@ class ThePresencePenaltyIsTheModelsTests(unittest.TestCase):
         self.assertIn("presence_penalty", sent)
         self.assertEqual(sent["presence_penalty"], 0.0)
 
-    def test_a_typed_override_wins_over_the_entry(self):
-        """The same door every sampling field has."""
-        got = crow_core.resolve_sampling(self.CNQ, {"presence_penalty": 1.5})
-        self.assertEqual(got["presence_penalty"], 1.5)
-
     def test_it_stays_home(self):
         """NEGATIVE. It is a manifest value for a local engine; away from home it
         is one more parameter a strict broker finds no upstream for, and the
@@ -21847,22 +21746,16 @@ class TheCnqReasoningLadderTests(unittest.TestCase):
                          ("none", "low", "medium", "high"))
         self.assertEqual(crow_core.reasoning_levels_for(self.CNQ),
                          crow_core.reasoning_levels_for(self.GGUF))
-        # every one of them is a word the engine accepts -- and since
-        # #225 the point is FIXED at high, so a typed level other
-        # than that one is refused with the reason, not with "unknown".
-        for level in crow_core.reasoning_levels_for(self.CNQ):
-            problem = crow_core.reasoning_problem(self.CNQ, level)
-            if level == crow_core.reasoning_fixed_for(self.CNQ):
-                self.assertIsNone(problem)
-            else:
-                self.assertIn("fixed at high", problem)
+        # #225: the point is FIXED at high, and that is one of the ladder's words.
+        self.assertIn(crow_core.reasoning_fixed_for(self.CNQ),
+                      crow_core.reasoning_levels_for(self.CNQ))
 
     def test_a_word_the_engine_answers_with_a_400_is_refused_here_first(self):
         """NEGATIVE, and the reason the list is measured rather than guessed:
         crow-nest refuses these with an HTTP 400 that names the five words, so a
         menu offering them would kill the turn to say so."""
         for level in ("max", "minimal", "off", "High", ""):
-            self.assertIsNotNone(crow_core.reasoning_problem(self.CNQ, level))
+            self.assertNotIn(level, crow_core.reasoning_levels_for(self.CNQ))
 
     def test_off_is_none_on_this_engine_and_high_on_the_other(self):
         """The measurement this entry exists for. crow-nest renders
@@ -23842,7 +23735,6 @@ const d0 = Date.now(), p0 = performance.now(), r = [Math.random(), Math.random()
         self.assertNotEqual(a["r"][0], a["r"][1])
 
 
-
 class TheImageModelIsFoundBesideTheLinkedTreeTests(unittest.TestCase):
     """install.sh links <install>/models to ONE model's tree; Qwen-Image lies
     beside that tree (robin's machine, 2026-09-27). Without the variable the
@@ -24441,16 +24333,6 @@ class FontTests(unittest.TestCase):
         finally:
             crow_core.FONT_DIR = old
 
-    def test_install_reports_failure_without_a_bundle(self):
-        """Negative control: no faces means no success. A zero here would report
-        'installed' over an empty directory."""
-        old = crow_core.FONT_DIR
-        try:
-            crow_core.FONT_DIR = str(Path(old) / "does-not-exist")
-            self.assertNotEqual(crow_core.install_font(), 0)
-        finally:
-            crow_core.FONT_DIR = old
-
     def test_face_name_is_the_instance_not_the_family(self):
         """The defect that shipped: "Google Sans Code" is the typographic family
         in the file, but the variable font resolves into named instances and
@@ -24461,12 +24343,12 @@ class FontTests(unittest.TestCase):
 
 class BrandColourTests(unittest.TestCase):
     def test_brand_colours_are_the_measured_values(self):
-        """The blue of the wordmark and a white reply. Truecolour, so the user's
-        theme cannot reinterpret them."""
+        """The background, the blue of the wordmark, a white reply and the
+        wordmark's shaded edge, as the window spells them."""
         self.assertEqual(crow_core.CROW_BG, "#0b0e17")
-        if crow_core._TTY:
-            self.assertIn("126;176;248", crow_core.CROW_ACCENT)
-            self.assertIn("255;255;255", crow_core.CROW_TEXT)
+        self.assertEqual(crow_core.CROW_ACCENT_HEX, "#7eb0f8")
+        self.assertEqual(crow_core.CROW_TEXT_HEX, "#ffffff")
+        self.assertEqual(crow_core.BANNER_BEVEL_HEX, "#2c5bac")
 
 
 class VersionCompareTests(unittest.TestCase):
@@ -24516,41 +24398,6 @@ class VersionCompareTests(unittest.TestCase):
         """(0,0,0) would sort below every release and announce an update always."""
         self.assertIsNone(crow_core.parse_version("not-a-version"))
         self.assertEqual(crow_core.parse_version("1.2.3"), (1, 2, 3))
-
-
-class UpdateNoticeTests(unittest.TestCase):
-    """What the user actually sees, including when they must see nothing."""
-
-    @staticmethod
-    def _answered(value):
-        import queue
-        q = queue.Queue(maxsize=1)
-        q.put(value)
-        return q
-
-    def test_a_newer_release_names_the_command(self):
-        line = crow_core.update_notice(self._answered("9.9.9"), wait=0.01)
-        self.assertIsNotNone(line)
-        self.assertIn("9.9.9", line)
-        self.assertIn(crow_core.UPDATE_COMMAND, line)
-
-    def test_the_current_version_says_nothing(self):
-        self.assertIsNone(crow_core.update_notice(self._answered(crow_core.VERSION), wait=0.01))
-
-    def test_a_failed_lookup_says_nothing(self):
-        """fetch_latest_version returns None on every error; None is not a notice."""
-        self.assertIsNone(crow_core.update_notice(self._answered(None), wait=0.01))
-
-    def test_a_disabled_check_says_nothing(self):
-        self.assertIsNone(crow_core.update_notice(None, wait=0.01))
-
-    def test_a_slow_answer_does_not_hold_the_start(self):
-        """An empty queue must time out and yield, not block on the network."""
-        import queue
-        import time
-        started = time.monotonic()
-        self.assertIsNone(crow_core.update_notice(queue.Queue(maxsize=1), wait=0.05))
-        self.assertLess(time.monotonic() - started, 1.0)
 
 
 class ToolArgLineTests(unittest.TestCase):
@@ -24763,7 +24610,6 @@ class CommandSurfaceTests(unittest.TestCase):
     def test_the_repository_is_spelled_once(self):
         """A rename has to move one literal, not three."""
         self.assertIn(crow_core.REPO, crow_core.REPO_URL)
-        self.assertIn(crow_core.REPO, crow_core.UPDATE_COMMAND)
         self.assertIn(crow_core.REPO, crow_core.RELEASES_API)
 
     def test_the_repo_url_is_a_github_page_not_an_api_endpoint(self):
@@ -25378,22 +25224,6 @@ class WarmCacheClaimTests(unittest.TestCase):
         self._write(kv_tokens=0)
         crow_core.post_json = lambda *a, **k: {"n_restored": 21004}
         self.assertTrue(crow_core.load_session("http://x/v1")[2])
-
-
-class ResumePathTests(unittest.TestCase):
-    """--resume takes a bare name or a path, and must not confuse the two."""
-
-    def test_a_bare_name_is_looked_for_among_the_archives(self):
-        self.assertEqual(crow_core.resume_path("rollover-1.json"),
-                         os.path.join(crow_core.SESSION_DIR, "rollover-1.json"))
-
-    def test_a_path_with_a_separator_is_left_alone(self):
-        self.assertEqual(crow_core.resume_path(os.path.join("sub", "s.json")),
-                         os.path.join("sub", "s.json"))
-
-    def test_an_absolute_path_is_left_alone(self):
-        absolute = os.path.abspath(os.path.join("tmp", "s.json"))
-        self.assertEqual(crow_core.resume_path(absolute), absolute)
 
 
 class ToolLayerCase(unittest.TestCase):

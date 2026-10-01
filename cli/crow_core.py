@@ -5,9 +5,8 @@ Split out of the terminal client (cli/crow.py, removed with #187) so that a
 second client could call the same code instead of carrying a second copy of
 it. The window, cli/crow_gui.py, is that client and since #187 the only one.
 Nothing in here writes to stdout, reads a keystroke, or emits an escape
-sequence -- the two exceptions are named where they sit (install_font's
-`verbose` arm, which no caller in this repository sets, and the ANSI colour
-constants, which are STRINGS the caller may or may not print).
+sequence. (The two exceptions the terminal needed -- install_font's `verbose`
+arm and the ANSI colour constants -- went with it in #187.)
 
 TWO BLOCKS CAME OVER A SEAM RATHER THAN AS THEY STOOD, and they are the only
 two. `stream_reply` had thirteen terminal lines -- two signature parameters and
@@ -698,44 +697,6 @@ def sampling_for(model: str | None, level: "str | None" = None) -> dict:
     return out
 
 
-def resolve_sampling(model: str | None, overrides: dict | None = None,
-                     level: "str | None" = None) -> dict:
-    """The model's sampling, with anything the user typed on top.
-
-    `overrides` carries ONLY what was actually given. A dict of every flag
-    with its default would put the caller's idea of min_p back on top of the
-    model's and undo the whole stage.
-    """
-    out = sampling_for(model, level)
-    for name, value in (overrides or {}).items():
-        if name in SAMPLING_FIELDS and value is not None:
-            out[name] = value
-    return out
-
-
-def reasoning_problem(model: str | None, level: str | None) -> str | None:
-    """Why this level cannot be used on this model, or None if it can.
-
-    A STRING RATHER THAN A RAISE OR A BOOL: the caller has to print it, and the
-    two things worth saying -- which level was asked for and which ones exist --
-    are only knowable here. A bool would send the reader to the manifest to find
-    out what they should have typed.
-    """
-    if level is None:
-        return None
-    fixed = reasoning_fixed_for(model)
-    if fixed is not None and level != fixed:
-        # #225: named, not silently overridden.
-        return ("--reasoning-effort %s: thinking is fixed at %s for %s "
-                "(reasoning_fixed in manifests/operating-point.json)"
-                % (level, fixed, model or "this model"))
-    levels = reasoning_levels_for(model)
-    if level in levels:
-        return None
-    return ("--reasoning-effort %s is not one of %s for %s"
-            % (level, ", ".join(levels), model or "this model"))
-
-
 def reasoning_levels_for(model: str | None) -> tuple[str, ...]:
     """What --reasoning-effort may be for this model, in the manifest's order.
 
@@ -1379,67 +1340,23 @@ TOOLS = [
 BUILTIN_TOOLS = tuple(TOOLS)
 
 
-# ANSI only, and only when stdout is a terminal: a redirected transcript has
-# to stay free of escape sequences, or every later grep over it is wrong.
-# No 256-colour or truecolour codes - the eight basic ones survive every
-# Windows console and every theme, bright-on-dark as well as dark-on-light.
-_TTY = bool(getattr(sys.stdout, "isatty", lambda: False)())
-
-
-def _c(code: str) -> str:
-    return code if _TTY else ""
-
-
-DIM = _c("\033[2m")
-RESET_DIM = _c("\033[22m")
-RESET = _c("\033[0m")
-BOLD = _c("\033[1m")
-CYAN = _c("\033[36m")
-GREEN = _c("\033[32m")
-YELLOW = _c("\033[33m")
-MAGENTA = _c("\033[35m")
-BLUE = _c("\033[34m")
-RED = _c("\033[31m")
-
-# The two colours the product is recognised by. Truecolour, unlike the palette
-# above: these are brand values, and mapping them onto one of the eight basic
-# slots would hand them to the user's theme, where "blue" is whatever they set.
-# Terminals without truecolour ignore the sequence and fall back to their own
-# foreground - readable either way, just not ours.
-CROW_BG = "#0b0e17"                     # window background, set via OSC 11
-CROW_ACCENT = _c("\033[38;2;126;176;248m")   # #7eb0f8, the blue of the wordmark
-CROW_TEXT = _c("\033[38;2;255;255;255m")     # what the model says stays white
-BANNER_BEVEL = _c("\033[38;2;44;91;172m")    # #2c5bac, the wordmark's shaded edge
-
-# THE SAME THREE VALUES IN THE SPELLING A WINDOW CAN USE, and they are here for
-# the reason manifests/shared-core.json gives for CROW_BG: a brand value written
-# twice is a brand value that gets corrected once. A terminal takes them as
-# escape sequences and Tk takes "#rrggbb"; neither can read the other's form,
-# and the escapes above are additionally _c()-gated, so under a window every one
-# of them is the empty string. CROW_BG needs no twin -- it is already the hex,
-# because the terminal sets it through OSC 11 rather than SGR.
+# The colours the product is recognised by, as the window spells them. They
+# live here for the reason manifests/shared-core.json gives for CROW_BG: a
+# brand value written twice is a brand value that gets corrected once. (#187
+# removed the terminal client and with it their ANSI twins.)
+CROW_BG = "#0b0e17"
 CROW_ACCENT_HEX = "#7eb0f8"
 CROW_TEXT_HEX = "#ffffff"
 BANNER_BEVEL_HEX = "#2c5bac"
 
 
-# THE THREE SENTENCES A SURFACE MAY NOT SPELL ITSELF. Each one is the only place
-# the user learns something the screen does not otherwise show: that a budget cut
-# the turn short, that an abort left the context untouched, that a resume brought
-# the messages but not the cache. A second surface writing its own wording is a
-# second product -- so the wording lives here and both surfaces print this name.
-# manifests/shared-core.json holds all three under `wordings`; checking is what
-# `tools/check_shared_core.py` does, and it counts the literal, not the intent.
+# THE SENTENCES A SURFACE MAY NOT SPELL ITSELF. Each one is the only place the
+# user learns something the screen does not otherwise show: that a budget cut
+# the turn short, that an abort left the context untouched. A surface writing
+# its own wording is a second product -- so the wording lives here and every
+# surface prints this name.
 CUT_OFF_NOTE = "CUT OFF at the token budget"
 ABORT_NOTE = "[interrupted -- turn discarded, context unchanged]"
-RESUME_COLD_NOTE = "messages only -- the first turn pays a prefill"
-# ITS OWN LINE, AND THAT IS THE WHOLE POINT (#113). A model switch used to be
-# reported with the line above, which says the cache could not be reused and
-# names the wrong reason for it: the reader goes looking for a server without
-# --slot-save-path, and the actual cause is that the session belongs to another
-# network. Two causes with one sentence between them is one cause nobody can act
-# on.
-RESUME_MODEL_NOTE = "messages only -- this session was saved under another model"
 
 
 # Keywords worth colouring, kept to the three languages this assistant writes
@@ -1463,21 +1380,6 @@ _KEYWORDS["js"] = _KEYWORDS["javascript"]
 _KEYWORDS["ts"] = _KEYWORDS["javascript"]
 _KEYWORDS["typescript"] = _KEYWORDS["javascript"]
 
-# One pass, alternatives ordered so that the longest wins: a string containing
-# a keyword must stay a string. Comments come first for the same reason.
-_TOKENS = re.compile(
-    r"(?P<comment>#[^\n]*|//[^\n]*)"
-    r"|(?P<string>\"\"\".*?\"\"\"|'''.*?'''|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
-    r"|(?P<number>\b\d+\.?\d*\b)"
-    r"|(?P<word>\b[A-Za-z_]\w*\b)",
-    re.DOTALL,
-)
-
-
-_EXT = {"python": "py", "py": "py", "javascript": "js", "js": "js", "ts": "ts",
-        "typescript": "ts", "json": "json", "html": "html", "css": "css",
-        "bash": "sh", "sh": "sh", "powershell": "ps1", "sql": "sql"}
-
 
 # The repository, spelled once. Three hosts quote the same slug -- raw content
 # for the installer, the API for the release check, and the page a human opens
@@ -1497,10 +1399,6 @@ REPO_URL = f"https://github.com/{REPO}"
 # install.sh: the two installers share one file manifest and one contract, so
 # the sentence a user copies differs only in how a script gets fetched and run.
 INSTALLER_SCRIPT = "install.ps1" if crow_platform.IS_WINDOWS else "install.sh"
-UPDATE_COMMAND = (
-    f"irm https://raw.githubusercontent.com/{REPO}/main/{INSTALLER_SCRIPT} | iex"
-    if crow_platform.IS_WINDOWS else
-    f"curl -fsSL https://raw.githubusercontent.com/{REPO}/main/{INSTALLER_SCRIPT} | bash")
 
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
@@ -2538,37 +2436,6 @@ def prefix_fingerprint(system: str | None, model: str | None = None) -> str:
     material = (json.dumps(TOOLS, sort_keys=True) + "\x00" + (system or "")
                 + "\x00" + (model or ""))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
-
-
-def resume_cold_note(path: str | None = None, model: str | None = None) -> str:
-    """Which of the two cold-resume lines the user gets, and why that is a choice.
-
-    The fingerprint above is the GATE; this is the only thing the reader ever
-    sees of it. A gate that refuses correctly and then reports the wrong reason
-    has spent the refusal and bought nothing.
-
-    READ FROM THE FILE, NOT FROM THE HASH. The fingerprint is one-way on
-    purpose, so it can say "these do not match" and never "the model was X".
-    `save_session` therefore writes the name beside it, and this reads it back.
-
-    THE FALLBACK IS THE OLD LINE, NOT A THIRD ONE. A file written before #113
-    has no `model` key and every session on disk today is one of those; they
-    resume cold ONCE, on the old wording, which is the correct sentence for them
-    -- nothing about their model is known, so nothing about it is claimed.
-    Silence about the name is also why a save that could not reach /props does
-    not produce this line: an empty name is not evidence of a switch.
-    """
-    path = path or SESSION_FILE
-    try:
-        with open(path, encoding="utf-8") as fh:
-            was = (json.load(fh).get("model") or "").strip()
-    except Exception:
-        # Unreadable is not "switched". The caller is on the resume path and
-        # already has its messages; the honest answer here is the general line.
-        return RESUME_COLD_NOTE
-    if was and was != (model or ""):
-        return f"{RESUME_MODEL_NOTE}: {was}, not {model or 'this one'}"
-    return RESUME_COLD_NOTE
 
 
 # #116. Where the chat's reasoning level lives: the SESSION FILE, beside
@@ -3806,13 +3673,6 @@ def rollover_path(stamp: str | None = None) -> str:
     return os.path.join(SESSION_DIR, f"rollover-{stamp or time.strftime('%Y%m%d-%H%M%S')}.json")
 
 
-def resume_path(name: str) -> str:
-    """Resolve --resume: a bare name is looked for among the archives."""
-    if os.path.isabs(name) or os.sep in name or (os.altsep and os.altsep in name):
-        return name
-    return os.path.join(SESSION_DIR, name)
-
-
 # What the fresh conversation opens with. It names the archive rather than
 # summarising it: a summary is a guess about what mattered, and the model has
 # read_file. A pointer it can follow beats a précis it cannot check.
@@ -4893,20 +4753,15 @@ def post_json(url: str, body: dict, timeout: float = 30.0) -> dict:
         return json.loads(resp.read().decode("utf-8") or "{}")
 
 
-
 # ---------------------------------------------------------------------------
 # Updating an installation from inside the client
 # ---------------------------------------------------------------------------
 #
-# THE TERMINAL PRINTS A LINE, A WINDOW CANNOT. `update_notice` has told CLI
-# users since 0.0.6 that a version is out and which command installs it, and
-# that works because the reader is standing at a prompt. In a window there is no
-# prompt, so the same knowledge has to end in a button.
-#
-# NOTHING HERE IS A SECOND OPINION about versions: `fetch_latest_version`,
-# `parse_version` and `is_newer` are the ones the terminal already uses. What is
-# new is only what a button needs and a printed line does not -- where the copy
-# on disk lives, and how to run the installer without a console.
+# THE UPDATE ENDS IN A BUTTON. The terminal printed a line naming the command
+# (removed with #187); a window has no prompt, so the knowledge has to end in a
+# button: `fetch_latest_version`, `parse_version` and `is_newer` decide, and the
+# rest is what a button needs -- where the copy on disk lives, and how to run
+# the installer without a console.
 
 INSTALL_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/{INSTALLER_SCRIPT}"
 
@@ -4988,8 +4843,7 @@ def update_state(timeout: float = 4.0, current: str = "") -> dict:
 
     A CHECK THAT COULD NOT RUN OFFERS NOTHING. `latest` is None for no network,
     a rate limit or a shape nobody recognises, and None never becomes a button
-    that promises a version -- the same rule `update_notice` follows for the
-    line it prints.
+    that promises a version.
     """
     # `current` lets a caller compare another version than this file's own
     # literal; left empty it is `CLIENT_VERSION`. Until #187 that constant was
@@ -5055,76 +4909,11 @@ def fetch_latest_version(timeout: float = 4.0) -> str | None:
         return None
 
 
-def start_update_check(enabled: bool) -> "queue.Queue | None":
-    """Ask GitHub in the background. Returns the queue the answer will arrive in.
-
-    Started BEFORE the banner is drawn and read after it, so the network call
-    overlaps the work the CLI has to do anyway (banner, font, /health). The
-    thread is a daemon and nothing ever joins it: if the answer is late, the
-    line is skipped rather than the start delayed.
-    """
-    import queue
-
-    if not enabled:
-        return None
-    answers: "queue.Queue" = queue.Queue(maxsize=1)
-
-    def _ask() -> None:
-        try:
-            answers.put(fetch_latest_version(), block=False)
-        except Exception:
-            pass
-
-    threading.Thread(target=_ask, daemon=True).start()
-    return answers
-
-
-def update_notice(answers: "queue.Queue | None", wait: float = 1.5) -> str | None:
-    """The line to print, or None when there is nothing to say.
-
-    `wait` is the entire budget the check may cost a start. It is spent only
-    when the request is still in flight after the banner and the font; on a
-    machine with no network it is spent once and never blocks a turn.
-    """
-    if answers is None:
-        return None
-    try:
-        latest = answers.get(timeout=wait)
-    except Exception:
-        return None
-    if not latest or not is_newer(latest, CLIENT_VERSION):
-        return None
-    return (f"{BOLD}crow {latest} is out{RESET} {DIM}(you have {CLIENT_VERSION}){RESET}\n"
-            f"  {UPDATE_COMMAND}")
-
-
-# Ctrl+C, the belt-and-braces version.
-#
-# Relying on KeyboardInterrupt to arrive where it is caught did not hold up in
-# practice: on Windows the signal is delivered by a separate thread that only
-# sets a flag, and the main thread acts on it at the next bytecode boundary -
-# which is fine in a tight loop and useless when it sits in a C-level call.
-# Two earlier attempts (reader thread, then polling instead of a timed get)
-# each fixed one such call and left the next one.
-#
-# So the handler also sets an Event, and every loop that can run long checks
-# it. That works no matter which C call the interrupt landed in, because the
-# loop comes back around either way.
+# Stop, as an Event rather than an exception. The window sets it, and every
+# loop that can run long checks it: that works no matter which C-level call the
+# turn is sitting in, because the loop comes back around either way. (The
+# terminal's SIGINT handler that also set it went with #187.)
 INTERRUPT = threading.Event()
-
-
-def _on_sigint(signum, frame) -> None:
-    INTERRUPT.set()
-    raise KeyboardInterrupt
-
-
-def install_interrupt_handler() -> None:
-    """Idempotent; a no-op where signals are not available (threads, IDEs)."""
-    try:
-        import signal
-        signal.signal(signal.SIGINT, _on_sigint)
-    except Exception:
-        pass
 
 
 # ------------------------------------------------------------------- images
@@ -9663,8 +9452,6 @@ def named_but_ambiguous(path: str) -> bool:
     """
     here = os.path.normcase(_resolve(path))
     return any(here.startswith(os.path.normcase(prefix)) for prefix in _AMBIGUOUS)
-
-
 
 
 def user_words(text: str) -> str:
@@ -20321,8 +20108,6 @@ REMOTE_PORT_DEFAULT = 8765
 # A NEW DEVICE WAITS THIS LONG FOR THE DESKTOP'S ALLOW, then it is a deny: a
 # photographed QR must never pair because nobody was at the desk to refuse.
 REMOTE_CONFIRM_S = 60.0
-REMOTE_TUI_NOTE = ("/remote is window-only for now (stage 2): open the Crow "
-                   "window and type /remote there to pair a phone.")
 REMOTE_USAGE = "/remote [on|off|status|devices|forget <name>]"
 REMOTE_MISSING = ("the phone mirror is not part of this install "
                   "(cli/crow_remote.py is missing).")
@@ -27216,44 +27001,6 @@ def font_installed() -> list[str]:
     if not os.path.isdir(target):
         return []
     return [f for f in font_files() if os.path.isfile(os.path.join(target, f))]
-
-
-# THE ONE BLOCK IN HERE THAT CAN PRINT, and it is named rather than hidden: the
-# `if verbose:` line below is the only print() call in this file. Nothing in
-# this repository passes verbose=True -- the suite calls install_font() bare,
-# and the terminal client's ensure_font() did until #187 -- so on every path that
-# exists today it is unreachable. A second client that wants the message takes
-# it as a return code, not as stdout.
-#
-# EINE ZEILE WENIGER SEIT DEM LINUX-PORT: die zweite sagte "font install is
-# Windows-only", und das ist nicht mehr wahr -- fontconfig hat einen
-# Benutzerspeicher wie Windows einen hat, nur ohne Registry.
-def install_font(verbose: bool = False) -> int:
-    """Copy the bundled faces into the PER-USER font store and register them.
-
-    Runs on first start, not behind a flag. A typeface nobody knows to ask for
-    does not get installed, and asking the user to type a setup command for
-    something they never requested is friction with no payoff.
-
-    Per-user on purpose: HKLM and %WINDIR%\\Fonts need elevation, and a chat CLI
-    has no business prompting for admin. Windows has honoured the per-user store
-    since 10 1809, and nothing outside this account is touched. On Linux the
-    per-user store is `~/.local/share/fonts/crow` and there is no registry --
-    fontconfig indexes the directory, and `fc-cache -f` only makes it visible
-    before the next login.
-
-    What it does NOT do is select the font. No emulator lets a running program
-    set its own typeface - Windows Terminal reads it from settings.json, conhost
-    from the registry. Installing makes it choosable; choosing stays with the
-    user, which is why the one line printed afterwards says how.
-    """
-    files = font_files()
-    if not files:
-        if verbose:
-            print(f"no font files in {FONT_DIR}")
-        return 2
-
-    return crow_platform.install_fonts(FONT_DIR, files, FONT_FAMILY)
 
 
 # ---------------------------------------------------------------- #143 -----

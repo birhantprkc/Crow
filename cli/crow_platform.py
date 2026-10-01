@@ -1422,54 +1422,6 @@ def font_store() -> str:
                         "fonts", APP_DIR_XDG)
 
 
-def install_fonts(source_dir: str, names: "list[str]", family: str = "") -> int:
-    """Copy the bundled faces into the per-user store. 0 installed, 1 nothing new.
-
-    WINDOWS REGISTERS, LINUX INDEXES, and that is the whole difference. The
-    Windows store wants an entry under HKCU\\...\\Fonts with the FULL PATH as the
-    value (a bare filename registers a font Windows then cannot find, and it
-    fails silently); fontconfig wants no registry at all, only a directory it
-    already scans and a cache refresh to see it before the next login.
-
-    `fc-cache` IS BEST EFFORT AND NEVER FATAL: without it the faces are still
-    installed, they are simply not visible to a program that started earlier --
-    and a missing typeface may never keep a client from starting.
-    """
-    target = font_store()
-    if not names:
-        return 2
-    try:
-        os.makedirs(target, exist_ok=True)
-    except OSError:
-        return 2
-    done = 0
-    for name in names:
-        dst = os.path.join(target, name)
-        if not os.path.isfile(dst):
-            try:
-                shutil.copyfile(os.path.join(source_dir, name), dst)
-            except OSError:
-                continue
-            done += 1
-    if IS_WINDOWS:
-        import winreg
-        key = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0,
-                            winreg.KEY_SET_VALUE) as k:
-            for name in names:
-                dst = os.path.join(target, name)
-                winreg.SetValueEx(k, "%s (%s)" % (family, name), 0,
-                                  winreg.REG_SZ, dst)
-        return 0 if done else 1
-    if done and shutil.which("fc-cache"):
-        try:
-            subprocess.run(["fc-cache", "-f", target], capture_output=True,
-                           stdin=subprocess.DEVNULL, timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return 0 if done else 1
-
-
 # ------------------------------------------------------------- the updater ---
 
 def opener_command(path: str) -> "list[str] | None":

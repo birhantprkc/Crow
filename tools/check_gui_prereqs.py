@@ -724,7 +724,7 @@ def main(argv):
         # repository SHIPS reachable on this machine, under a name something can
         # ask for? On Windows the reader is Tk's family list (and the
         # 31-character truncation that comes with it); here it is fontconfig,
-        # which is what crow_platform.install_fonts writes into and what
+        # whose per-user store crow_platform.font_store() names and
         # `fc-cache -f` refreshes.
         #
         # NO TRUNCATION RULE ON THIS SIDE. LOGFONT.lfFaceName is a Win32
@@ -748,8 +748,8 @@ def main(argv):
                   % ("(i) family in fontconfig", wanted))
             print("             fc-list reports %d families, none of them %r"
                   % (len(listed), wanted))
-            print("             crow_core.install_font() copies the shipped "
-                  "faces into %s; since #187 no client calls it on start"
+            print("             nothing installs the shipped faces since #187;"
+                  " copy them into %s by hand to test this point"
                   % crow_platform.font_store())
             for near in neighbours(wanted, listed):
                 print("             fontconfig does list %s" % near)

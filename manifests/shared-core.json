@@ -476,19 +476,14 @@
    "why": "What Ctrl+C says. The partial turn is discarded rather than appended, and this sentence is the only place the user is told the context is untouched."
   },
   {
-   "id": "the resume line",
-   "text": "messages only -- the first turn pays a prefill",
-   "why": "The difference between a warm cache and a restored transcript, in the one line the user reads at start. Measured 2026-08-10: a start that said 'cache warm' was followed by cached 0/21004 and 469.51 s to the first token."
-  },
-  {
    "id": "brand: the window background",
    "text": "#0b0e17",
    "why": "The wordmark's ground. Written once means one product; written twice means the day one of them is corrected."
   },
   {
    "id": "brand: the accent",
-   "text": "38;2;126;176;248",
-   "why": "#7eb0f8, the blue of the wordmark - listed in the form it is actually WRITTEN, as the truecolor escape. The hex spelling exists only in the comment beside it, and a manifest that pinned the comment would be checking prose."
+   "text": "#7eb0f8",
+   "why": "The blue of the wordmark, as CROW_ACCENT_HEX writes it. Until #187 it was pinned as the truecolor escape 38;2;126;176;248, the form the terminal wrote; the window spells it in hex and the escape is gone."
   },
   {
    "id": "the model switch note",
