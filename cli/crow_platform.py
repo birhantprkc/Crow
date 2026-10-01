@@ -274,8 +274,91 @@ def binary_is_for_this_os(path: str) -> bool:
 # The Windows process list, and it is a PowerShell query because there is no
 # /proc: Get-CimInstance is the documented way to a command line, and tasklist
 # does not print one. Moved here from crow_core.py with its behaviour intact.
-_PROCESS_QUERY = ("Get-CimInstance Win32_Process -Filter \"Name like 'llama-server%'\""
+# #196 C3: it also asks for crow-nest's `serve.exe` and the image server
+# `sd-server.exe`, which hold the card just as firmly as a llama-server does.
+_PROCESS_QUERY = ("Get-CimInstance Win32_Process -Filter \"Name like 'llama-server%'"
+                  " or Name = 'serve.exe' or Name like 'sd-server%'\""
                   " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+
+# #196 C3: the three kinds of server the scan reports, named by executable.
+KIND_LLAMA = "llama-server"
+KIND_CROW_NEST = "crow-nest"     # serve.exe, both crow-nest operating points
+KIND_IMAGE = "image"             # sd-server.exe
+# The port each listens on when its command line names none: serve.rs
+# DEFAULT_PORT 8099; sd.cpp examples/server/runtime.h listen_port 1234.
+# llama-server's own default is not assumed -- discovery has always read --port.
+_DEFAULT_PORTS = {KIND_CROW_NEST: 8099, KIND_IMAGE: 1234}
+_PORT_FLAGS = {KIND_LLAMA: "--port", KIND_CROW_NEST: "--port",
+               KIND_IMAGE: "--listen-port"}
+
+
+def _kind_of_name(name: str) -> "str | None":
+    """The kind for an executable's base name, or None for anything else.
+
+    `serve` is matched EXACTLY: the name is generic, and only crow-nest's
+    binary carries it bare. The other two keep the prefix match the Windows
+    query has always used (`llama-server%`).
+    """
+    name = name.lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name.startswith("llama-server"):
+        return KIND_LLAMA
+    if name == "serve":
+        return KIND_CROW_NEST
+    if name.startswith("sd-server"):
+        return KIND_IMAGE
+    return None
+
+
+_EXE_WITH_SPACES = re.compile(r'\s*"?([^"]*?\.exe)(?=["\s]|$)', re.IGNORECASE)
+
+
+def _base_name(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _executable_name(command_line: str) -> str:
+    """The base name of the program a command line starts.
+
+    A quoted first token is the program; otherwise the first word is, unless
+    it names no server and the line holds an unquoted Windows path with a
+    space (`C:\\Program Files\\...\\serve.exe`) -- then that path up to `.exe`.
+    """
+    text = (command_line or "").strip()
+    if text.startswith('"'):
+        return _base_name(text[1:].split('"', 1)[0])
+    exe = (text.split(None, 1) or [""])[0]
+    if _kind_of_name(_base_name(exe)) is None:
+        hit = _EXE_WITH_SPACES.match(text)
+        if hit:
+            exe = hit.group(1)
+    return _base_name(exe)
+
+
+def server_kind(command_line: str) -> "str | None":
+    """#196 C3: which server a scanned command line is -- KIND_LLAMA,
+    KIND_CROW_NEST, KIND_IMAGE -- or None.
+
+    Read off the EXECUTABLE, so notepad with serve.log open is not a server.
+    A line that merely mentions llama-server still counts as one: that is what
+    the listing reader has always accepted, and it is kept unchanged.
+    """
+    kind = _kind_of_name(_executable_name(command_line))
+    if kind is None and "llama-server" in (command_line or ""):
+        return KIND_LLAMA
+    return kind
+
+
+def server_port(command_line: str) -> "int | None":
+    """The port a scanned server listens on, where it can be derived: its own
+    flag, else its kind's default (none for llama-server)."""
+    kind = server_kind(command_line)
+    if kind is None:
+        return None
+    hit = re.search(r"(?:^|\s)%s[\s=]+(\d+)" % re.escape(_PORT_FLAGS[kind]),
+                    command_line)
+    return int(hit.group(1)) if hit else _DEFAULT_PORTS.get(kind)
 
 # The POSIX fallback, used only where /proc cannot be read (a container with it
 # unmounted, a BSD). `ps` is a subprocess; /proc is four file reads and no fork.
@@ -292,9 +375,9 @@ def _quote(arg: str) -> str:
     return '"%s"' % arg if (" " in arg or "\t" in arg) else arg
 
 
-def _proc_servers(proc_root: str = "/proc", name: str = "llama-server"
-                  ) -> "list[tuple[str, str]] | None":
-    """Every llama-server in /proc, or None when /proc cannot be read.
+def _proc_servers(proc_root: str = "/proc") -> "list[tuple[str, str]] | None":
+    """Every server in /proc (llama-server, crow-nest's serve, sd-server), or
+    None when /proc cannot be read.
 
     None IS NOT AN EMPTY LIST HERE. "No /proc" and "no server" are different
     answers and the caller does different things with them: the first falls back
@@ -325,7 +408,7 @@ def _proc_servers(proc_root: str = "/proc", name: str = "llama-server"
         # same narrowing the Windows query gets from `Name like 'llama-server%'`:
         # a text editor with llama-server.log open is not a server, and a
         # measurement script that mentions one is not one either.
-        if not os.path.basename(args[0]).startswith(name):
+        if _kind_of_name(os.path.basename(args[0])) is None:
             continue
         out.append((pid, " ".join(_quote(a) for a in args)))
     return out
@@ -347,17 +430,21 @@ def _parse_process_table(text: str) -> list[tuple[str, str]]:
     out = []
     for raw in (text or "").splitlines():
         line = raw.strip()
-        if not line or "llama-server" not in line:
+        if not line:
             continue
         pid, _, rest = line.partition("\t")
         if not rest:
             pid, _, rest = line.partition(" ")
+        if server_kind(rest) is None:
+            continue
         out.append((pid.strip(), rest.strip()))
     return out
 
 
 def find_servers(query=None, proc_root: str = "/proc") -> list[tuple[str, str]]:
-    """Every llama-server on this machine, as (pid, command line).
+    """Every model server on this machine, as (pid, command line): each
+    llama-server, crow-nest's serve and the image server sd-server (#196 C3).
+    `server_kind` and `server_port` read a line's kind and port.
 
     An unreadable process list comes back EMPTY rather than raising: the caller
     runs this on the path that starts a server, and refusing to boot because a

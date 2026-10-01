@@ -973,6 +973,9 @@ def warm_image_server() -> bool:
     ASKED THROUGH `getattr`: the core half of the image tools lands on its own
     branch, and a window built before it must start exactly as before. On a
     daemon thread because warming loads weights -- the window does not wait.
+
+    #196 C3: `image_tools_available` is False while the boot script's
+    active-point.json names a language-only point, so nothing warms beside it.
     """
     available = getattr(crow_core, "image_tools_available", None)
     warm = getattr(crow_core, "image_server_warm", None)
@@ -18580,7 +18583,8 @@ def main(argv: list[str] | None = None) -> int:
     # the only one until a second model arrived on 8082; a window opened while
     # Qwen is up would otherwise knock on an empty port and say "no endpoint"
     # about a server the user can see running. An explicit --base-url is a
-    # decision and is never overridden -- see running_base_url.
+    # decision and is never overridden -- see running_base_url, which since
+    # #196 C3 also finds crow-nest's serve on 8099 by its /health.
     if args.base_url == DEFAULT_BASE_URL:
         args.base_url = crow_core.running_base_url(args.base_url)
     try:

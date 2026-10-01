@@ -28686,3 +28686,182 @@ class SessionFileSurvivesACutWriteTests(unittest.TestCase):
                                path=self.path, with_kv=False)
         self.assertIsNone(crow_core.set_aside_unreadable_session(self.path))
         self.assertTrue(os.path.exists(self.path))
+
+
+
+class OneOperatingPointIsSeenTests(unittest.TestCase):
+    """#196 C3. crow-nest's `serve.exe` (8099) and the image server
+    `sd-server.exe` (8097) were invisible to the process scan, and the window
+    needed --base-url for crow-nest. Nothing here starts a process or touches
+    the network: listings, probes and kills are stand-ins."""
+
+    LISTING = (
+        "4242\tC:\\Crow\\bin\\llama-server.exe -m a.gguf --port 8083\n"
+        "5151\t\"C:\\Program Files\\Crow\\bin\\serve.exe\" --slot-save-path d\n"
+        "6161\tC:\\Crow\\bin\\sd-server.exe --diffusion-model t --listen-port 8097\n"
+        "7171\tC:\\Windows\\notepad.exe serve.log\n"
+        "8181\tC:\\Tools\\observe.exe --port 9000\n")
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-c3-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _proc(self, pid, args):
+        where = os.path.join(self.dir, "proc", str(pid))
+        os.makedirs(where, exist_ok=True)
+        with open(os.path.join(where, "cmdline"), "wb") as fh:
+            fh.write(b"\0".join(a.encode("utf-8") for a in args) + b"\0")
+
+    def test_the_scan_reports_serve_and_sd_server_with_kind_and_port(self):
+        """(a) A Windows-shaped listing and a /proc listing: serve.exe and
+        sd-server.exe are servers, named by their executable, never by a word
+        somewhere in the line (notepad with serve.log open is not one)."""
+        found = crow_platform.find_servers(query=lambda: self.LISTING)
+        self.assertEqual([p for p, _ in found], ["4242", "5151", "6161"])
+        kinds = [crow_platform.server_kind(line) for _p, line in found]
+        self.assertEqual(kinds, ["llama-server", "crow-nest", "image"])
+        ports = [crow_platform.server_port(line) for _p, line in found]
+        self.assertEqual(ports, [8083, 8099, 8097])
+        # the Windows query asks CIM for all three names
+        for name in ("llama-server%", "serve.exe", "sd-server%"):
+            self.assertIn(name, crow_platform._PROCESS_QUERY)
+        # /proc (Linux): the name is read off argv[0]
+        self._proc(31, ["/opt/crow/bin/serve", "--port", "8100"])
+        self._proc(32, ["/opt/crow/bin/sd-server", "--listen-port", "8097"])
+        self._proc(33, ["/usr/bin/python", "serve"])
+        listed = crow_platform._proc_servers(os.path.join(self.dir, "proc"))
+        self.assertEqual(sorted((p, crow_platform.server_kind(l),
+                                 crow_platform.server_port(l))
+                                for p, l in listed),
+                         [("31", "crow-nest", 8100), ("32", "image", 8097)])
+
+    def test_a_running_serve_is_an_operating_point_and_stop_takes_all(self):
+        """One point at a time: a serve.exe refuses a llama-server start, an
+        sd-server (the image stack's companion) is not counted as a point,
+        and stop_servers ends all three by pid."""
+        killed = []
+        with mock.patch.object(crow_platform, "_run_query",
+                               return_value=self.LISTING), \
+             mock.patch.object(crow_platform, "_proc_servers", return_value=None), \
+             mock.patch.object(crow_platform, "IS_WINDOWS", True), \
+             mock.patch.object(crow_platform, "kill_pid",
+                               side_effect=lambda pid: killed.append(pid) or True):
+            lines = [line for _p, line in crow_core.running_servers()]
+            self.assertEqual(len(lines), 2, lines)
+            self.assertIn("serve.exe", lines[1])
+            self.assertEqual(crow_core.stop_servers(), 3)
+            self.assertEqual(killed, ["4242", "5151", "6161"])
+        listing = "5151\tC:\\Crow\\bin\\serve.exe --port 8099\n"
+        with mock.patch.object(crow_platform, "_run_query", return_value=listing), \
+             mock.patch.object(crow_platform, "_proc_servers", return_value=None), \
+             mock.patch.object(crow_platform, "IS_WINDOWS", True), \
+             mock.patch.object(crow_core, "server_model_path", return_value=None):
+            with self.assertRaises(crow_core.ServerBootError) as caught:
+                crow_core.start_server("any", "http://127.0.0.1:8083/v1")
+        self.assertIn("crow-nest", str(caught.exception))
+        self.assertIn("5151", str(caught.exception))
+
+    def test_the_window_falls_back_to_crow_nest_on_8099(self):
+        """(b) Nothing at the default address, no process the scan can read:
+        serve's /health on 8099 is the answer (it says ok only once the engine
+        is loaded)."""
+        asked = []
+
+        class Answer(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(url, timeout=None):
+            asked.append(url)
+            if url == "http://127.0.0.1:8099/health":
+                return Answer(b'{"status":"ok"}')
+            raise crow_core.urllib.error.URLError("refused")
+
+        with mock.patch.object(crow_core.urllib.request, "urlopen", urlopen), \
+             mock.patch.object(crow_core, "running_servers", lambda *a, **k: []):
+            got = crow_core.running_base_url("http://127.0.0.1:8083/v1")
+        self.assertEqual(got, "http://127.0.0.1:8099/v1", asked)
+        # NEGATIVPROBE: nothing on 8099 either -> the default stays
+        with mock.patch.object(crow_core.urllib.request, "urlopen",
+                               side_effect=crow_core.urllib.error.URLError("x")), \
+             mock.patch.object(crow_core, "running_servers", lambda *a, **k: []):
+            self.assertEqual(crow_core.running_base_url("http://127.0.0.1:8083/v1"),
+                             "http://127.0.0.1:8083/v1")
+
+
+class TheActivePointGatesTheImageServerTests(unittest.TestCase):
+    """#196 C3. `active-point.json` in the config dir says which operating
+    point the boot script started; sd-server is warmed or started only on
+    `image-stack`. No file keeps today's behaviour (llama.cpp users)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-c3-point-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        weights = os.path.join(self.dir, "w.safetensors")
+        open(weights, "w").close()
+        self.popen = mock.Mock(side_effect=AssertionError("Popen must not run"))
+        for target, attr, value in (
+                (crow_platform, "config_dir", mock.Mock(return_value=self.dir)),
+                (crow_core, "image_server_binary",
+                 mock.Mock(return_value=os.path.join(self.dir, "sd-server"))),
+                (crow_core, "_image_model_files", lambda _m: [weights] * 3),
+                (crow_core, "_image_server_answers", lambda *a, **k: False),
+                (crow_core.subprocess, "Popen", self.popen)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _point(self, text):
+        with open(os.path.join(self.dir, "active-point.json"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_27b_never_starts_the_image_server(self):
+        """(c) The image tools say why, and no Popen happens."""
+        self._point(json.dumps({"point": "27b",
+                                "base_url": "http://127.0.0.1:8099/v1",
+                                "started_at": "2026-10-01T10:00:00+02:00",
+                                "pids": {"serve": 5151, "image": None}}))
+        self.assertFalse(crow_core.image_tools_available())
+        why = crow_core.image_server_start()
+        self.assertIn("Image Stack operating point", why or "")
+        self.assertIsNone(crow_core.image_server_warm())
+        self.popen.assert_not_called()
+
+    def test_image_stack_warms_where_flash_next_does_not(self):
+        self._point(json.dumps({"point": "image-stack", "base_url": "x",
+                                "started_at": "t",
+                                "pids": {"serve": 1, "image": 2}}))
+        self.assertIsNone(crow_core.image_tools_unavailable())
+        self._point(json.dumps({"point": "flash-next", "base_url": "x",
+                                "started_at": "t",
+                                "pids": {"serve": 1, "image": None}}))
+        self.assertIn("Image Stack", crow_core.image_tools_unavailable() or "")
+
+    def test_absent_or_corrupt_file_is_todays_behaviour(self):
+        self.assertIsNone(crow_core.image_tools_unavailable())       # absent
+        for broken in ("{not json", "[]", '{"point": "70b"}', ""):
+            self._point(broken)
+            self.assertIsNone(crow_core.image_tools_unavailable(), broken)
+        self._point('{"point": "27b"}')
+        self.assertIsNotNone(crow_core.image_tools_unavailable())
+
+    def test_the_contract_file_round_trips_and_tolerates_damage(self):
+        self.assertIsNone(crow_core.read_active_point())
+        path = crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",
+                                            {"serve": 5151, "image": None})
+        self.assertEqual(path, os.path.join(self.dir, "active-point.json"))
+        got = crow_core.read_active_point()
+        self.assertEqual((got["point"], got["base_url"], got["pids"]),
+                         ("27b", "http://127.0.0.1:8099/v1",
+                          {"serve": 5151, "image": None}))
+        self.assertRegex(got["started_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertEqual(sorted(os.listdir(self.dir)),
+                         ["active-point.json", "w.safetensors"])
+        with self.assertRaises(ValueError):
+            crow_core.write_active_point("70b", "x", {"serve": 1, "image": None})
+        self._point("{broken")
+        self.assertIsNone(crow_core.read_active_point())

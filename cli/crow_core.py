@@ -1764,8 +1764,14 @@ def server_command(key: str, manifest: dict | None = None,
     return argv
 
 
-def running_servers(query: Callable[[], str] | None = None) -> list[tuple[str, str]]:
-    """Every llama-server this machine is running, as (pid, command line).
+def running_servers(query: Callable[[], str] | None = None,
+                    include_image: bool = False) -> list[tuple[str, str]]:
+    """Every operating point this machine is running, as (pid, command line):
+    each llama-server and crow-nest's serve (#196 C3: one point at a time, so
+    a serve.exe counts exactly like a llama-server). The image server is left
+    out unless `include_image`: it is the image stack's companion beside a
+    language model, not a point of its own. `crow_platform.server_kind` tells
+    the lines apart.
 
     THE PORT IS NOT ENOUGH, and finding that out cost a live boot. Asking
     /props at the address we are about to use answers "is MY server up"; it
@@ -1786,7 +1792,11 @@ def running_servers(query: Callable[[], str] | None = None) -> list[tuple[str, s
     keeps the stdlib-only invariant that rules `psutil` out. `query` stays the
     injection point for a caller that has its own listing.
     """
-    return crow_platform.find_servers(query)
+    found = crow_platform.find_servers(query)
+    if include_image:
+        return found
+    return [(pid, line) for pid, line in found
+            if crow_platform.server_kind(line) != crow_platform.KIND_IMAGE]
 
 
 _DASH_M = re.compile(r'-m\s+("([^"]+)"|(\S+))')
@@ -1813,17 +1823,129 @@ def running_base_url(default: str) -> str:
     already pointed, that is the answer: an explicit --base-url is a decision
     and must not be overridden by a process list. Only when nothing answers
     there is the running server's own command line read for its --port.
+
+    #196 C3, THE WHOLE ORDER: (1) `default`, if its /props answers; (2) each
+    running llama-server, by its --port, if /props answers there; (3) crow-nest:
+    each scanned serve's port, then 8099 itself, if /health says ok -- serve
+    says so only once the engine is loaded, and 8099 is asked even when the
+    scan saw nothing, because an unreadable process list must not hide a
+    server that answers; (4) `default`. Only one point runs at a time, so (2)
+    and (3) do not compete in practice; a llama-server goes first because that
+    was the whole order before crow-nest was visible.
     """
     if server_model_path(default) is not None:
         return default
+    nests: list[int] = []
     for _pid, line in running_servers():
+        if crow_platform.server_kind(line) == crow_platform.KIND_CROW_NEST:
+            port = crow_platform.server_port(line)
+            if port and port not in nests:
+                nests.append(port)
+            continue
         hit = _DASH_PORT.search(line)
         if not hit:
             continue
         found = "http://127.0.0.1:%s/v1" % hit.group(1)
         if server_model_path(found) is not None:
             return found
+    if CROW_NEST_PORT not in nests:
+        nests.append(CROW_NEST_PORT)
+    for port in nests:
+        found = "http://127.0.0.1:%d/v1" % port
+        if crow_nest_ready(found):
+            return found
     return default
+
+
+# crow-nest's serve: one port for both of its operating points (serve.rs
+# DEFAULT_PORT), no /v1/models, and /health answers {"status":"ok"} only once
+# the engine is fully loaded.
+CROW_NEST_PORT = 8099
+
+
+def crow_nest_ready(base_url: str, timeout: float = 2.0) -> bool:
+    """True when the server at this address says /health {"status": "ok"}."""
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    try:
+        with urllib.request.urlopen(root + "/health", timeout=timeout) as resp:
+            doc = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False
+    return isinstance(doc, dict) and doc.get("status") == "ok"
+
+
+ACTIVE_POINTS = ("flash-next", "27b", "image-stack")
+ACTIVE_POINT_IMAGE = "image-stack"
+
+
+def active_point_path() -> str:
+    """`%LOCALAPPDATA%\\Crow\\active-point.json` (Linux: the config dir)."""
+    return os.path.join(crow_platform.config_dir(), "active-point.json")
+
+
+def read_active_point() -> "dict | None":
+    """#196 C3: the operating point the boot script started, or None.
+
+    THE CONTRACT FILE, written by the boot script (`write_active_point`) and
+    read by the window::
+
+        {"point":      "flash-next" | "27b" | "image-stack",
+         "base_url":   "http://127.0.0.1:8099/v1",
+         "started_at": "2026-10-01T10:00:00+02:00",      # ISO-8601
+         "pids":       {"serve": 5151, "image": 6161 | null}}
+
+    TOLERANT ON PURPOSE: a missing, unreadable or corrupt file, or one whose
+    `point` is not one of the three, is None -- "no boot script ran", which
+    keeps today's behaviour for a llama.cpp user. The other fields are handed
+    back as found and not checked here.
+    """
+    try:
+        with open(active_point_path(), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("point") not in ACTIVE_POINTS:
+        return None
+    return doc
+
+
+def write_active_point(point: str, base_url: str, pids: dict,
+                       started_at: "str | None" = None) -> str:
+    """Write the contract file `read_active_point` reads (schema there).
+    Returns its path. Raises ValueError for an unknown point, OSError when the
+    file cannot be written.
+
+    ATOMIC: a temporary file in the same folder, flushed to disk, then
+    os.replace -- a reader sees the old file or the new one, never half.
+    `started_at` defaults to now, local time with its offset.
+    """
+    if point not in ACTIVE_POINTS:
+        raise ValueError("unknown operating point %r (one of %s)"
+                         % (point, ", ".join(ACTIVE_POINTS)))
+    import datetime
+    doc = {"point": point, "base_url": base_url,
+           "started_at": started_at or datetime.datetime.now().astimezone()
+           .isoformat(timespec="seconds"),
+           "pids": {"serve": pids.get("serve"), "image": pids.get("image")}}
+    path = active_point_path()
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".active-point-", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def server_model_path(base_url: str, timeout: float = 3.0) -> str | None:
@@ -2032,6 +2154,13 @@ def start_server(key: str, base_url: str, install: str | None = None,
     others = running_servers()
     if others:
         pid, line = others[0]
+        if crow_platform.server_kind(line) == crow_platform.KIND_CROW_NEST:
+            # #196 C3: one operating point at a time, crow-nest included.
+            port = crow_platform.server_port(line) or CROW_NEST_PORT
+            raise ServerBootError(
+                "crow-nest's serve is already running (pid %s, port %s). One "
+                "operating point at a time -- stop that one, or point "
+                "--base-url at http://127.0.0.1:%s/v1." % (pid, port, port))
         raise ServerBootError(
             "a llama-server is already running (pid %s) on %s. Two at once "
             "overbook the card and nothing reports it -- stop that one, or "
@@ -2189,11 +2318,13 @@ def server_env(key: str) -> dict:
 
 
 def stop_servers(log: Callable[[str], None] | None = None) -> int:
-    """Stop every llama-server on this machine. Returns how many were asked.
+    """Stop every model server on this machine. Returns how many were asked.
 
     BY PID AND NOT BY PORT. A switch has to leave the card empty, and a server
     on some other port holds VRAM just as firmly as the one being replaced --
     that is the same arithmetic #114's criterion 2 refuses a second server for.
+    #196 C3: for the same reason crow-nest's serve and the image server are
+    stopped too (serve has no shutdown endpoint; the pid is the only handle).
 
     Failures are counted, not raised: the next step is a start that polls, and
     it will say the truth about whether the card came free. A kill that reports
@@ -2201,8 +2332,9 @@ def stop_servers(log: Callable[[str], None] | None = None) -> int:
     """
     say = log or (lambda _msg: None)
     asked = 0
-    for pid, line in running_servers():
-        say("stopping pid %s (%s)" % (pid, os.path.basename(served_model(line)) or "?"))
+    for pid, line in running_servers(include_image=True):
+        say("stopping pid %s (%s)" % (pid, os.path.basename(served_model(line))
+                                      or crow_platform.server_kind(line) or "?"))
         try:
             # `taskkill /PID /F` on Windows, the process GROUP on Linux -- the
             # server sits in a session of its own since it was started that way,
@@ -12088,7 +12220,18 @@ def image_server_binary() -> "str | None":
 
 
 def image_tools_unavailable() -> "str | None":
-    """Why the image tools cannot run here, one sentence, or None when they can."""
+    """Why the image tools cannot run here, one sentence, or None when they can.
+
+    #196 C3: when the boot script says a language-only point runs (flash-next
+    or 27b), sd-server is never warmed or started -- beside Flash-Next serve
+    leaves 73-185 MiB of VRAM free. No contract file is today's behaviour. An
+    sd-server that already answers is still used: image_server_start asks
+    the port before it asks this.
+    """
+    point = read_active_point()
+    if point is not None and point["point"] != ACTIVE_POINT_IMAGE:
+        return ("image generation needs the Image Stack operating point; the "
+                "running point is %s (%s)" % (point["point"], active_point_path()))
     if image_server_binary() is None:
         return ("the image server is not installed: no sd-server in %s"
                 % " or ".join(crow_platform.server_search_dirs()))
