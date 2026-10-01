@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Fixed
+
+- **The 2.1.0, 2.8.4 and 2.8.5 Windows assets no longer carry local logs** (#196, 2026-10-01). Each was replaced on its release by a repack of its own tag with that tag's packer and the rebuilt `bin\` (llama.cpp `1c3c967`, sd.cpp `2f88688`; the published `bin\` of all three was byte-identical to 2.8.5's). The repacks hold exactly the files of the originals minus the 10 `cli/runs/*.log` each: 2.1.0 531,611,346 B (33 files), 2.8.4 643,541,823 B (59), 2.8.5 643,542,202 B (59).
+
 ## 3.0.0 — 2026-10-01
 
 **`CrowSetup.exe` installs Crow, the crow-nest engine and the operating points in one window, and the window is Crow's only client.** The installer is attached to this release; it downloads Crow's package and the crow-nest v0.8.0 engine from their releases, resumes after a stop, and writes the shortcut to the new operating-point window. The terminal client and `crow --serve` are removed: start Crow with `python <install>/cli/crow_gui.py`; installs of 2.8.5 and older update through the usual one-liner. Major version because a command line that used to work no longer exists.
