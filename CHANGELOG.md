@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 3.0.0 — 2026-10-01
+
+**`CrowSetup.exe` installs Crow, the crow-nest engine and the operating points in one window, and the window is Crow's only client.** The installer is attached to this release; it downloads Crow's package and the crow-nest v0.8.0 engine from their releases, resumes after a stop, and writes the shortcut to the new operating-point window. The terminal client and `crow --serve` are removed: start Crow with `python <install>/cli/crow_gui.py`; installs of 2.8.5 and older update through the usual one-liner. Major version because a command line that used to work no longer exists.
+
 ### Added
 
 - **`CrowSetup.exe` installs Crow, the crow-nest engine and the chosen operating points** (#196, 2026-10-01). One Rust exe whose window (WebView2) uses Crow's own look: the crow fills as the progress, "Flying to the nest", "Landed. Crow is ready.".
@@ -40,7 +44,7 @@ The reasoning is in the commit and on the issue.
 
 ### Known limitations
 
-- **The published 2.1.0, 2.8.4 and 2.8.5 Windows assets still contain the local logs.** They are replaced with a clean package later (robin, 2026-10-01).
+- **The published 2.1.0 and 2.8.4 Windows assets still contain the local logs.** The 2.8.5 asset was replaced on 2026-10-01 by a repack of the `v2.8.5` tag with its own packer and the rebuilt `bin\` (643,542,202 B, 59 files, no `runs/` logs).
   - The gate refuses the binaries those packages were built from.
   - `bin\` was rebuilt on 2026-10-01 from a path without a user name, at the same commits and CMake options: llama.cpp `1c3c967` with its working-tree diff, sd.cpp `2f88688`. Builder paths went from up to 258 per file to 0, sizes changed by less than 0.03 %.
   - The gate passes that rebuild. It allows only three upstream word sites, each by file, exact context and measured maximum: "round-robin" twice in `llama-server-impl.dll`, and 29 tokenizer-vocabulary entries ("Robin", "Robinson") in each of `sd-cli.exe` and `sd-server.exe`. Paths are never allowed.

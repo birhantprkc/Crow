@@ -8,7 +8,7 @@ the model — that is a separate line, printed at the end of the run.
 | | |
 |---|---|
 | Windows | `install.ps1` — five steps, no elevation, everything under `%LOCALAPPDATA%\Crow` |
-| Windows, one window | `CrowSetup.exe` (built by `installer\build.ps1`): Crow, the crow-nest engine and the operating points you pick, with resume. See [CrowSetup.exe](#crowsetupexe-windows) |
+| Windows, one window | `CrowSetup.exe` from the [latest release](https://github.com/nibor1896/Crow/releases/latest): Crow, the crow-nest engine and the operating points you pick, with resume. See [CrowSetup.exe](#crowsetupexe-windows) |
 | Linux | `install.sh` — five steps, no root, everything under `${XDG_DATA_HOME:-~/.local/share}/crow` |
 | The model | `hf download`, separately, 73.45 GiB + 0.9 GiB for the projector |
 
@@ -137,6 +137,10 @@ Install root: `%LOCALAPPDATA%\Crow`, models in `<install>\models` (the same layo
 | `--headless` | no window: the installer without WebView2 (Windows 11 ships it, so this is the fallback) |
 | `--source <dir>` | take the files from a local folder instead of Hugging Face and GitHub |
 | `--install-root <dir>` | install root, default `%LOCALAPPDATA%\Crow` |
+| `--package-source <dir>` | Crow's package and the engine package from `<dir>\<asset>`, checked against the embedded size and sha256; every other file from its URL (or `--source`) |
+| `--points <ids>` | with `--headless`: the points to install (`flash-next`, `27b`, `image-stack`) |
+| `--shortcut-dir <dir>` | the shortcut goes into `<dir>` only, not the Desktop or the Start menu |
+| `--no-shortcuts` | no shortcut at all |
 | `--selftest` | run the checks, open no window, use no network. Exit code 0 is green |
 
 ### Build it
