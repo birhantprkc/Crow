@@ -105,7 +105,7 @@ write `export CROW_MODELS="DIR"` into `$CROW_HOME/env` and only `$CROW_HOME/bin/
 file, so the window found the tree and nothing else did — `python3 ~/.local/share/crow/tools/start-server.py
 flash-next-q2-k-xl` answered `model 'flash-next-q2-k-xl' is not on disk`. `<install>/models` is what
 `crow_platform.models_dir()` resolves to with nothing set, so a link there is read by the window,
-the terminal client and `tools/start-server.py` alike, with no environment at all. `$CROW_HOME/env`
+the window and `tools/start-server.py` alike, with no environment at all. `$CROW_HOME/env`
 is no longer written, and a run removes the one an earlier run left — unless you edited it, in which
 case it is kept and named, and nothing reads it any more.
 

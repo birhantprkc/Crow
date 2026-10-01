@@ -9,7 +9,6 @@ redirect, and a combined run leaves the isolation guards red. Case counts collec
 on `release-2026-09-24` (b9cac62) with `unittest`'s loader, under the runtime venv's Python.
 
 ```
-python -m unittest test_crow
 python -m unittest test_crow_core
 python -m unittest test_crow_gui
 python -m unittest test_crow_remote
@@ -17,7 +16,6 @@ python -m unittest test_crow_remote
 
 | | cases | covers |
 |---|---|---|
-| `test_crow.py` | 476 | the terminal client |
 | `test_crow_core.py` | 1455 | the shared core |
 | `test_crow_gui.py` | 896 | the window's API and page |
 | `test_crow_remote.py` | 53 | the phone mirror: server, pairing, devices, QR, the Tailscale state (#249, #290) |
@@ -63,7 +61,7 @@ Run from the repo root.
 
 The checkers carry their own suites: `tools/test_check_operating_point.py`,
 `tools/test_check_shared_core.py`, `tools/test_check_gui_prereqs.py`, plus
-`tools/test_gguf_header.py` and `tools/test_run_server_block.py`.
+and `tools/test_gguf_header.py`.
 
 `tools/test_pathtracer_kit.py` (41 cases) is the kit's suite: the checker red per broken link, and
 the mesher run in `node` against the real `voxel-kit.js` and the vendored three.js — culled-face

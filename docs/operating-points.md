@@ -83,11 +83,7 @@ packaged `b10269` cannot load it. Build the pin `6c84c7d5d` and apply PR #28040 
 hand) and PR #27880 (applies cleanly) for the line above. Do not build `b10687` or newer: it
 aborts during CUDA warmup on this card, and the cause is not attributed.
 
-Crow does this for you from the manifest, with the log and the process group it needs:
-
-```powershell
-python $env:LOCALAPPDATA\Crow\cli\crow.py --serve flash-next-q2-k-xl
-```
+The window does this for you from the manifest, from its model menu, with the log and the process group it needs.
 
 ---
 

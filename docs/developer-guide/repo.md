@@ -7,7 +7,6 @@
 | `cli/crow_gui.py` | the window — the client |
 | `cli/crow_core.py` | conversation, request, SSE, tool loop, memory, skills, goals, delegation, MCP, cost line |
 | `cli/crow_platform.py` | the platform seam: paths, process discovery, spawn and kill, per OS |
-| `cli/crow.py` | terminal client |
 | `cli/crow_voice.py` | dictation |
 | `install.ps1` · `install.sh` | the two installers, one contract |
 | `tools/start-server.py` | model picker, becomes the inference server |

@@ -31,7 +31,7 @@ Everything else is in this folder.
 |---|---|
 | [Tools](reference/tools.md) | the twenty-eight built in, plus MCP |
 | [Server flags](reference/server-flags.md) | what the inference server is started with, and why each flag is there |
-| [Client flags](reference/client-flags.md) | what `crow` and the window take |
+| [Client flags](reference/client-flags.md) | what the window takes |
 | [Reasoning levels](reference/reasoning-levels.md) | `low`, `medium`, `high`, and the thinking budget |
 | [Settings](reference/settings.md) | the settings sheet, `settings.json`, and the secret store |
 | [mcp.json](reference/mcp-json.md) | every key, both transports |
