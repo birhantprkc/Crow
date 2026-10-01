@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Removed
+
+- **The terminal client and `crow --serve` are gone** (#187, 2026-10-01). `cli/crow.py` and its suite `cli/test_crow.py` are deleted; the window is the only client: `python <install>/cli/crow_gui.py`, against crow-nest with `--base-url http://127.0.0.1:8099/v1`. `--serve <model>` has no replacement: the window boots a llama.cpp operating point from its model menu, and crow-nest's `serve` starts from the crow-nest repository. The version literal now lives in `cli/crow_core.py`; the installers read it there and fall back to `cli/crow.py` only for installs older than this change, so those still update. `tools/run_server_block.py` (E14 block), which drove the terminal client, moved to `tools/archive/2026-10/`. The suites are now `test_crow_core`, `test_crow_gui` and `test_crow_remote`; dropping `test_crow` is a deliberate coverage reduction.
+
 ## 2.8.5 — 2026-09-30
 
 **The phone remote answers a refused request instead of resetting the connection.** A test of it went red on

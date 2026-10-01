@@ -21,7 +21,7 @@ the model — that is a separate line, printed at the end of the run.
 | **System RAM** | 32 GB for the 27B. **64 GB for Flash-Next** — `-ncmoe 30` keeps the experts of 30 of 48 layers in system RAM |
 | **Disk** | ~2 GB for Crow, **73.45 GiB for the model** (3 shards) plus 0.9 GiB for the projector. The 27B is 16.35 GiB plus 0.9 |
 | **OS** | Windows x64 · Linux x86_64 (Arch/Omarchy is what it was ported on and measured on) |
-| **Python** | 3.9+ (`str.removesuffix` in the core). The terminal client uses the standard library only |
+| **Python** | 3.9+ (`str.removesuffix` in the core). |
 | **WebView2** | Window only, Windows. Ships with Windows 11 and with Edge |
 | **WebKitGTK** | Window only, Linux. `webkit2gtk-4.1` + `python-gobject` from the distribution — neither installer asks for root |
 | **wl-clipboard** | Linux only, and only for pasting an image into the window. `xclip` under X11 |
@@ -50,7 +50,7 @@ with paths resolved.
 |---|---|
 | everything under `%LOCALAPPDATA%\Crow` | elevate — there is no administrator prompt |
 | verifies every file against the release manifest | write to Program Files, the registry or `PATH` |
-| installs **both** clients, the window and the terminal one | download the model, or start anything |
+| installs the window | download the model, or start anything |
 
 | flag | |
 |---|---|
