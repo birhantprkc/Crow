@@ -41,7 +41,11 @@ searched as raw bytes, in UTF-8 and in UTF-16LE, ignoring ASCII case, for:
 the builder's profile path (both slash spellings and the JSON-escaped one), the
 user name (as a path segment, \Users\<name>\ and /home/<name>/, and bare), the host name,
 and every --private-pattern. A hit prints file, pattern and count, and the
-tool exits 1. There is no override switch. The patterns describe THIS machine:
+tool exits 1. There is no override switch. ONE scoped allowlist exists (PRIVACY_ALLOW):
+upstream words that merely contain the owner's bare name (the "round-robin" of the llama
+server's web UI, tokenizer vocabulary in the sd binaries) pass in the named file, in the
+named byte context, up to a maximum count, and are listed as INFO; anything else refuses.
+Path patterns and the host name are never allowlisted. The patterns describe THIS machine:
 bin/ taken from a package another machine built carries THAT machine's paths,
 so name them (--private-pattern "\Users\<builder>\").
 
@@ -74,6 +78,22 @@ EXCLUDE_FILES = ("*.log", "*.pyc", "*.pyo", "*.jsonl", "test_*.py", ".env*", "se
 KIT_REQUIRED = ("crow-pathtracer.js", "kit.json", "voxel-kit.js", "SKILL.md", "check_diorama.py",
                 "scaffold\\index.html", "scaffold\\scene.js",
                 "LICENSE.three", "LICENSE.three-mesh-bvh", "LICENSE.three-gpu-pathtracer")
+
+# ---- the privacy gate's scoped allowlist (keep identical to $PRIVACY_ALLOW in pack-release.ps1)
+# Only the BARE user name can be allowlisted, never a path pattern or the host name. Each entry
+# is "file glob @@ name @@ max @@ label @@ context regex": the glob is relative to the package
+# (backslashes, case-insensitive), the name is the owner it is about, max is the most hits the
+# file may carry, the regex describes the bytes that make a hit benign. It is matched against
+# the ASCII-lowercased bytes around the hit, starting at or before the hit and running across it,
+# and holds only syntax that Python and .NET read the same way. Measured 2026-10-01 on the
+# binaries rebuilt from a neutral path (#196 C5): the word "round-robin" twice in the embedded
+# web UI of llama-server-impl.dll, and tokenizer vocabulary (BPE merges lines, vocab JSON keys:
+# Robinson, probing, robinet ...) 29 times in each sd binary. Only UTF-8 hits can be allowed.
+PRIVACY_ALLOW = (
+    r'bin\llama-server-impl.dll @@ robin @@ 2 @@ round-robin (embedded web UI) @@ round-robin',
+    r'bin\sd-*.exe @@ robin @@ 29 @@ tokenizer vocabulary (BPE merges, vocab JSON) @@ (?:\n(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24} (?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}(?:</w>)?\n|"(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}"(?:: ?[0-9]+,|,))',
+)
+ALLOW_WINDOW = 64  # bytes of context read on each side of a hit
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -178,6 +198,79 @@ def scan_private(files: dict[str, bytes], patterns) -> list[tuple[str, str, str,
     return hits
 
 
+def _allow_entries(allow=PRIVACY_ALLOW) -> list[dict]:
+    out = []
+    for e in allow:
+        parts = e.split(" @@ ", 4)
+        if len(parts) != 5:
+            raise ValueError("privacy allowlist entry is malformed: " + e)
+        glob, name, mx, label, rx = parts
+        out.append({"glob": glob.lower(), "name": name.lower(), "max": int(mx), "label": label,
+                    "re": re.compile(rx.encode("latin-1"))})
+    return out
+
+
+def bare_user_name(patterns) -> str | None:
+    """The pattern that is the bare user name: the one whose \\Users\\<it>\\ is also searched."""
+    low = [p.lower() for p in patterns]
+    for p in low:
+        if "\\users\\%s\\" % p in low:
+            return p
+    return None
+
+
+def _covered(window: bytes, hit_at: int, hit_len: int, rx) -> bool:
+    """True when rx matches starting at or before the hit and running across all of it."""
+    for s in range(hit_at, -1, -1):
+        m = rx.match(window, s)
+        if m and m.end() >= hit_at + hit_len:
+            return True
+    return False
+
+
+def split_allowed(files: dict[str, bytes], hits, patterns, allow=PRIVACY_ALLOW):
+    """(refused, allowed). refused is [(path, pattern, encoding, count, reason)]; allowed is
+    [(path, label, count, max)]. Only the bare user name, only as UTF-8, only in a file an
+    entry names, only inside the entry's context, only up to its maximum; every other hit
+    stays refused."""
+    bare = bare_user_name(patterns)
+    entries = _allow_entries(allow)
+    refused, allowed = [], []
+    for path, pat, enc, n in hits:
+        mine = []
+        if bare and enc == "utf-8" and pat.lower() == bare:
+            mine = [e for e in entries if e["name"] == bare and fnmatch.fnmatchcase(path.lower(), e["glob"])]
+        if not mine:
+            refused.append((path, pat, enc, n, ""))
+            continue
+        if n > sum(e["max"] for e in mine):
+            refused.append((path, pat, enc, n, "more than the allowed maximum of %d" % sum(e["max"] for e in mine)))
+            continue
+        low = files[path].lower()
+        needle = pat.lower().encode("utf-8")
+        tally = [0] * len(mine)
+        uncovered = 0
+        i = low.find(needle)
+        while i != -1:
+            lo = max(0, i - ALLOW_WINDOW)
+            window = low[lo:i + len(needle) + ALLOW_WINDOW]
+            for k, e in enumerate(mine):
+                if _covered(window, i - lo, len(needle), e["re"]):
+                    tally[k] += 1
+                    break
+            else:
+                uncovered += 1
+            i = low.find(needle, i + len(needle))
+        if uncovered:
+            refused.append((path, pat, enc, uncovered, "outside the allowed contexts"))
+        for e, t in zip(mine, tally):
+            if t > e["max"]:
+                refused.append((path, pat, enc, t, "more than the allowed maximum of %d for %s" % (e["max"], e["label"])))
+            elif t:
+                allowed.append((path, e["label"], t, e["max"]))
+    return refused, allowed
+
+
 def privacy_gate(files: dict[str, bytes], extra=()) -> bool:
     """True when the files are clean. Prints every hit; the caller must refuse."""
     pats, notes = private_patterns(extra)
@@ -186,12 +279,15 @@ def privacy_gate(files: dict[str, bytes], extra=()) -> bool:
     hits = scan_private(files, pats)
     print("privacy gate: %d files, %d patterns (profile path x3 spellings, user name, host, %d extra), UTF-8 and UTF-16LE"
           % (len(files), len(pats), len([e for e in extra if e])))
-    if not hits:
-        print("  privacy gate: clean")
+    refused, allowed = split_allowed(files, hits, pats)
+    for path, label, n, mx in allowed:
+        print("  privacy gate INFO: allowed %s  %s  x%d (maximum %d)" % (path, label, n, mx))
+    if not refused:
+        print("  privacy gate: clean" + (" (%d allowed hits, see INFO)" % sum(a[2] for a in allowed) if allowed else ""))
         return True
-    print("PRIVACY GATE: REFUSING TO PACK -- %d hits in %d files" % (len(hits), len({h[0] for h in hits})))
-    for path, pat, enc, n in hits:
-        print("  %s  pattern '%s'  %s  x%d" % (path, pat, enc, n))
+    print("PRIVACY GATE: REFUSING TO PACK -- %d hits in %d files" % (len(refused), len({h[0] for h in refused})))
+    for path, pat, enc, n, why in refused:
+        print("  %s  pattern '%s'  %s  x%d%s" % (path, pat, enc, n, "  (%s)" % why if why else ""))
     print("  nothing was written. Remove the data from the source (or rebuild with path remapping); there is no override.")
     return False
 

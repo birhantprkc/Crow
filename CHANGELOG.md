@@ -22,7 +22,10 @@ The reasoning is in the commit and on the issue.
 
 ### Known limitations
 
-- **The published 2.1.0, 2.8.4 and 2.8.5 Windows assets still contain the local logs.** They are replaced with a clean package later (robin, 2026-10-01). A new package needs `bin\` rebuilt from a path without a user name; the gate refuses the current binaries.
+- **The published 2.1.0, 2.8.4 and 2.8.5 Windows assets still contain the local logs.** They are replaced with a clean package later (robin, 2026-10-01).
+  - The gate refuses the binaries those packages were built from.
+  - `bin\` was rebuilt on 2026-10-01 from a path without a user name, at the same commits and CMake options: llama.cpp `1c3c967` with its working-tree diff, sd.cpp `2f88688`. Builder paths went from up to 258 per file to 0, sizes changed by less than 0.03 %.
+  - The gate passes that rebuild. It allows only three upstream word sites, each by file, exact context and measured maximum: "round-robin" twice in `llama-server-impl.dll`, and 29 tokenizer-vocabulary entries ("Robin", "Robinson") in each of `sd-cli.exe` and `sd-server.exe`. Paths are never allowed.
 
 ### Removed
 

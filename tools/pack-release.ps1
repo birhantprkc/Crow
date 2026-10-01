@@ -49,7 +49,11 @@ staged file is searched as raw bytes, in UTF-8 and in UTF-16LE, ignoring ASCII
 case, for: $env:USERPROFILE (backslash, slash and JSON-escaped spellings), the
 user name (as a path segment, \Users\<name>\ and /home/<name>/, and bare), $env:COMPUTERNAME,
 and every -PrivatePattern. A hit prints file, pattern and count, removes the
-stage and exits 1. THERE IS NO OVERRIDE SWITCH, on purpose: a switch that ships
+stage and exits 1. ONE scoped allowlist exists ($PRIVACY_ALLOW): upstream words that merely
+contain the owner's bare name (the "round-robin" of the llama server's web UI, tokenizer
+vocabulary in the sd binaries) pass in the named file, in the named byte context, up to a
+maximum count, and are listed as INFO; anything else refuses. Path patterns and the host
+name are never allowlisted. THERE IS NO OVERRIDE SWITCH, on purpose: a switch that ships
 private data on request is a switch somebody passes at 23:00 on release night.
 Fix the source, or rebuild with path remapping, and pack again.
 #>
@@ -321,6 +325,24 @@ function Copy-ShippedTree {
 # The privacy gate (#196 C2)
 # ---------------------------------------------------------------------------
 
+# The gate's scoped allowlist (#196 C6; keep identical to PRIVACY_ALLOW in repack-release.py).
+# Only the BARE user name can be allowlisted, never a path pattern or the host name. Each entry
+# is 'file glob @@ name @@ max @@ label @@ context regex': the glob is relative to the package
+# (backslashes, case-insensitive), the name is the owner it is about, max is the most hits the
+# file may carry, the regex describes the bytes that make a hit benign. It is matched against
+# the ASCII-lowercased bytes (read as Latin-1) around the hit, anchored at or before the hit and
+# running across it, and holds only syntax that .NET and Python read the same way. Measured
+# 2026-10-01 on the binaries rebuilt from a neutral path (#196 C5): the word "round-robin" twice
+# in the embedded web UI of llama-server-impl.dll, and tokenizer vocabulary (BPE merges lines,
+# vocab JSON keys: Robinson, probing, robinet ...) 29 times in each sd binary. Only UTF-8 hits
+# can be allowed. The closing paren of the list stays on a line of its own: the drift test
+# in test_repack_release.py reads the list between "@(" and that line.
+$PRIVACY_ALLOW = @(
+    'bin\llama-server-impl.dll @@ robin @@ 2 @@ round-robin (embedded web UI) @@ round-robin',
+    'bin\sd-*.exe @@ robin @@ 29 @@ tokenizer vocabulary (BPE merges, vocab JSON) @@ (?:\n(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24} (?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}(?:</w>)?\n|"(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}"(?:: ?[0-9]+,|,))'
+)
+$ALLOW_WINDOW = 64   # bytes of context read on each side of a hit
+
 # A byte search compiled once. Streams the file in 4 MB blocks (the DLLs are
 # hundreds of MB), folds ASCII A-Z so the match ignores case, and counts each
 # needle without counting a match twice across a block boundary.
@@ -369,6 +391,43 @@ public static class CrowByteScan {
             }
         }
         return counts;
+    }
+
+    // Where needle (already lower case) starts, case-folded like Count, in file order.
+    // Stops collecting after limit offsets: the caller refuses a file with more anyway.
+    public static long[] Offsets(string path, byte[] needle, int limit) {
+        var res = new System.Collections.Generic.List<long>();
+        int n = needle.Length;
+        if (n == 0) return res.ToArray();
+        const int CH = 4 * 1024 * 1024;
+        byte[] buf = new byte[CH + n];
+        int keep = 0;
+        long baseOff = 0;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 65536)) {
+            bool eof = false;
+            while (!eof && res.Count < limit) {
+                int read = fs.Read(buf, keep, CH);
+                if (read <= 0) { eof = true; read = 0; }
+                int total = keep + read;
+                for (int i = keep; i < total; i++) {
+                    byte b = buf[i];
+                    if (b >= 65 && b <= 90) buf[i] = (byte)(b + 32);
+                }
+                int lim = eof ? total : Math.Max(0, total - (n - 1));
+                for (int i = 0; i + n <= total && i < lim && res.Count < limit; i++) {
+                    if (buf[i] != needle[0]) continue;
+                    int j = 1;
+                    while (j < n && buf[i + j] == needle[j]) j++;
+                    if (j == n) res.Add(baseOff + i);
+                }
+                if (!eof) {
+                    keep = total - lim;
+                    if (keep > 0) Buffer.BlockCopy(buf, lim, buf, 0, keep);
+                    baseOff += lim;
+                }
+            }
+        }
+        return res.ToArray();
     }
 }
 '@
@@ -451,17 +510,123 @@ function Find-PrivateData {
     return ,@($hits)
 }
 
+function ConvertFrom-AllowEntry {
+    param([string] $Entry)
+    $f = $Entry -split ' @@ ', 5
+    if ($f.Count -ne 5) { throw "privacy allowlist entry is malformed: $Entry" }
+    return [pscustomobject]@{ Glob = $f[0]; Name = $f[1]; Max = [int]$f[2]; Label = $f[3]; Regex = $f[4] }
+}
+
+function Get-BareUserName {
+    # The pattern that is the bare user name: the one whose \Users\<it>\ is also searched.
+    # $null when there is none (a name under 4 characters is not searched bare).
+    param([string[]] $Patterns)
+    foreach ($p in $Patterns) {
+        if ($Patterns -contains ('\Users\' + $p + '\')) { return $p }
+    }
+    return $null
+}
+
+function Test-HitInAllowedContext {
+    # $true when Re matches starting at or before the hit and running across all of it.
+    param([string] $Window, [int] $HitAt, [int] $HitLen, [regex] $Re)
+    for ($s = $HitAt; $s -ge 0; $s--) {
+        $m = $Re.Match($Window, $s)
+        if ($m.Success -and $m.Index -eq $s -and ($m.Index + $m.Length) -ge ($HitAt + $HitLen)) { return $true }
+    }
+    return $false
+}
+
+function Get-HitWindow {
+    # The bytes around a hit, ASCII-lowercased, as a Latin-1 string, and where the hit sits in it.
+    param([string] $Path, [long] $Offset, [int] $Len)
+    $lo  = [Math]::Max([long]0, $Offset - $ALLOW_WINDOW)
+    $buf = New-Object byte[] ([int]($Offset - $lo) + $Len + $ALLOW_WINDOW)
+    $fs  = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        [void]$fs.Seek($lo, [IO.SeekOrigin]::Begin)
+        $got = 0
+        while ($got -lt $buf.Length) {
+            $r = $fs.Read($buf, $got, $buf.Length - $got)
+            if ($r -le 0) { break }
+            $got += $r
+        }
+    } finally { $fs.Dispose() }
+    for ($i = 0; $i -lt $got; $i++) { if ($buf[$i] -ge 65 -and $buf[$i] -le 90) { $buf[$i] += 32 } }
+    return [pscustomobject]@{
+        Text  = [Text.Encoding]::GetEncoding('iso-8859-1').GetString($buf, 0, $got)
+        HitAt = [int]($Offset - $lo)
+    }
+}
+
+function Split-AllowedHits {
+    <#
+    Splits the hits into Refused and Allowed. Only the bare user name, only as UTF-8, only in a
+    file an entry names, only inside the entry's context, only up to its maximum is allowed;
+    every other hit stays refused. Refused hits carry a Reason ('' when none to give).
+    #>
+    param([string] $Root, $Hits, [string[]] $Patterns, [string[]] $Allow = $PRIVACY_ALLOW)
+    $bare    = Get-BareUserName -Patterns $Patterns
+    $entries = @($Allow | ForEach-Object { ConvertFrom-AllowEntry -Entry $_ })
+    $refused = @()
+    $allowed = @()
+    foreach ($h in $Hits) {
+        $mine = @()
+        if ($bare -and $h.Encoding -eq 'utf-8' -and $h.Pattern -ieq $bare) {
+            $mine = @($entries | Where-Object { $_.Name -ieq $bare -and $h.Path -like $_.Glob })
+        }
+        $keep = { param($n, $why) [pscustomobject]@{ Path = $h.Path; Pattern = $h.Pattern; Encoding = $h.Encoding; Count = $n; Reason = $why } }
+        if ($mine.Count -eq 0) { $refused += (& $keep $h.Count ''); continue }
+        $cap = ($mine | Measure-Object -Property Max -Sum).Sum
+        if ($h.Count -gt $cap) { $refused += (& $keep $h.Count "more than the allowed maximum of $cap"); continue }
+        $full    = Join-Path $Root $h.Path
+        $needle  = [byte[]][Text.Encoding]::UTF8.GetBytes($h.Pattern.ToLowerInvariant())
+        $offsets = [CrowByteScan]::Offsets($full, $needle, $cap + 1)
+        $res     = @($mine | ForEach-Object { [regex]::new('\G(?:' + $_.Regex + ')') })
+        $tally   = New-Object 'int[]' $mine.Count
+        $uncovered = 0
+        foreach ($off in $offsets) {
+            $w = Get-HitWindow -Path $full -Offset $off -Len $needle.Length
+            $k = -1
+            for ($i = 0; $i -lt $mine.Count; $i++) {
+                if (Test-HitInAllowedContext -Window $w.Text -HitAt $w.HitAt -HitLen $needle.Length -Re $res[$i]) { $k = $i; break }
+            }
+            if ($k -ge 0) { $tally[$k]++ } else { $uncovered++ }
+        }
+        if ($uncovered -gt 0) { $refused += (& $keep $uncovered 'outside the allowed contexts') }
+        for ($i = 0; $i -lt $mine.Count; $i++) {
+            if ($tally[$i] -gt $mine[$i].Max) {
+                $refused += (& $keep $tally[$i] ("more than the allowed maximum of {0} for {1}" -f $mine[$i].Max, $mine[$i].Label))
+            } elseif ($tally[$i] -gt 0) {
+                $allowed += [pscustomobject]@{ Path = $h.Path; Label = $mine[$i].Label; Count = $tally[$i]; Max = $mine[$i].Max }
+            }
+        }
+    }
+    return [pscustomobject]@{ Refused = @($refused); Allowed = @($allowed) }
+}
+
 function Invoke-PrivacyGate {
     # $true when the tree is clean. Prints every hit; the caller has to refuse.
     param([string] $Root, [string[]] $Patterns, [string[]] $Notes = @())
     foreach ($n in $Notes) { Write-Host "  privacy gate note: $n" }
     $nFiles = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force).Count
     Write-Host ("privacy gate: $nFiles files, $($Patterns.Count) patterns, UTF-8 and UTF-16LE")
-    $hits = Find-PrivateData -Root $Root -Patterns $Patterns
-    if ($hits.Count -eq 0) { Write-Host "  privacy gate: clean"; return $true }
+    $found = Find-PrivateData -Root $Root -Patterns $Patterns
+    $split = Split-AllowedHits -Root (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\') -Hits $found -Patterns $Patterns
+    foreach ($a in $split.Allowed) {
+        Write-Host ("  privacy gate INFO: allowed {0}  {1}  x{2} (maximum {3})" -f $a.Path, $a.Label, $a.Count, $a.Max)
+    }
+    $hits = @($split.Refused)
+    if ($hits.Count -eq 0) {
+        $nAllowed = ($split.Allowed | Measure-Object -Property Count -Sum).Sum
+        Write-Host ("  privacy gate: clean" + $(if ($nAllowed) { " ($nAllowed allowed hits, see INFO)" } else { '' }))
+        return $true
+    }
     $nHit = @($hits | ForEach-Object { $_.Path } | Sort-Object -Unique).Count
     Write-Host "PRIVACY GATE: REFUSING TO PACK -- $($hits.Count) hits in $nHit files" -ForegroundColor Red
-    foreach ($h in $hits) { Write-Host ("  {0}  pattern '{1}'  {2}  x{3}" -f $h.Path, $h.Pattern, $h.Encoding, $h.Count) }
+    foreach ($h in $hits) {
+        Write-Host (("  {0}  pattern '{1}'  {2}  x{3}" -f $h.Path, $h.Pattern, $h.Encoding, $h.Count) + $(if ($h.Reason) { "  ($($h.Reason))" } else { '' }))
+    }
     Write-Host "  nothing was written. Remove the data from the source (or rebuild with path remapping); there is no override." -ForegroundColor Red
     return $false
 }
@@ -783,6 +948,68 @@ function Invoke-Selftest {
         Set-Content -LiteralPath (Join-Path $stage 'cli\runs-copy.log') -Value 'x'
         $leaked = Invoke-StageGate -Stage $stage -Patterns $fake.Patterns -Notes $fake.Notes 6>$null
         Check "NEGATIVE: a *.log that reached the stage anyway is refused" (-not $leaked)
+
+        # The scoped allowlist (#196 C6): upstream words that merely contain the owner's name.
+        # The fake owner is "robin" because the allowlist is about that name; every other
+        # case is synthetic, so no check depends on who runs this.
+        $own   = Get-PrivatePatterns -ProfilePath 'C:\Users\robin' -User 'robin' -Hosts @($fakeHost)
+        $alStg = Join-Path $pkRoot 'allowstage'
+        $rr    = [Text.Encoding]::ASCII.GetBytes('east-stats random round-robin source-hash static-port')
+        $mz    = [byte[]]@(0x4D, 0x5A, 0)
+        $runAllow = {
+            param([hashtable] $Files)
+            if (Test-Path -LiteralPath $alStg) { Remove-Item -LiteralPath $alStg -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path (Join-Path $alStg 'bin') | Out-Null
+            foreach ($k in $Files.Keys) { [IO.File]::WriteAllBytes((Join-Path $alStg $k), [byte[]]$Files[$k]) }
+            $o = @(Invoke-StageGate -Stage $alStg -Patterns $own.Patterns -Notes $own.Notes 6>&1)
+            [pscustomobject]@{
+                Ok  = [bool]($o | Where-Object { $_ -is [bool] } | Select-Object -Last 1)
+                Log = (($o | Where-Object { $_ -isnot [bool] } | ForEach-Object { "$_" }) -join "`n")
+            }
+        }
+        $impl = 'bin\llama-server-impl.dll'
+        $two  = $mz + $rr + [byte]0 + $rr
+        $a = & $runAllow @{ $impl = $two }
+        Check "ALLOW: round-robin twice in llama-server-impl.dll passes, and is logged as INFO" ($a.Ok -and $a.Log -match 'INFO: allowed bin\\llama-server-impl\.dll.*round-robin.*x2')
+        $b = & $runAllow @{ 'bin\llama-server.exe' = ($mz + $rr) }
+        Check "NEGATIVE: the same word in another file is refused" ($a.Ok -and -not $b.Ok -and $b.Log -match 'llama-server\.exe')
+        $c = & $runAllow @{ $impl = ($two + [byte]0 + $rr) }
+        Check "NEGATIVE: a third occurrence beyond the maximum is refused" ($a.Ok -and -not $c.Ok -and $c.Log -match 'maximum')
+        $d = & $runAllow @{ $impl = ($two + [Text.Encoding]::ASCII.GetBytes(' Write a report for Robin about the run')) }
+        Check "NEGATIVE: a bare name outside any allowed context, in an allowed file, is refused" ($a.Ok -and -not $d.Ok)
+        $paths = @('C:\Users\robin\dev\llama.cpp\x.cpp', '/home/robin/src', '\Users\robin\')
+        $leakedPaths = @($paths | Where-Object { (& $runAllow @{ $impl = ($two + [Text.Encoding]::ASCII.GetBytes(" $_")) }).Ok })
+        Check "NEGATIVE: a profile path, /home/<name>/ or \Users\<name>\ in an allowed file is refused" ($a.Ok -and $leakedPaths.Count -eq 0)
+        $e = & $runAllow @{ $impl = ($two + [Text.Encoding]::ASCII.GetBytes(" $fakeHost")) }
+        Check "NEGATIVE: the host name is never allowlisted" ($a.Ok -and -not $e.Ok)
+        $f = & $runAllow @{ $impl = ($mz + [Text.Encoding]::Unicode.GetBytes('round-robin')) }
+        Check "NEGATIVE: the allowed word as UTF-16LE is not allowed" ($a.Ok -and -not $f.Ok)
+        $other = Get-PrivatePatterns -ProfilePath 'C:\Users\round' -User 'round' -Hosts @($fakeHost)
+        [IO.File]::WriteAllBytes((Join-Path $alStg $impl), [byte[]]$two)
+        $g = @(Invoke-StageGate -Stage $alStg -Patterns $other.Patterns -Notes $other.Notes 6>&1 | Where-Object { $_ -is [bool] })
+        Check "NEGATIVE: for a machine whose user is not robin the allowlist gives nothing" ($a.Ok -and -not [bool]($g | Select-Object -Last 1))
+        # tokenizer vocabulary, the lines verbatim from sd-cli.exe: BPE merges and vocab JSON
+        $vocab = [byte[]]@()
+        foreach ($v in @('robin son</w>', '"Robin": 101068,', '"probing": 109172,', '"odrobin",', '"robinet",')) {
+            $vocab += [byte[]]@(10)
+            $vocab += [Text.Encoding]::ASCII.GetBytes($v)
+        }
+        $vocab += [byte[]]@(10, 0xE2, 0x96, 0x81, 0x52, 0x6F, 0x62, 0x69, 0x6E, 0x73, 0x20, 0x6F, 0x6E, 10)            # <U+2581>Robins on
+        $vocab += [byte[]]@(10, 0xC4, 0xA0, 0x20, 0x52, 0x6F, 0x62, 0x69, 0x6E, 10)                                   # <U+0120> Robin
+        $vocab += [byte[]]@(0x22, 0xE2, 0x96, 0x81, 0x52, 0x6F, 0x62, 0x69, 0x6E, 0x73, 0x6F, 0x6E, 0x22, 0x3A, 0x31, 0x2C) # "<U+2581>Robinson":1,
+        $h1 = & $runAllow @{ 'bin\sd-cli.exe' = ($mz + $vocab); 'bin\sd-server.exe' = ($mz + $vocab) }
+        Check "ALLOW: tokenizer vocabulary (merges lines, vocab JSON keys) passes in the sd binaries" ($h1.Ok -and $h1.Log -match 'INFO: allowed bin\\sd-cli\.exe.*tokenizer vocabulary')
+        $h2 = & $runAllow @{ 'bin\llama.dll' = ($mz + $vocab) }
+        Check "NEGATIVE: the same vocabulary in another file is refused" ($h1.Ok -and -not $h2.Ok)
+        $line = [byte[]]@(10, 0xE2, 0x96, 0x81, 0x20, 0x52, 0x6F, 0x62, 0x69, 0x6E, 0x73, 0x6F, 0x6E, 10)
+        $many = { param($n) $x = [byte[]]@(); for ($i = 0; $i -lt $n; $i++) { $x += $line }; $x }
+        $h3 = & $runAllow @{ 'bin\sd-cli.exe' = (& $many 29) }
+        $h4 = & $runAllow @{ 'bin\sd-cli.exe' = (& $many 30) }
+        Check "vocabulary: 29 hits pass, a 30th is refused (the maximum)" ($h3.Ok -and -not $h4.Ok -and $h4.Log -match 'maximum')
+        $h5 = & $runAllow @{ 'bin\sd-cli.exe' = ((& $many 2) + [Text.Encoding]::ASCII.GetBytes('Write a report for Robin about the run')) }
+        Check "NEGATIVE: prose with the name in an sd binary is refused" ($h3.Ok -and -not $h5.Ok)
+        $self0 = Get-Content -LiteralPath $PSCommandPath -Raw
+        Check "the allowlist is declared as a literal list the drift test can read" ($self0 -match '(?m)^\$PRIVACY_ALLOW\s*=\s*@\(\s*\r?\n')
     } finally {
         Remove-Item $pkRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
