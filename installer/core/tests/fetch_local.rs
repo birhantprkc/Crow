@@ -110,3 +110,43 @@ fn local_source_missing_file_is_permanent() {
     );
     assert!(matches!(r, Err(FetchError::Permanent(_))), "{r:?}");
 }
+
+/// #196 P2-E2E: a verified file that is gone (deleted, or the image stack's
+/// convert input) is fetched again; stopped part-way, the state must not
+/// still say `verified`, or the welcome-back replay shows a 22 % file as done.
+/// Measured on the real run: Quit at 4,001,628,160 of 17,844,005,845 bytes
+/// left `"verified": true` in state.json.
+#[test]
+fn a_refetch_stopped_part_way_is_not_left_verified() {
+    let content = data(12 << 20, 31);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("src");
+    let dest = tmp.path().join("install").join("v.bin");
+    let job = job("v", "https://unused.invalid/v.bin", &dest, &content);
+    std::fs::create_dir_all(root.join("repo")).unwrap();
+    std::fs::write(root.join(&job.local_rel), &content).unwrap();
+    let mut st = StateStore::load(&tmp.path().join("state.json")).unwrap();
+    let cancel = AtomicBool::new(false);
+    download(&job, &mut st, &opts(Source::Local(root.clone())), &mut |_| {}, &cancel).unwrap();
+    assert!(st.files["v"].verified);
+
+    std::fs::remove_file(&dest).unwrap();
+    let total = content.len() as u64;
+    let r = download(
+        &job,
+        &mut st,
+        &opts(Source::Local(root.clone())),
+        &mut |e| {
+            if let Event::FileProgress { done, .. } = e
+                && done < total
+            {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+        &cancel,
+    );
+    assert!(matches!(r, Err(FetchError::Cancelled)), "{r:?}");
+    let saved = StateStore::load(&st.path).unwrap().files["v"].clone();
+    assert!(saved.bytes_done < total, "stopped part-way: {}", saved.bytes_done);
+    assert!(!saved.verified, "a part of {} of {total} bytes is recorded as verified", saved.bytes_done);
+}
