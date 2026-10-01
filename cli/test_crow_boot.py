@@ -587,6 +587,21 @@ class TheShortcutTests(BootCase):
         self.assertEqual(seen["CROW_LNK_PATH"], os.path.join(self.tmp, "Crow.lnk"))
         self.assertEqual(seen["CROW_LNK_DIR"], self.install)
 
+    @unittest.skipUnless(crow_platform.IS_WINDOWS, "a .lnk is Windows")
+    def test_a_cmd_style_variable_in_the_folder_is_expanded(self):
+        # PowerShell passes "%USERPROFILE%\Desktop" through unexpanded (2026-10-01)
+        seen = {}
+
+        def run(argv, **kw):
+            seen.update(kw["env"])
+            open(kw["env"]["CROW_LNK_PATH"], "wb").close()
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch.dict(os.environ, {"CROW_TEST_SHORTCUT_DIR": self.tmp}):
+            code = self.boot().create_shortcut("%CROW_TEST_SHORTCUT_DIR%", run=run,
+                                               which=lambda name: None)
+        self.assertEqual(code, crow_boot.EXIT_OK)
+        self.assertEqual(seen["CROW_LNK_PATH"], os.path.join(self.tmp, "Crow.lnk"))
+
 
 class StopWaitsForTheTeardownTests(unittest.TestCase):
     def test_a_process_exists_until_it_has_ended_and_stop_asks_that(self):

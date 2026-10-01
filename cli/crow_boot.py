@@ -1162,6 +1162,9 @@ class Boot:
             self.say("%s --create-shortcut writes a Windows .lnk; on this platform start "
                      "the menu with: python %s" % (self.style.icon("fail"), os.path.abspath(__file__)))
             return EXIT_SETUP
+        # PowerShell hands "%USERPROFILE%\Desktop" over unexpanded; cmd and the
+        # docs spell it that way, so the folder is expanded here, ~ as well
+        folder = os.path.expanduser(os.path.expandvars(folder))
         if not os.path.isdir(folder):
             self.say("%s no such folder: %s" % (self.style.icon("fail"), folder))
             return EXIT_SETUP
