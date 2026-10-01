@@ -424,7 +424,7 @@ def write_settings(doc: dict) -> bool:
 
 def drag_uri_path(uri: str) -> str:
     """#312: the local path of one `file://` URI from a GTK drag, else "".
-    `file:///home/x/a%20b.png` -> `/home/x/a b.png`; `file:///C:/x.png` ->
+    `file:///srv/x/a%20b.png` -> `/srv/x/a b.png`; `file:///C:/x.png` ->
     `C:/x.png`; any other scheme (a web image's https) is not a file here."""
     import urllib.parse
     parts = urllib.parse.urlsplit(str(uri or "").strip())
@@ -481,7 +481,7 @@ def current_theme() -> str:
 # the evening is worse than no line.
 #
 # ENGLISH, LIKE EVERY OTHER LINE THIS CLIENT SPEAKS. These four groups were
-# written in German on 2026-08-21 and robin caught it the same evening: Crow has
+# written in German on 2026-08-21 and the owner caught it the same evening: Crow has
 # no localisation at all -- `grep -c "locale\|gettext" cli/*.py` answers 0 three
 # times -- so a German line is not "the German version", it is the ONLY version,
 # shown to every user of a repository whose README, issues and every other
@@ -518,9 +518,9 @@ def user_first_name() -> str:
         raw = getpass.getuser()
     except Exception:                      # noqa: BLE001 - a nicety, never fatal
         return ""
-    # `DOMAIN\robin` and `robin@host` are both logins somebody really has -- and
+    # `DOMAIN\alice` and `alice@host` are both logins somebody really has -- and
     # the name is on OPPOSITE SIDES of the two separators. Taking the last part
-    # of both turns `robin@rechner` into the machine's name.
+    # of both turns `alice@rechner` into the machine's name.
     for sep in ("\\", "/"):
         raw = raw.rsplit(sep, 1)[-1]
     raw = raw.split("@", 1)[0].split(".")[0].strip()
@@ -541,7 +541,7 @@ def daypart(hour: int) -> str:
 def greeting(now: float | None = None, name: str | None = None) -> str:
     """One line for an empty chat: the hour decides the group, the minute the line.
 
-    NOT `random`. The line has to change -- robin asked for that in as many words
+    NOT `random`. The line has to change -- the owner asked for that in as many words
     -- but a random one cannot be held to anything: no case could say WHICH line
     a given moment produces, so the only testable claim left would be "it is one
     of four", which is not the behaviour. The minute is a clock somebody can set,
@@ -642,18 +642,18 @@ def rail_width_setting() -> int:
 # DIE GRENZEN DES CODE-PANELS, gespiegelt zur Rail und aus demselben Grund in
 # Python geklemmt: der Wert kommt aus einer Maus.
 #
-# DIE VORGABE IST DAS MINIMUM, robin am 2026-08-27: "der codepanel ist viel zu
+# DIE VORGABE IST DAS MINIMUM, der Owner am 2026-08-27: "der codepanel ist viel zu
 # breit. Default werte bitte wie in Screenshot 2" -- und sein gespeicherter
 # Zug stand auf exakt 260. Der Vorgaenger (380, dann #138c "halbe Flaeche")
 # entschied die Startbreite fuer ihn und lag zweimal daneben; wer mehr Panel
 # will, zieht den Griff, und DIESE Entscheidung bleibt gespeichert.
-# CODE_MAX war 720; robin am 2026-08-27: "Codepanel maximale Breite -15%" --
+# CODE_MAX war 720; der Owner am 2026-08-27: "Codepanel maximale Breite -15%" --
 # 720 * 0,85 = 612. Die Seite klemmt dieselbe Geste ein zweites Mal, siehe
 # codeDrag; beide Kopien tragen denselben Wert.
 CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 612, 260
 # #175. UND EINE ZWEITE DECKE, SOBALD DER BROWSER IN DER SPALTE STEHT. Die 612
 # sind die Decke fuer ein CODE-Panel -- eine Aufrufliste und ein Quelltext
-# brauchen nicht mehr, und robin hat sie 2026-08-27 selbst auf diesen Wert
+# brauchen nicht mehr, und der Owner hat sie 2026-08-27 selbst auf diesen Wert
 # gezogen. Eine WEBSEITE braucht mehr: bei 612 ist jede zweite Seite in ihrem
 # Mobil-Layout. Nach oben klemmt ohnehin das Layout, nicht diese Zahl: #main
 # haelt sein `min-width:560px`, und #side gibt vorher nach (#138c). Der Wert
@@ -924,7 +924,7 @@ def trash_file(path: str) -> str:
 
 def _trash_windows(full: str) -> str:
     """`trash_file` on Windows: SHFileOperationW, recycle bin, no dialogs.
-    NOT MEASURED on robin's Windows machine yet (#311 Expected result 9)."""
+    NOT MEASURED on the owner's Windows machine yet (#311 Expected result 9)."""
     import ctypes
     from ctypes import wintypes
 
@@ -1000,7 +1000,7 @@ PAGE = r"""<!doctype html>
 :root{
   --accent:__ACCENT__; --bevel:__BEVEL__; --model:__TEXT__;
 
-  /* THE DARK GROUND IS NEUTRAL, and that is robin's call on 2026-08-21: the
+  /* THE DARK GROUND IS NEUTRAL, and that is the owner's call on 2026-08-21: the
      window was the wordmark's own ground, and next to the reference he gave it
      read as a colour rather than as a background. The brand value did not
      change and it did not go away -- it is the third theme below. The hex is
@@ -1014,7 +1014,7 @@ PAGE = r"""<!doctype html>
   --line:#2e2e30; --line-soft:#242426;
   --dim:#a3a3a6; --dimmer:#6f6f73;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
-  /* #296: SKIPPED IS NOT RUNNING. Both were --warn and robin read one as the
+  /* #296: SKIPPED IS NOT RUNNING. Both were --warn and the owner read one as the
      other (2026-09-25); skipped gets its own hue, plus shape and a label. */
   --skip:#b392f0;
   --gold:#e5c04b; --bad-text:#ffd9d4;
@@ -1051,7 +1051,7 @@ PAGE = r"""<!doctype html>
      input box sits 5 px off the text above it. */
   --sbw:10px;
   /* #280. THE COLUMN, ONCE. The chat and the composer are one column, and
-     robin wants the bubbles on the composer's edges: the user's right edge on
+     the owner wants the bubbles on the composer's edges: the user's right edge on
      #box's right border, Crow's left edge on its left border. That holds only
      while both boxes come out of the SAME numbers, so they are here and
      nowhere else:
@@ -1078,7 +1078,7 @@ PAGE = r"""<!doctype html>
 :root[data-theme="light"]{
   --bevel:#d3d7dd; --model:#1a1c1f;
   /* THE RAIL IS NOT THE PAGE. On the first build both were #ffffff and the chat
-     list dissolved into the conversation beside it -- the reference robin gave
+     list dissolved into the conversation beside it -- the reference the owner gave
      sets its sidebar off against the content, and one border was not enough to
      do that on white. */
   --bg:#ffffff; --rail:#f7f7f8; --panel:#ffffff; --raised:#eeeef0;
@@ -1111,7 +1111,7 @@ PAGE = r"""<!doctype html>
   --line:#1c2438; --line-soft:#161d2e;
   --dim:#6d7b95; --dimmer:#4a566d;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
-  /* #296: SKIPPED IS NOT RUNNING. Both were --warn and robin read one as the
+  /* #296: SKIPPED IS NOT RUNNING. Both were --warn and the owner read one as the
      other (2026-09-25); skipped gets its own hue, plus shape and a label. */
   --skip:#b392f0;
   --gold:#e5c04b; --bad-text:#ffd9d4;
@@ -1134,7 +1134,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-corner{background:transparent}
 /* #305. THE THUMB SHOWS ONLY WHILE ITS STRIP IS SCROLLED OR POINTED AT
-   (robin, 2026-09-25: the stats line, the Code panel and the chat carried a
+   (the owner, 2026-09-25: the stats line, the Code panel and the chat carried a
    bar at rest). Transparent by default; `is-scrolling` is set by the one
    capture listener in the script (`scrollbarsAutoHide`) and cleared
    SB_LINGER_MS after the last scroll event; a hovering pointer shows it too,
@@ -1181,14 +1181,14 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 /* #119. THE WORDMARK IS A PALETTE ENTRY NOW. It was the accent in all three
    themes, which is Crow's own blue -- right on the dark blue ground it was
    drawn for, and a coloured word floating on a neutral or a white one.
-   robin: white on dark, dark on light, unchanged in `crow`.
+   The owner: white on dark, dark on light, unchanged in `crow`.
    TWO NAMES, because only `crow` splits the O off. Setting both to the same
    value in the other two is what makes them one solid word there rather than
    a word with a hole in it. */
 #mark{font-weight:700;letter-spacing:.22em;font-size:11.5px;color:var(--mark);pointer-events:none}
 #mark span{color:var(--mark-o)}
 /* #138. DER FREIE PLATZ WIRD EINEN PLATZ FRUEHER VERTEILT. Der Code-Knopf
-   gehoert nach robins Vorgabe links neben die Fensterknoepfe, also traegt ER
+   gehoert nach der Vorgabe des Owners links neben die Fensterknoepfe, also traegt ER
    das `auto` und `#wbtns` folgt ihm dicht. Zweimal `auto` nebeneinander waere
    falsch: Flex teilt den Rest dann gleichmaessig und schoebe den Knopf in die
    Mitte der Leiste. */
@@ -1331,7 +1331,7 @@ body.closing::after{content:"saving the chat and the cache...";position:fixed;
 /* -- code panel (#138) --------------------------------------------------- */
 /* DIE RAIL GESPIEGELT. Jede Regel hier hat ihre Zwillingsregel links, und wo
    sie abweicht, steht der Grund daneben. */
-/* DAS PANEL GIBT NACH, NIE DER COMPOSER. robin, 2026-08-27: "die Icons
+/* DAS PANEL GIBT NACH, NIE DER COMPOSER. der Owner, 2026-08-27: "die Icons
    duerfen niemals aus der chateingabemaske rausgucken rechts". Die Knoepfe
    geben nicht nach (#138c, mit Grund), also muss es das Panel: `min-width:0`
    statt `flex:none`, damit die Mindestbreite von #main gewinnt, wenn Fenster,
@@ -1339,7 +1339,7 @@ body.closing::after{content:"saving the chat and the cache...";position:fixed;
    Wunschbreite; gequetscht wird nur, was nicht hineinpasst. */
 /* #156. EINE SPALTE, ZWEI PANELS. Bis hierher WAR `#code` die Spalte: es trug
    die Breite, den Griff und die Falte. Mit einem zweiten Panel geht das nicht
-   mehr -- robins Ansage vom 2026-08-29: beide offen heisst uebereinander, eins
+   mehr -- des Owners Ansage vom 2026-08-29: beide offen heisst uebereinander, eins
    zugeklappt heisst, das andere hat die Flaeche allein. Das ist genau eine
    Flexspalte, und die Breite gehoert ab jetzt IHR: der Griff zieht eine Kante
    und nicht ein Panel, und `code_width` misst weiter dasselbe Rechteck.
@@ -1399,7 +1399,7 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
 #codehead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
   text-transform:uppercase;color:var(--dimmer)}
 #codehead .n{color:var(--dimmer);font-size:11px;font-variant-numeric:tabular-nums}
-/* #156. `copy` IM KOPF IST WEG, ersatzlos -- robins Ansage vom 2026-08-29:
+/* #156. `copy` IM KOPF IST WEG, ersatzlos -- des Owners Ansage vom 2026-08-29:
    "die copy funktion aus dem Header zaehlt global fuer alles (das ist doof)".
    Sie kopierte den sichtbaren Text des ganzen Panels, also Aufrufliste und
    Quelltext in einem Block, und wer einen Codeblock wollte, bekam alles. Der
@@ -1415,7 +1415,7 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
    Ueberschrift ueber einer leeren Flaeche behauptet einen Inhalt. */
 #codefiles[hidden]{display:none}
 /* #156. DERSELBE KLAPPKOPF WIE DIE AUFRUFE. Vorher war "Program code" eine
-   Ueberschrift ueber einer Liste, die nur wachsen konnte -- robins Ansage vom
+   Ueberschrift ueber einer Liste, die nur wachsen konnte -- des Owners Ansage vom
    2026-08-29: eine Gruppe, die sich zuklappen laesst, wie Tool-Calls. Damit
    traegt das Panel zwei gleiche Klappen statt einer Klappe und einer Zeile,
    und der Zaehler sagt, wie viele Bloecke darin liegen. */
@@ -1445,7 +1445,7 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
   color:var(--text-faint);max-height:none}
 
 /* -- #175: das Browser-Panel --------------------------------------------- */
-/* KOPF WIE `#codehead`, RAIL WIE `#code` -- robins Ansage: "aufbau identisch
+/* KOPF WIE `#codehead`, RAIL WIE `#code` -- des Owners Ansage: "aufbau identisch
    mit code panel". Eigene Regeln stehen hier nur, wo der Browser etwas hat, das
    das Code-Panel nicht kennt: Reiter, eine Adresszeile, und die Flaeche, in der
    eine fremde Seite steht. */
@@ -1500,7 +1500,7 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
    Rahmen durch, und eine Seite ohne eigenen Grund erscheint als Loch. Ein
    LEERER Reiter hat aber keine fremde Seite -- er ist unser eigenes Panel, und
    ein weisses Rechteck darin ist ein Fremdkoerper zwischen Titelleiste und
-   Rail (robin, 2026-08-31). Also traegt die Flaeche `--rail` wie die Leiste
+   Rail (der Owner, 2026-08-31). Also traegt die Flaeche `--rail` wie die Leiste
    darueber, und das Weiss kommt mit der ersten geladenen Adresse. */
 #brbody{flex:1;min-height:0;position:relative;background:var(--rail)}
 /* Was dasteht, bevor jemand eine Adresse getippt hat -- und was dasteht, wenn
@@ -1546,7 +1546,7 @@ body[data-git="shut"] #git{display:none}
 .gplus{color:var(--ok);font-variant-numeric:tabular-nums}
 .gminus{color:var(--bad);font-variant-numeric:tabular-nums}
 /* Der Zaehler steht neben dem Namen, nicht an ihm: `History12` war eine Zahl,
-   die wie eine Endung aussah (robin, 2026-08-29). Der Abstand kommt aus dem
+   die wie eine Endung aussah (der Owner, 2026-08-29). Der Abstand kommt aus dem
    `gap` der Kopfzeile, diese Regel gibt ihm nur seine Schrift. */
 .gitgrp .gcount{font-family:var(--mono);font-size:11px;color:var(--dimmer);
   font-variant-numeric:tabular-nums}
@@ -1657,7 +1657,7 @@ body[data-git="shut"] #git{display:none}
   overflow:auto;background:var(--panel);border:1px solid var(--line);
   border-radius:10px;box-shadow:0 6px 24px var(--shadow);font-size:11.5px}
 #goalpanel[hidden]{display:none}
-/* DREI ZONEN MIT LUFT DAZWISCHEN, nach robins Vorlage: Kopfzeile mit Status,
+/* DREI ZONEN MIT LUFT DAZWISCHEN, nach der Vorlage des Owners: Kopfzeile mit Status,
    dann das Ziel selbst mit Zeichen und Kennzahlen, dann die Liste. Die alte
    Fassung presste alles in eine Zeile -- Zeichen, Wort, Uhr, Zaehler -- und war
    damit eine Statusleiste, keine Anzeige. */
@@ -1723,7 +1723,7 @@ body[data-git="shut"] #git{display:none}
 #goalpanel li.skipped .t{color:var(--dim)}
 #goalpanel li .lbl{margin-left:6px;font-size:10.5px;letter-spacing:.3px;
   text-transform:uppercase;color:var(--skip)}
-/* #294: the goal waits for robin -- the paused step and the head in --bad,
+/* #294: the goal waits for the user -- the paused step and the head in --bad,
    with a pause glyph, and one line under the title saying why. */
 #goalpanel li.held .m,#goalpanel .gh .st.pz,#goalpanel .gz{color:var(--bad)}
 #goalpanel .gz{padding:0 15px 11px;font-size:12px;overflow-wrap:anywhere}
@@ -1853,7 +1853,7 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
   height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 2px var(--rail)}
 #remotetoggle.live .rdot{display:block}
 /* #249: der Dialog mit dem QR-Code und die Kopplungsleiste -- in der Form der
-   von robin abgenommenen Mockups (Schritt 0): das Blatt der Einstellungen,
+   vom Owner abgenommenen Mockups (Schritt 0): das Blatt der Einstellungen,
    nur kleiner; die Kopplungsfrage in der Form von #pendbar ueber der Eingabe. */
 #remotedlg{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
   background:var(--shadow-strong);padding-top:34px}
@@ -1942,7 +1942,7 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
   background:color-mix(in srgb,var(--accent) 14%,transparent)}}
 /* #156. DER KNOPF SAGT, OB DAS PANEL STEHT. Mit zwei Panels an einer Leiste ist
    das keine Verzierung mehr, sondern die Antwort auf "wo ist mein Git-Panel
-   hin" -- und weil das Wegklicken NUR hier geht (robins Ansage: kein zweites
+   hin" -- und weil das Wegklicken NUR hier geht (des Owners Ansage: kein zweites
    Kreuz im Panel), muss der Rueckweg sichtbar sein. */
 body:not([data-code="shut"]) #codetoggle,
 body:not([data-browser="shut"]) #browsertoggle,
@@ -1956,7 +1956,7 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
   text-align:left;border:0;background:transparent;font:inherit;color:inherit;
   padding:6px 9px 6px 8px;border-radius:6px;cursor:pointer;margin-top:2px}
 .proj:hover{background:var(--raised)}
-/* BOLD, robin on sight: a heading and its children at one weight is a list
+/* BOLD, the owner on sight: a heading and its children at one weight is a list
    with an indent, not a group. The chats under it stay at 400. */
 .proj .t{font-size:11.5px;font-weight:600;color:var(--text-hi);white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;flex:1}
@@ -2007,7 +2007,7 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
    it. `#body` carries the rail colour so there is something for the corner to
    cut away to, and `overflow:hidden` is what stops the flow's own background
    from squaring it off again at the first scroll. */
-/* DIE MINDESTBREITE DER MASKE, robin am 2026-08-27, zweite und endgueltige
+/* DIE MINDESTBREITE DER MASKE, der Owner am 2026-08-27, zweite und endgueltige
    Ansage am Abend: "DIE CHATEINGABEMASKE DARF NIEMALS KLEINER WERDEN ALS IN
    SCREENSHOT 2." Dort trug die Chatspalte ~570 px -- Modell-Chip ungekuerzt,
    alle Knoepfe innen. 380 liess den Chip abschneiden, sobald ein gezogenes
@@ -2034,7 +2034,7 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
    the settings sheet -- the connection with its address, and the tool switch --
    and an empty bar is a band of nothing between the ribbon and the first line
    of the chat. The rule it drew is gone with it, which is half of the seam
-   robin asked to remove. */
+   the owner asked to remove. */
 .chip{display:inline-flex;align-items:center;gap:6px;color:var(--dim);
   border:1px solid var(--line);border-radius:999px;padding:2px 10px;
   white-space:nowrap}
@@ -2078,7 +2078,7 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
 /* STABLE GUTTER, so the column does not shift sideways the moment a chat grows
    past one screen -- and so the composer below can line up against one number
    instead of against a scrollbar that comes and goes. */
-/* LUFT AN BEIDEN SEITEN (robin, 2026-08-23). Links steht die Rail, rechts der
+/* LUFT AN BEIDEN SEITEN (der Owner, 2026-08-23). Links steht die Rail, rechts der
    Scrollbalken; der Rinnstein daneben haelt die Spalte ruhig, aber er ist kein
    Abstand. Zehn Pixel sind es, und `#composer` traegt dieselben zehn, damit
    Spalte und Eingabemaske weiter auf derselben Kante stehen. */
@@ -2122,7 +2122,7 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
 .you .txt{color:var(--text);white-space:pre-wrap;background:var(--raised);
   border:1px solid var(--line);border-radius:12px;padding:9px 13px;
   justify-self:end;max-width:75%;box-sizing:border-box}
-/* #280. ONE COLUMN, TWO SIDES (robin, 2026-09-24). The user's bubble stands
+/* #280. ONE COLUMN, TWO SIDES (the owner, 2026-09-24). The user's bubble stands
    on the RIGHT edge of the column -- which is #box's right border, see
    --colw -- and Crow's text on the LEFT edge, which is #box's left border.
    The `●` in a 38-px grid column in front of every answer went with it: it
@@ -2163,7 +2163,7 @@ details.think[open] .caret{transform:rotate(90deg)}
 .say{color:var(--model);line-height:1.62;white-space:pre-wrap}
 /* THE FORMATTED ANSWER. `pre-wrap` moves off the box and onto the paragraph:
    inside one, a single newline is still a line break -- this client has never
-   folded them and folding them now would reflow every answer robin has read --
+   folded them and folding them now would reflow every answer the owner has read --
    while a table or a list wraps the way its own box says. */
 .say.md{white-space:normal}
 .md p{margin:0 0 9px;white-space:pre-wrap}
@@ -2253,14 +2253,14 @@ a.lnk:focus-visible,.pth:focus-visible
 #toolcalls .tcclear:hover{border-color:var(--bevel);color:var(--text-hover)}
 #toolcalls .empty{margin:0;padding:2px 4px}
 
-/* #156. DIESELBE KACHEL FUER JEDE KLAPPE, und das ist robins Ansage vom
+/* #156. DIESELBE KACHEL FUER JEDE KLAPPE, und das ist des Owners Ansage vom
    2026-08-29: "sollen so ein panel haben wie Tool-Calls mit diesem Grau
    hinterlegten". Bis hierher gehoerte die Form EINEM Element -- jede Regel
    oben haengt an `#toolcalls` --, und die zwei neuen Klappen standen deshalb
    nackt daneben. Die Regeln stehen hier ein zweites Mal statt oben umgeschrieben
    zu werden, weil die Kachel der Aufrufliste eine abgenommene Form ist und ein
    Umbau an ihr die Gruppe waere, die niemand angefasst haben wollte. */
-/* DAS GRAU GEHOERT DER TITELZEILE, NICHT DER FLAECHE (robin, 2026-08-29, mit
+/* DAS GRAU GEHOERT DER TITELZEILE, NICHT DER FLAECHE (der Owner, 2026-08-29, mit
    dem Mockup daneben). Aufgeklappt war die ganze Gruppe hell, und damit lasen
    sich fuenfzehn Dateizeilen als ein einziger Kasten -- der Kopf ist der
    Griff, der Inhalt ist der Inhalt, und nur einer von beiden darf sich
@@ -2277,7 +2277,7 @@ a.lnk:focus-visible,.pth:focus-visible
 /* DIE FUGE UNTER DEM KOPF, wie bei den Aufrufen: sie trennt den Index von dem,
    was er indiziert, und ohne sie sitzt die erste Zeile am Titel. */
 #codefiles .cfbody,.gitgrp .gbody{border-top:1px solid var(--line);padding:8px}
-/* AUF EINER LINIE, NICHT AUF EINER MITTE (robin, 2026-08-29, zweimal: "selbe
+/* AUF EINER LINIE, NICHT AUF EINER MITTE (the owner, 2026-08-29, zweimal: "selbe
    hoehe die werte wie values"). Der Name ist die Schrift der Oberflaeche, der
    Wert daneben Monospace und eine halbe Stufe kleiner -- zwei Kaesten, die
    `align-items:center` in ihrer MITTE ausrichtet, worauf die Buchstaben
@@ -2344,7 +2344,7 @@ a.lnk:focus-visible,.pth:focus-visible
   background:var(--panel);border-bottom:1px solid var(--line);font-size:11.5px}
 .code .lang{color:var(--dimmer);font-size:10.5px;letter-spacing:.06em;
   text-transform:uppercase}
-/* robin, 2026-08-24: lange Bloecke sind klappbar. Die Zeilenzahl steht neben
+/* der Owner, 2026-08-24: lange Bloecke sind klappbar. Die Zeilenzahl steht neben
    der Sprache und sagt zugeklappt, wieviel darunter liegt -- eine Falte ohne
    Etikett ist eine Kiste. */
 .code .n{color:var(--dimmer);font-size:10.5px}
@@ -2500,7 +2500,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 .sub:hover{border-color:var(--bevel)}
 .sub.on{border-color:var(--accent);
   background:color-mix(in srgb,var(--accent) 8%,transparent)}
-/* THE BRAND COLOUR IS THE SKIN'S, and `--text-hi` is already what robin asked
+/* THE BRAND COLOUR IS THE SKIN'S, and `--text-hi` is already what the owner asked
    for: #ffffff under dark and crow, #0f1114 under light. A mark that took the
    accent when signed in would be recolouring somebody else's logo to say
    something about Crow's state -- the tile's own border says that. */
@@ -2587,7 +2587,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    IT IS A SIBLING OF #box AND TUCKED UNDER IT -- negative margin below, extra
    padding to pay for it, and #box lifted one layer. That is what makes it read
    as something lying behind the input rather than another row inside it, which
-   is the whole shape robin asked for.
+   is the whole shape the owner asked for.
    THE LOOK IS `.memnote`'s, not a second visual language for one subject: same
    accent, same sweep gradient, same halo. `.memnote` settles after one pass
    because a save is OVER; this keeps breathing because a question is still
@@ -2633,7 +2633,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #pendbar .title{font-weight:600}
 #pendbar .plus{color:var(--ok);font-variant-numeric:tabular-nums}
 /* `--bad`, NOT `--bad-text`. The latter is #ffd9d4 -- a pale pink meant as
-   TEXT ON A RED GROUND, and on this dark surface it reads as white. Robin
+   TEXT ON A RED GROUND, and on this dark surface it reads as white. The owner
    saw a white minus and a green plus. The name looked right in the file and
    the colour was wrong on the screen, which is the same failure the light
    drawing had: a check that compares colour NAMES cannot see it. */
@@ -2679,7 +2679,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    rather than answering out of nowhere half a second later.
    THE KEYFRAMES ARE `#pendbar`'s, NOT COPIES. Two sweeps written out twice are
    two things to fix, and they drift the first time one of them is touched.
-   A FLOOR OF FOUR SECONDS (robin, 2026-08-22) lives in the page, not here: an
+   A FLOOR OF FOUR SECONDS (the owner, 2026-08-22) lives in the page, not here: an
    answer that arrives in 300 ms would flash past and read as nothing having
    happened at all. */
 .installbar{max-width:var(--colw);margin:0 auto;padding:9px 13px;
@@ -2756,7 +2756,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    Raum (Mitte beider: (#main - --sbw - 306)/2). Darunter bleibt das Schweben,
    wie es war -- eine reservierte Spalte waere dort schmaler als die Karte.
    Nur solange eine Karte STEHT: das Git-Panel offen oder ein Ziel gesetzt.
-   #256 (robin, 2026-09-23): "die Eingabemaske ist nicht mittig". Die
+   #256 (der Owner, 2026-09-23): "die Eingabemaske ist nicht mittig". Die
    Reserve nur RECHTS schob Spalte und Maske um 306/2 = 153 px (+ 5 px Rinnstein)
    links der Fenstermitte -- gemessen 158 px, Chromium, 1920x900, Git offen.
    Jetzt reserviert #flow die Kartenbreite auf BEIDEN Seiten und die Maske
@@ -2772,7 +2772,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   #main:has(#goalpanel:not([hidden])) #composer,
   #main:has(#subpanel:not([hidden])) #composer{--reserve:306px}
 }
-/* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
+/* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (the owner,
    2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
    sprechen anfaengt, und schoebe alles darunter -- dieselbe Bewegung, die der
    Mikrofonknopf mit seinem Ring von Anfang an vermeidet. Absolut im `#line`,
@@ -2785,7 +2785,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    VOLL GERUNDET, und das ist der Unterschied zwischen einer Sprachnotiz und
    einem Diagramm: bei `border-radius:99px` ist ein lauter Balken eine Pille
    und ein leiser ein Punkt -- Stille zeichnet sich als Punktreihe, nicht als
-   Luecke. Genau die Form, die robin am 2026-08-23 als Vorbild geschickt hat. */
+   Luecke. Genau die Form, die der Owner am 2026-08-23 als Vorbild geschickt hat. */
 #voice{position:absolute;inset:0;display:flex;align-items:center;gap:4px;
   pointer-events:none;overflow:hidden}
 #voice i{width:3px;flex:none;height:3px;border-radius:99px;
@@ -2795,7 +2795,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `display:none`, das der Browser an `[hidden]` haengt -- ohne sie stuende das
    Band immer da, und das `hidden` im Markup saehe aus, als taete es etwas. */
 #voice[hidden]{display:none}
-/* AT REST NO COLOUR (robin, 2026-09-27): the idle frame was --bevel, the
+/* AT REST NO COLOUR (the owner, 2026-09-27): the idle frame was --bevel, the
    banner blue, plus a faint blue ring, so a box nobody was typing in
    read as selected. It is now the neutral --line of every other frame and no
    ring; the glow belongs to #box.focus alone, which is unchanged. */
@@ -2805,14 +2805,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   /* --colw (900), the width .turn's text runs at: .turn is --colw plus
      --colpad either side. The same variable here puts this box's border on
      the same edge as the text above it (#280: and on the bubbles' edges).
-     ES WAR EINEN ABEND LANG 675 (robin, 2026-08-23), also ein Viertel schmaler,
-     und robin hat es am selben Abend zurueckgenommen: gesehen ist die Maske,
+     ES WAR EINEN ABEND LANG 675 (der Owner, 2026-08-23), also ein Viertel schmaler,
+     und der Owner hat es am selben Abend zurueckgenommen: gesehen ist die Maske,
      die unter ihrer eigenen Spalte steht, die ruhigere. Die Zahl steht hier
      mit ihrer Geschichte, damit sie niemand ein zweites Mal probiert. */
   max-width:var(--colw);margin-inline:auto}
 /* KEIN PLATZHALTER, WAEHREND GESPROCHEN WIRD. Das Band liegt ueber der Zeile,
    also stuenden sonst beide uebereinander und die ruhenden Punkte laesen sich
-   als Zeichen im Satz -- genau so sah es am 2026-08-23 bei robin aus. */
+   als Zeichen im Satz -- genau so sah es am 2026-08-23 beim Owner aus. */
 #box.rec #in::placeholder{color:transparent}
 #box.focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(126,176,248,.13)}
 /* THE WHOLE BOX, NOT A SEPARATE ZONE. A drop target that is smaller than the
@@ -2839,7 +2839,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    ONE FIGURE PER JOB: the placeholder tile in the image's own aspect ratio
    while it runs, swapped IN PLACE for the card when the file exists -- no
    second block, no jump.
-   THE FLOW IS DRAWN FROM THE THEME'S NAMES ONLY (robin, 2026-09-27: "an das
+   THE FLOW IS DRAWN FROM THE THEME'S NAMES ONLY (der Owner, 2026-09-27: "an das
    ausgewaehlte Theme anpassen"): --accent, --bevel, --raised, --panel, --bg.
    The keyframes move positions and never name a colour, so a theme switch
    recolours a running tile at once and a new theme needs nothing here. */
@@ -2920,7 +2920,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
 #in::placeholder{color:var(--dimmer)}
 /* #138c. NICHTS RAGT AUS DER MASKE, UND ZWAR BEI JEDER BREITE.
-   robin, 2026-08-26: "die Icons gucken immer noch ausserhalb der Eingabemaske".
+   Der Owner, 2026-08-26: "die Icons gucken immer noch ausserhalb der Eingabemaske".
    Der Pfeil stand rechts NEBEN dem Rahmen statt darin.
 
    DAS IST KEINE FRAGE DER PANEL-BREITE GEWESEN, auch wenn es so aussah. Ein
@@ -3030,7 +3030,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   transition:color .15s ease,border-color .15s ease,background .15s ease}
 #mic:hover:not([disabled]){border-color:var(--bevel);color:var(--accent)}
 #mic[disabled]{cursor:default;color:var(--dimmer);border-color:var(--line-soft)}
-/* TWO STATES AND NO THIRD. Grey is snoozed, blue glow is recording -- robin's
+/* TWO STATES AND NO THIRD. Grey is snoozed, blue glow is recording -- the owner's
    rule, and both halves of it were earned. The first build painted recording
    RED, which is the colour every conference tool on the machine uses for MUTE:
    the one signal that had to be unambiguous said the opposite of what was
@@ -3082,7 +3082,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
 .ghwait .sdot.ok{animation:none}
 
 /* -- #88: the release level, beside send ------------------------------- */
-/* THE COLOUR IS THE STATE. robin's three: manual white, allowedit green,
+/* THE COLOUR IS THE STATE. The owner's three: manual white, allowedit green,
    auto yellow -- brightest where the least is held back, because the level
    that runs a shell unasked is the one worth noticing across the room. */
 /* FLEX SO THE BUTTON FILLS IT. The wrapper is what #acts stretches; without
@@ -3204,7 +3204,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
    rather than implied -- a border down the left says "these belong to that one" without a second
    panel to clip against the window edge.
    SMALLER, DIMMER, NO BOLD: the model is the decision, the level is a setting inside it. Making
-   the two look alike is what made robin ask for one control instead of two. */
+   the two look alike is what made the owner ask for one control instead of two. */
 #modelmenu button.lvlrow{padding-left:26px;position:relative}
 #modelmenu button.lvlrow b{font-weight:500;font-size:11.5px;color:var(--text-hi)}
 #modelmenu button.lvlrow::before{content:"";position:absolute;left:15px;top:0;bottom:0;
@@ -3260,7 +3260,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
 .subcard .shead{display:flex;align-items:center;gap:9px;font-size:12.5px;flex-wrap:wrap}
 .subcard .glyph{color:var(--sub);font-weight:700}
 .subcard .sname{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
-/* robins letzte Kartenform 2026-08-29: klassische Kopfzeile, Task darunter;
+/* Des Owners letzte Kartenform 2026-08-29: klassische Kopfzeile, Task darunter;
    der Output bleibt zu, die KARTE ist die Klickflaeche. */
 .subcard .stask{margin:5px 0 0;font-size:13px;color:var(--text-soft);white-space:pre-wrap}
 .subcard.can{cursor:pointer}
@@ -3268,7 +3268,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   font-family:var(--mono);font-size:11px;color:var(--dimmer)}
 .subcard .sstat .okword{color:var(--ok)}
 .subcard .sstat .badword{color:var(--bad)}
-/* robins finale Fassung 2026-08-28 nachts: KEINE Flaechenanimation -- die
+/* Des Owners finale Fassung 2026-08-28 nachts: KEINE Flaechenanimation -- die
    Karte steht still, nur ihr linker Balken lebt: ein Bernstein-Verlauf
    (--warn, die Palette in allen drei Themes), der von oben nach unten
    durchatmet. Der Verlauf ist kachelbar (hell-dunkel-hell), darum wandert
@@ -3323,7 +3323,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   text-overflow:ellipsis;white-space:nowrap}
 #subwrap{position:relative;display:inline-flex}
 #subwrap[hidden]{display:none}
-/* robin, 2026-08-27: ohne AKTIVE Subtasks zeigt der Chip 0 und traegt den
+/* der Owner, 2026-08-27: ohne AKTIVE Subtasks zeigt der Chip 0 und traegt den
    gedimmten Rahmen jedes ruhenden Chips; hell (--sub) plus blinkender Punkt
    NUR solange etwas laeuft. Der Zustand ist die Klasse `live`. */
 #subchip{cursor:pointer;display:inline-flex;gap:6px;align-items:center}
@@ -3351,7 +3351,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
        than in the rail head: a button inside the rail goes away with the rail,
        and then there is no way back. The glyph is the side-panel mark from
-       robin's reference -- a frame with one column filled, which is the panel
+       the owner's reference -- a frame with one column filled, which is the panel
        it toggles. Inline SVG for the reason the microphone is: the system font
        has no such character, and an emoji would drag its own colour in. -->
   <button id="railtoggle" class="pywebview-no-drag" onclick="crow.toggleRail()"
@@ -3369,7 +3369,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
   </div>
   <!-- #138. LINKS VON DEN FENSTERKNOEPFEN, aus dem Grund, den #119 fuer den
        Rail-Knopf aufgeschrieben hat: ein Knopf im Panel geht mit dem Panel weg,
-       und dann gibt es keinen Weg zurueck. Das Zeichen ist robins Terminal-Marke
+       und dann gibt es keinen Weg zurueck. Das Zeichen ist die Terminal-Marke des Owners
        aus dem Noun Project, aber NACHGEZEICHNET statt eingebettet -- die Datei
        besteht aus gefuellten Pfaden ohne jeden Strich, und `stroke-width` haette
        dort nichts, worauf es wirken koennte. Als Striche traegt es dieselbe 1.6
@@ -3524,7 +3524,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
           <p class="mcpsaid" id="provsaid"></p>
           <p class="mcpcost" id="provnote"></p>
         </section>
-        <!-- robins Korrektur vom 2026-08-28: der Broker KOMPLETT raus aus der
+        <!-- des Owners Korrektur vom 2026-08-28: der Broker KOMPLETT raus aus der
              Model-Seite, auf eine eigene. Sein Schalter parkt nichts anderes:
              die Maschine antwortet weiter, waehrend die Delegation hier
              konfiguriert wird -- beide laufen parallel. -->
@@ -3552,7 +3552,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
           <!-- #156. GITHUB GEHOERT HIERHER UND NICHT IN EINE DATEI. Die
                Client-ID der OAuth-App ist die einzige Angabe, die der Device
                Flow braucht, und sie im Quelltext suchen zu lassen ist keine
-               Einrichtung, sondern eine Zumutung -- robin, 2026-08-29. Sie ist
+               Einrichtung, sondern eine Zumutung -- der Owner, 2026-08-29. Sie ist
                kein Geheimnis (siehe crow_core.github_client_id), darum ein
                normales Feld und keine Passwortmaske. -->
           <div id="ghsec">
@@ -3650,12 +3650,12 @@ figure.gen.gone .gencap{color:var(--dimmer)}
          daneben: es gehoert zu dem Gespraech, in dem es gesetzt wurde, und eine
          eigene Spalte haette es zu einem Moebel gemacht, das immer da ist.
          ABSOLUT wie die Tool-Kachel, damit es dem Leser nicht wegscrollt.
-         VERSTECKT OHNE ZIEL (robin, 2026-08-30): kein leerer Rahmen. -->
+         VERSTECKT OHNE ZIEL (der Owner, 2026-08-30): kein leerer Rahmen. -->
     <div id="panels">
       <div id="goalpanel" hidden></div>
       <!-- #255. DIE SUBTASKS, gepinnt wie Ziel und Git: eine Karte
            im Chatfenster, nicht im Verlauf. Im Fluss scrollten sie mit dem
-           Transkript weg (robin, 2026-09-23). Laufende oben, fertige in einer
+           Transkript weg (the owner, 2026-09-23). Laufende oben, fertige in einer
            zugeklappten Gruppe darunter. Versteckt, solange der offene Chat
            nichts delegiert hat. -->
       <div id="subpanel" hidden>
@@ -3711,7 +3711,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
               <span class="tcx">+</span>
             </div>
             <div class="gbody">
-              <!-- #156. WELCHE DREI, robins Frage vom 2026-08-29: "WO SIN DIE 3
+              <!-- #156. WELCHE DREI, des Owners Frage vom 2026-08-29: "WO SIN DIE 3
                    FILES". Ein Knopf, der eine Zahl nennt und die Namen verschweigt,
                    verlangt vom Nutzer, sie zu erraten -- und ausgerechnet vor dem
                    Schritt, der Geschichte schreibt. Sie stehen jetzt darin, dieselbe
@@ -3819,7 +3819,7 @@ figure.gen.gone .gencap{color:var(--dimmer)}
     </div>
     <div id="codebody">
       <!-- #138b. DIE AUFRUFE ZUERST, DER QUELLTEXT DARUNTER, und die
-           Reihenfolge ist eine Entscheidung von robin am 2026-08-26.
+           Reihenfolge ist eine Entscheidung vom Owner am 2026-08-26.
            Umgekehrt gebaut wanderte die Klappe mit jeder geschriebenen Datei
            weiter nach unten: sie ist der INDEX, und ein Index, den man suchen
            muss, ist keiner. Der Quelltext ist das Lange und darf wachsen. -->
@@ -4013,7 +4013,7 @@ const $ = s => document.querySelector(s);
 const flow = $("#flow"), input = $("#in"), go = $("#go"), box = $("#box");
 
 // #305. A SCROLLBAR SHOWS WHILE ITS STRIP SCROLLS, like an overlay bar on
-// macOS/iOS (robin, 2026-09-25). The stylesheet keeps every thumb transparent
+// macOS/iOS (the owner, 2026-09-25). The stylesheet keeps every thumb transparent
 // unless its element carries `is-scrolling`; this sets it on each scroll event
 // and takes it off SB_LINGER_MS after the last one.
 // ONE LISTENER, ON THE DOCUMENT, IN THE CAPTURE PHASE. `scroll` does not
@@ -4064,7 +4064,7 @@ const NATIVEDRAG = __NATIVEDRAG__;
 // Zeichenkette, Zahl, Schluesselwort -- sind es achtzig Zeilen.
 //
 // EINE ZUSAMMENGESETZTE REGEX UND NICHT ZEICHENWEISE. Ein `slice` je Zeichen
-// waere quadratisch; ein Block von 37 kB, wie ihn robins Landingpage erzeugt
+// waere quadratisch; ein Block von 37 kB, wie ihn die Landingpage des Owners erzeugt
 // hat, braeuchte damit Milliarden Zeichenkopien. So laeuft es einmal durch.
 //
 // DIE REIHENFOLGE IST DIE ENTSCHEIDUNG: Kommentar und Zeichenkette stehen vorn,
@@ -4113,7 +4113,7 @@ const HL = {
              ["\\$[A-Za-z_][\\w]*|\\$\\{[^}]*\\}", "k"],
              ["\\b(?:if|then|else|elif|fi|for|in|do|done|while|case|esac|function|return|export|local|echo|cd|exit|param|foreach)\\b", "k"],
              ["\\b\\d+\\b", "n"]],
-    // EIN SATZ FUER DIE GANZE C-FAMILIE. robin am 2026-08-24: "fuer alle
+    // EIN SATZ FUER DIE GANZE C-FAMILIE. der Owner am 2026-08-24: "fuer alle
     // programmiersprachen". Einen Satz je Sprache zu schreiben endet nie -- aber
     // C, C++, Java, C#, Go, Rust, PHP, Swift, Kotlin und Dart teilen sich `//`,
     // `/* */`, Zeichenketten und Zahlen, und die Schluesselwoerter darunter sind
@@ -4280,7 +4280,7 @@ const LINK = {
 };
 
 // #312: the local paths in a drag's `text/uri-list` (RFC 2483: one URI per
-// line, `#` lines are comments). `file:///home/x/a%20b.png` -> `/home/x/a b.png`,
+// line, `#` lines are comments). `file:///srv/x/a%20b.png` -> `/srv/x/a b.png`,
 // `file:///C:/x.png` -> `C:/x.png`; anything that is not a local file is left out.
 function dropUriPaths(text){
   return String(text || "").split(/\r?\n/).map(l => l.trim())
@@ -4553,7 +4553,7 @@ const crow = {
     const mk=(cls, label, title, fn)=>{ const b=document.createElement("button");
       b.type="button"; b.className=cls; b.textContent=label;
       if(title) b.title=title; b.onclick=fn; bar.appendChild(b); return b; };
-    // SHOW IN FOLDER FIRST AND IN THE ACCENT: robin's "im File Explorer
+    // SHOW IN FOLDER FIRST AND IN THE ACCENT: the owner's "im File Explorer
     // oeffnen" is the action this lightbox exists for.
     mk("prime lbreveal", "Show in folder", "Open the file manager with this file selected",
        ()=>this.lbDo(p=>pywebview.api.image_reveal(p), ""));
@@ -4660,7 +4660,7 @@ const crow = {
       $("#lightbox").close(); });
   },
 
-  // #131. VARIANT A (robin, 2026-08-22). A 24-round turn put 24 rounds of
+  // #131. VARIANT A (the owner, 2026-08-22). A 24-round turn put 24 rounds of
   // thoughts and running commentary between the question and the answer, and
   // the answer was below the fold when it finally arrived.
   //
@@ -4748,7 +4748,7 @@ const crow = {
   span(sp){
     let node=document.createTextNode(sp.s||"");
     if(sp.c){ const c=document.createElement("code"); c.textContent=sp.s||""; node=c;
-      // #229. `/home/x/a.py` IN BACKTICKS is how models write a path, so a
+      // #229. `/srv/x/a.py` IN BACKTICKS is how models write a path, so a
       // code span that is ONE url or ONE path becomes that mark, code look kept.
       const w=sp.href ? null : LINK.whole(sp.s||"");
       if(w) node = w.t==="url" ? this.linkNode(c, w.href) : this.pathNode(c, w); }
@@ -4825,7 +4825,7 @@ const crow = {
     if(el && el.closest && el.closest("#menu")) return "";
     return s.toString(); },
 
-  // #228. THROUGH PYTHON FIRST, the route `Api.copy` documents and robin's
+  // #228. THROUGH PYTHON FIRST, the route `Api.copy` documents and the owner's
   // code-block button proves every day: `navigator.clipboard` refuses on
   // WebView2 (no secure context). If Python says no, `execCommand("copy")`,
   // which WebKitGTK allows because pywebview sets javascript-can-access-clipboard.
@@ -4938,7 +4938,7 @@ const crow = {
       '<button class="copy">copy</button></div><pre></pre>';
     d.querySelector(".lang").textContent=this.fenceLang;
     const pre=d.querySelector("pre"), btn=d.querySelector(".copy");
-    // #138 / robin 2026-08-24. DER KOPF IST DIE FALTE, und er bleibt sichtbar,
+    // #138 / der Owner 2026-08-24. DER KOPF IST DIE FALTE, und er bleibt sichtbar,
     // wenn der Rumpf weg ist -- sonst ist der Weg zurueck weg. Die Falte wird
     // erst beim Schliessen freigeschaltet (`.foldable`), weil vorher niemand
     // weiss, wie lang der Block wird; hier haengt nur der Griff schon bereit.
@@ -4964,7 +4964,7 @@ const crow = {
     if(!closed && this.fence){ const n=document.createElement("div");
       n.className="note"; n.textContent="… the block was never closed";
       this.here().insertBefore(n,this.cursor); }
-    // robin, 2026-08-24: ab funfzehn Zeilen klappbar. ERST HIER, weil die
+    // der Owner, 2026-08-24: ab funfzehn Zeilen klappbar. ERST HIER, weil die
     // Laenge vorher nicht feststeht -- ein Block, der beim dritten Zeichen
     // einen Klappknopf bekaeme, haette ihn oft umsonst.
     //
@@ -5006,7 +5006,7 @@ const crow = {
     d.querySelector(".note").textContent =
       this.execute ? "ran" : "shown, not run";
     d.querySelector(".name").textContent=name;
-    // #172, robin 2026-08-31: DER BEFEHL GEHOERT IN DEN AUFGEKLAPPTEN AUFRUF,
+    // #172, the owner 2026-08-31: DER BEFEHL GEHOERT IN DEN AUFGEKLAPPTEN AUFRUF,
     // NICHT IN DIE KOPFZEILE. Er ist beliebig lang, also drueckte er die Uhr aus
     // der Zeile oder ueber sie -- und beim Aufklappen steht er ohnehin
     // vollstaendig da, einmal. Die Kopfzeile traegt jetzt nur, was immer kurz
@@ -5046,7 +5046,7 @@ const crow = {
     // #172. DIE UHR LAEUFT AB JETZT, IN DER SEITE. Gemessen am 2026-08-30: ein
     // `run_command`, das detached startete, kam nie zurueck; das Fenster zeigte
     // einen Gedanken und danach nichts -- kein Spinner, keine Notiz, keine Zahl.
-    // Geloest hat es erst, dass robin die Prozesse von Hand abgeraeumt hat, und
+    // Geloest hat es erst, dass der Owner die Prozesse von Hand abgeraeumt hat, und
     // NICHTS auf dem Schirm sagte, dass das noetig war. Die Zieluhr half nicht:
     // sie zaehlt den Schritt, nicht das Werkzeug.
     this.toolClock(d);
@@ -5059,7 +5059,7 @@ const crow = {
   // steht die Tokenrate des laufenden Zuges, und zwei Schreiber auf einem Feld
   // sind keine zwei Auskuenfte, sondern eine verlorene. Die Uhr ueberschrieb die
   // Rate im Sekundentakt und liess nach `toolend` den Stand eines fertigen
-  // Aufrufs stehen (robin, 2026-08-31: "die tok/s wird unten nicht mehr
+  // Aufrufs stehen (der Owner, 2026-08-31: "die tok/s wird unten nicht mehr
   // angezeigt"). Wer beides will, braucht ein zweites Feld, nicht dasselbe.
   toolClock(row){
     this.toolClockStop();
@@ -5147,7 +5147,7 @@ const crow = {
     // #172: UND SONST WIRD SIE GELEERT. Bis hier stand hier nie etwas, wenn ein
     // Aufruf zu schnell war, um eine Zahl zu verdienen -- seit die Uhr laeuft,
     // steht dort `0m 00s`, und genau das ist der Laerm, den die Grenze oben
-    // verhindern soll. Gefunden von robin beim ersten Blick, 2026-08-31.
+    // verhindern soll. Gefunden vom Owner beim ersten Blick, 2026-08-31.
     note.textContent = parts.length ? parts.join(" · ") : ""; },
 
   toolRes(name,text,cut){
@@ -5246,7 +5246,7 @@ const crow = {
     $("#tclist").textContent=""; this.toolsCount();
     // AND IT STAYS CLEARED ACROSS A RESTART. The chat replays its tool rows on
     // open, so without a watermark on the Python side a list somebody emptied
-    // comes back at the next start -- found by robin after rebooting the window.
+    // comes back at the next start -- found by the owner after rebooting the window.
     pywebview.api.tools_cleared(); },
 
   // A NEW CHAT IS A NEW LIST. The tile belongs to the conversation, not to the
@@ -5285,7 +5285,7 @@ const crow = {
     this.toolsCount();
     // DERSELBE WASSERSTAND WIE BEIM `clear` DER GRUPPE. Ohne ihn holt der
     // Chat seine Werkzeugzeilen beim naechsten Start aus dem Verlauf zurueck
-    // -- gefunden, nachdem robin das Fenster neu gestartet hatte.
+    // -- gefunden, nachdem der Owner das Fenster neu gestartet hatte.
     pywebview.api.tools_cleared(); },
 
   cost(line,share,sub){
@@ -5323,7 +5323,7 @@ const crow = {
   // takes real time. It gets the memory gate's tile, in the chat, under the
   // command that was typed.
   //
-  // FOUR SECONDS AT LEAST (robin, 2026-08-22), even when the server answers in
+  // FOUR SECONDS AT LEAST (the owner, 2026-08-22), even when the server answers in
   // three hundred milliseconds: a tile that flashes past is indistinguishable
   // from nothing having happened, which is the whole complaint it answers.
   installBar(){
@@ -5371,7 +5371,7 @@ const crow = {
   // row or a code frame it has to be moved back to the end -- otherwise it is
   // stranded above whatever arrived next, blinking in the middle of the answer.
   tail(){ if(this.cursor && this.col) this.col.appendChild(this.cursor); },
-  // robins Regel vom 2026-08-28 nachts: USERSCROLL > ALLES. Waehrend Crow
+  // des Owners Regel vom 2026-08-28 nachts: USERSCROLL > ALLES. Waehrend Crow
   // streamte, zog jeder Chunk die Sicht ans Ende -- hochscrollen war
   // unmoeglich. Angeheftet ist nur, wer unten IST (80px Toleranz); wer
   // hochscrollt, loest sich, wer ans Ende zurueckkehrt, heftet wieder.
@@ -5851,7 +5851,7 @@ const crow = {
     pywebview.api.provider_view().then(view => {
       this.provView=view;
       const box=$("#provbody"); box.textContent="";
-      // robins Korrektur 2026-08-28: der Broker wird auf seiner EIGENEN Seite
+      // des Owners Korrektur 2026-08-28: der Broker wird auf seiner EIGENEN Seite
       // gezeichnet, KOMPLETT raus aus der Model-Seite.
       view.providers.filter(p => p.name!=="openrouter")
         .forEach(p => box.appendChild(this.provRow(p,view.active)));
@@ -5885,12 +5885,12 @@ const crow = {
     row.appendChild(text); row.appendChild(sw);
     return row; },
 
-  // robins Regel vom 2026-08-28, in ihrer dritten und letzten Form: der
+  // des Owners Regel vom 2026-08-28, in ihrer dritten und letzten Form: der
   // Broker hat seine EIGENE Seite, und DIE SEITE ROUTET GAR NICHTS. Default
   // ist immer lokal, bis der User auf der Model-Seite etwas anderes waehlt --
   // der Schalter parkt nur das Subsystem (Delegation, Katalog, Favoriten),
   // der Picker konfiguriert, und keine Zeile hier bewegt einen Turn. Die
-  // Turns-Zeile der Zwischenfassung erlebte robin als "automatisch" und flog
+  // Turns-Zeile der Zwischenfassung erlebte der Owner als "automatisch" und flog
   // am selben Abend wieder raus. #148s Dropdowns: GANZER Katalog, ein
   // bezahlter Favorit ist Nutzerwahl.
   drawOpenRouter(view){
@@ -5986,7 +5986,7 @@ const crow = {
     $("#modcount").textContent="";
     if(!p) return;
     if(p.name==="openrouter"){
-      // KOMPLETT raus (robin, 2026-08-28): the broker's picker lives on its
+      // KOMPLETT raus (the owner, 2026-08-28): the broker's picker lives on its
       // own page, and no page routes turns there any more. This state is a
       // leftover file or a core-level pick; the fold says the way home that
       // exists -- the chip's local boot writes the provider back.
@@ -6073,7 +6073,7 @@ const crow = {
       box.appendChild(row); row.appendChild(text); }); },
 
   // AN UNTOUCHED BOX IS NOT AN EMPTY ONE, and getting that wrong here cost
-  // robin his stored key on 2026-08-23: the stored value is never read back
+  // the owner their stored key on 2026-08-23: the stored value is never read back
   // into the field, so a BLANK box is the normal state of a key that is set --
   // and Save sent the blank on, which the core reads as "clear it". Only
   // `Remove` clears now, and it says so.
@@ -6242,7 +6242,7 @@ const crow = {
     // DIE SKALA MISST SICH SELBST. Ein fester Faktor muesste die Verstaerkung
     // des Mikrofons raten: float32-Sprache liegt bei 0,05 bis 0,3, und der
     // erste Entwurf rechnete `level*22` -- vier Pixel, also der Boden, waehrend
-    // robin sprach und der Text danach sauber zurueckkam. Ein mitlaufender
+    // der Owner sprach und der Text danach sauber zurueckkam. Ein mitlaufender
     // Spitzenwert mit Abklingen ist, was ein Aussteuerungsmesser tut: laut
     // zieht ihn hoch, Stille laesst ihn um drei Prozent je Bild sinken. Der
     // Boden von 0,02 ist es, was verhindert, dass Rauschen auf volle Hoehe
@@ -6375,12 +6375,12 @@ const crow = {
   // #312. A DROPPED PICTURE TRAVELS AS ITS BYTES, not as its path. On
   // Linux the path comes from pywebview's GTK drag handler, which reads the
   // drag data as TEXT -- a file manager that offers only a uri-list hands it
-  // nothing, and robin's drop on 2026-09-27 never reached the model (no request
+  // nothing, and the owner's drop on 2026-09-27 never reached the model (no request
   // at serve after the window opened). The File the page holds carries the
   // bytes on every backend, so an image is read here and handed over the way a
   // paste is; `dropped` skips the path of a picture already read this way.
   _byteNames: [],
-  // #312, second half, MEASURED on robin's retest (crow.log 09:38:03 and
+  // #312, second half, MEASURED on the owner's retest (crow.log 09:38:03 and
   // 09:38:47): a drop from the file manager reached the page with ZERO files
   // -- WebKitGTK handed over no File objects, so neither the bytes nor
   // pywebview's path matching had anything to work on. What the drag carries
@@ -6562,7 +6562,7 @@ const crow = {
     meta.textContent=drawMeta(base);
     // #164: NUR WENN CROW ANGEFANGEN HAT. Ein Plan, der dasteht und auf die
     // Zeile wartet, die ihn anstoesst, hat noch keine Dauer -- und eine Uhr, die
-    // ab dem Tippen laeuft, misst das Tippen (robin, 2026-08-31).
+    // ab dem Tippen laeuft, misst das Tippen (der Owner, 2026-08-31).
     if(!done && !partial && g.begun) this.goalTick=setInterval(()=>{
       if(!document.body.contains(meta)){ clearInterval(this.goalTick); return; }
       meta.textContent=drawMeta(base+(Date.now()-at)/1000); }, 1000);
@@ -6582,7 +6582,7 @@ const crow = {
       // #294: the step the pause stands on.
       const held=!!(pz && pz.step===i+1);
       if(held) li.classList.add("held");
-      // #289: why it was skipped -- the note robin or the model gave.
+      // #289: why it was skipped -- the note the user or the model gave.
       if(s.status==="skipped" && s.note) li.title=s.note;
       const mark=document.createElement("span"); mark.className="m";
       mark.innerHTML=this.svgStep(held ? "held" : s.status);
@@ -6697,7 +6697,7 @@ const crow = {
     what.append(here);
     // KEIN LAUFENDER ZUG, KEIN SATZ DARUEBER. `running` ist leer, sobald nichts
     // mehr rechnet -- und ein "still running" ueber einem fertigen Zug ist die
-    // Falschauskunft, die robin am 2026-08-30 gefunden hat. Der Name des Chats,
+    // Falschauskunft, die der Owner am 2026-08-30 gefunden hat. Der Name des Chats,
     // in dem zuletzt gearbeitet wurde, ist keine Aussage ueber jetzt.
     if(e.running){
       what.append(" — still running: ");
@@ -6714,7 +6714,7 @@ const crow = {
   // Python side returns, and only that side knows whether a turn started or the
   // line was a slash command answered on the spot. This used to paint "Stop"
   // on the way in unconditionally -- so /reset left the window sitting on Stop
-  // with nothing behind it, which is what robin found.
+  // with nothing behind it, which is what the owner found.
   //
   // `running` is still set here rather than in the callback: it is what keeps a
   // second click out during the round trip, and that window is real even when
@@ -6722,7 +6722,7 @@ const crow = {
   // A rejected call unlocks too -- an api that threw leaves no turn running.
   // #143 E3, SECOND HALF. send() answers slash lines ahead of the busy buffer
   // -- but go()'s gate turned EVERY submit during a turn into a stop, so the
-  // line never got there: robin typed /delegate mid-turn on 2026-08-28 and
+  // line never got there: the owner typed /delegate mid-turn on 2026-08-28 and
   // the RUNNING TURN died. Its own method rather than a branch in go(), so
   // the ordinary path keeps its shape (the install-tile order is pinned on
   // go()'s first occurrences). The composer stays on Stop either way: the
@@ -6747,8 +6747,8 @@ const crow = {
     // Enter to stop() since 4860300, so from the live chat the queue was
     // unreachable.
     // #264. AND NO LINE IS A STOP, whatever it starts with. #264 still stopped
-    // on a line that opened with "/", so a path (`/home/...`) typed mid-turn
-    // ended the turn and stayed in the box -- robin, live 2026-09-24. Now only
+    // on a line that opened with "/", so a path (`/srv/...`) typed mid-turn
+    // ended the turn and stayed in the box -- the owner, live 2026-09-24. Now only
     // an EMPTY Enter, the Stop button with an empty box, and Escape stop. A
     // Crow command other than the delegation pair (/reset, /model, /goal ...)
     // would yank state under the running pump, so it waits in the box and the
@@ -6799,7 +6799,7 @@ const crow = {
     return (this.slash||[]).indexOf(text.split(/\s/)[0].toLowerCase())>=0; },
 
   // #264. THE BUTTON SAYS WHAT A CLICK DOES. #264 kept it on Stop whatever was
-  // in the box, and robin's line + click ended the turn with the line left in
+  // in the box, and the owner's line + click ended the turn with the line left in
   // the box (live 2026-09-24). While a turn runs and the box holds a line that
   // would be queued, the button reads "Queue" and a click queues it; with an
   // empty box it is Stop. Escape stops either way.
@@ -6827,7 +6827,7 @@ const crow = {
       + '<b>'+x.name+'</b><span class="what">'+x.what+'</span></button>').join("");
     m.hidden=false; },
 
-  // YOLO IS A TWO-CLICK ACCEPT (robin, 2026-09-19: the level asks once per
+  // YOLO IS A TWO-CLICK ACCEPT (the owner, 2026-09-19: the level asks once per
   // activation, and it must read as English on the page). The first click
   // only ARMS the row -- its description line says so -- and four seconds
   // later the arm forgets itself, so a menu left open is never a loaded one.
@@ -6914,7 +6914,7 @@ const crow = {
   // thing they were in the middle of reading.
   //
   // #285. THREE STATES, one click each: collapsed (title and counts), `open`
-  // (the 160-char previews), `open deep` (the whole text). robin could not
+  // (the 160-char previews), `open deep` (the whole text). The owner could not
   // tell an append from a swap mid-file: the preview showed only the new
   // words, cut. Deep, a replace shows the entry it takes out above the one it
   // puts in, and an add says where it lands. Both levels are drawn every
@@ -6976,7 +6976,7 @@ const crow = {
 
   // #92: THE WORKING DIRECTORY. The button shows the folder's NAME and carries
   // the full path as its tooltip -- a rail-width button cannot hold
-  // C:\Users\...\project and a truncated path is a path nobody can check.
+  // %USERPROFILE%\...\project and a truncated path is a path nobody can check.
   //
   // "none" IS DRAWN, not left blank. An empty button reads as "no boundary
   // needed"; the state that has to be legible is exactly the one where writes
@@ -7031,7 +7031,7 @@ const crow = {
   // definition silently replaced this one and the chip called the wrong
   // planner with no arguments. Nothing threw until somebody clicked.
   modelPlan(){ const out = [];
-    // A MODEL THIS CLIENT DID NOT BOOT STILL HAS LEVELS (robin, 2026-09-18, seen on screen). The
+    // A MODEL THIS CLIENT DID NOT BOOT STILL HAS LEVELS (the owner, 2026-09-18, seen on screen). The
     // CNQ container is served by crow-nest: it has a manifest entry and measured levels, but no
     // `servers` block, so it is in nobody's bootable list, no row was ever `running`, and the chip
     // read `none (default)` over a menu with no level in it. The model that ANSWERED the probe
@@ -7079,7 +7079,7 @@ const crow = {
       // this one sets textContent, so the escape keeps the source ASCII either way.
       el.querySelector(".tick").textContent = p.tick ? "✓" : "";
       // ONLY `default`, AND THE SWALLOWED NAMES ARE NOT LISTED. The row used to read
-      // "default - high renders the same"; robin cut it against the built window on 0731, where
+      // "default - high renders the same"; the owner cut it against the built window on 0731, where
       // three names collapse into one row: naming a step the menu does not offer is the defect
       // #117 is about, and it does not stop being one because the sentence explains itself.
       const bits = p.bits;
@@ -7479,7 +7479,7 @@ const crow = {
       this.closeMenu();
       if(!entry) return;
       // NO FILE, NO delete_chat. It has nothing to remove and used to return
-      // silently -- the row robin could not get rid of. `discard_live` is the
+      // silently -- the row the owner could not get rid of. `discard_live` is the
       // door for a conversation that was never written, and it refuses one
       // that was.
       if(entry.path) pywebview.api.delete_chat(entry.path);
@@ -7551,7 +7551,7 @@ const crow = {
   },
 
   // The status words, written once for the card and the menu. TOKEN COUNTS
-  // ONLY -- no money figure anywhere on a subtask, robin's call 2026-08-27.
+  // ONLY -- no money figure anywhere on a subtask, the owner's call 2026-08-27.
   subStat(it){
     const tok=(it.tok||0).toLocaleString("en-US")+" tok";
     if(it.st==="running") return "running · "+Math.round(it.s)+" s · "+tok;
@@ -7572,7 +7572,7 @@ const crow = {
       // its own cached copy was the frame that drew no card at all.
       if(!it.here) return;
       d=document.createElement("div"); d.className="subcard"; d.dataset.sub=it.i;
-      // robins letzte Kartenform 2026-08-29: die klassische Kopfzeile --
+      // des Owners letzte Kartenform 2026-08-29: die klassische Kopfzeile --
       // ⑂ delegate · dN, Modell, Status rechts -- und der Task darunter.
       // Der volle Output bleibt ZU; die Karte selbst ist die Klickflaeche.
       d.innerHTML='<div class="shead"><span class="glyph">⑂</span>'
@@ -7583,7 +7583,7 @@ const crow = {
       d.querySelector(".stask").textContent=it.task||"";
       // #255. INTO THE PINNED PANEL, NEVER INTO THE FLOW. A card
       // in `#flow` was a block of the transcript and scrolled away with it
-      // (robin, 2026-09-23 on 9a59872); in a round's column it folded away
+      // (the owner, 2026-09-23 on 9a59872); in a round's column it folded away
       // with the round (2026-08-27, "die sollen bleiben"). `#subpanel` sits
       // in `#panels` beside goal and git: it stays put while the chat
       // scrolls, and the chat gains no block, so nothing below it moves.
@@ -7593,7 +7593,7 @@ const crow = {
     // result; a card already in the right group stays where it is.
     const group=p.querySelector(it.st==="running" ? ".splive" : ".spdone");
     if(d.parentNode!==group) group.appendChild(d);
-    // robins letzte Fassung 2026-08-28: die LAUFENDE Karte atmet als Zeile;
+    // des Owners letzte Fassung 2026-08-28: die LAUFENDE Karte atmet als Zeile;
     // fertig steht sie still. Die Klasse traegt den Zustand, das CSS den Atem.
     d.classList.toggle("run", it.st==="running");
     const stat=d.querySelector(".sstat");
@@ -7608,7 +7608,7 @@ const crow = {
       stat.firstChild.textContent=this.subStat(it);
     }
     if(it.st!=="running" && it.res && !d.querySelector(".sresult")){
-      // ZU PER DEFAULT (robin, 2026-08-28): der Hauptchat zeigt die Karte,
+      // ZU PER DEFAULT (der Owner, 2026-08-28): der Hauptchat zeigt die Karte,
       // der volle Output wohnt hinter dem Klick auf sie. Fuer den ganzen
       // Text gibt es KEINEN Subtask-Chat; dieser eine Ort ist es.
       const res=document.createElement("div"); res.className="sresult";
@@ -7624,7 +7624,7 @@ const crow = {
     if(!wrap||!chip) return;
     if(!items.length){ wrap.hidden=true; return; }
     wrap.hidden=false;
-    // THE NUMBER IS THE ACTIVE COUNT, NOT THE TOTAL -- robin, 2026-08-27:
+    // THE NUMBER IS THE ACTIVE COUNT, NOT THE TOTAL -- the owner, 2026-08-27:
     // with nothing running the chip reads 0 and rests in the dim frame; the
     // bright border and the pulsing dot belong to a live fan-out alone.
     const running=items.filter(x=>x.st==="running").length;
@@ -7657,7 +7657,7 @@ const crow = {
   },
 
   // The rail's child rows: each subtask hangs FIXED under the chat that
-  // spawned it -- robin, 2026-08-27: "diese duerfen niemals mitwandern". A
+  // spawned it -- the owner, 2026-08-27: "diese duerfen niemals mitwandern". A
   // parent of "" means THE LIVE CHAT WITHOUT A FILE and nothing else; there
   // is deliberately no fallback to the active row, because that fallback was
   // the wandering: open a subtask, and every child re-hung under it. A parent
@@ -7687,7 +7687,7 @@ const crow = {
         w.textContent=it.model||""; b.appendChild(w);
         // A SUBCHAT IS NEVER OPENED AS A CHAT. Opening one made it the live
         // conversation, put the real chat aside and re-hung every child --
-        // the exact break robin filmed. The click goes to the CARD, which
+        // the exact break the owner filmed. The click goes to the CARD, which
         // already holds the task, the clock and the folded result.
         b.dataset.open="1"; b.title="jump to its card";
         b.onclick=()=>crow.subJump(it.i);
@@ -7817,7 +7817,7 @@ const crow = {
     // that, folding a project or moving a chat into one would land on the fast
     // path and change nothing on screen -- the list would be right in Python and
     // stale in the window, which is the worst of the three possible states.
-    // DIE TITEL GEHOEREN IN DIE SHAPE (robin, 2026-08-28 abends): der Name
+    // DIE TITEL GEHOEREN IN DIE SHAPE (der Owner, 2026-08-28 abends): der Name
     // eines geloeschten Chats stand weiter in der Rail, bis ein Rename kam --
     // eine reine Titelaenderung landete auf dem Schnellpfad und bewegte kein
     // Pixel; erst der Rename baute neu, weil er den PFAD bewegt. Das meta
@@ -7974,14 +7974,14 @@ const crow = {
   // in der Zeile und laedt auf Enter live.
   //
   // #279: A FOLDED PANEL STAYS FOLDED. Until 2026-09-24 a render unfolded it
-  // (#201) and loaded the capture; robin had folded it to keep the card for
+  // (#201) and loaded the capture; the owner had folded it to keep the card for
   // the model, and its web process was respawned at 13:26:20 right after a
   // render and crashed on. The render tab is filled either way; the capture
   // is loaded when the panel is open, or when it is unfolded.
   brRendered(url, shot){
     const folded=document.body.dataset.browser==="shut";
     // #230: EIN REITER FUER DIE RENDERS DES MODELLS, nicht einer je Aufruf.
-    // robin, 2026-09-23: "every time Crow opens a website it opens a new tab".
+    // The owner, 2026-09-23: "every time Crow opens a website it opens a new tab".
     // Zehn Renders waren zehn Reiter, die niemand schliesst. Der Render-Reiter
     // wird wiederverwendet und bekommt je Render einen Eintrag in seiner
     // Historie, also geht Zurueck durch die frueheren Renders.
@@ -8056,15 +8056,15 @@ const crow = {
       $("#brbody").appendChild(d); } },
 
   // EIN PFAD ZU EINER DATEI-ADRESSE, auf beiden Plattformen. `C:\x` wird zu
-  // `file:///C:/x`, `/home/x` zu `file:///home/x` -- die drei Schraegstriche
+  // `file:///C:/x`, `/srv/x` zu `file:///srv/x` -- die drei Schraegstriche
   // gehoeren zur Adresse, der Pfad bringt seinen eigenen mit, und beide
-  // aneinanderzukleben ergaebe `file:////home/x`.
+  // aneinanderzukleben ergaebe `file:////srv/x`.
   fileUrl(path){
     const p=String(path||"").replace(/\\/g,"/");
     return "file://" + (p.charAt(0)==="/" ? "" : "/") + p; },
 
   // EINE ADRESSE ODER EIN PFAD. Was wie ein Pfad aussieht, wird zu `file:///`
-  // gemacht: robin tippt einen Pfad, wenn er einen Bau ansehen will, und
+  // gemacht: der Owner tippt einen Pfad, wenn er einen Bau ansehen will, und
   // "C:\..." in eine Adresszeile zu tippen ist die haeufigere Geste als
   // `file:///C:/...` auszuschreiben.
   //
@@ -8180,7 +8180,7 @@ const crow = {
     if(t && t.at>=0) this.brSend(t.hist[t.at]); },
 
   // #156. DASSELBE FUER DAS GIT-PANEL, und es ist der EINZIGE Weg, es wieder
-  // zuzumachen -- robins Ansage vom 2026-08-29: kein zweites Kreuz im Panel.
+  // zuzumachen -- des Owners Ansage vom 2026-08-29: kein zweites Kreuz im Panel.
   // Beim Aufklappen wird sofort gelesen: ein Panel, das erst beim naechsten
   // Zug einen Stand zeigt, zeigt beim Hinsehen den von vorhin.
   toggleGit(){ const el=document.body;
@@ -8324,7 +8324,7 @@ const crow = {
     $("#githist .gcount").textContent = (state.history||[]).length || ""; },
 
   // #156. EIN BLOCK, EIN KNOPF. Vorher lag genau einer im Kopf des Panels und
-  // nahm den sichtbaren Text von ALLEM darin -- robins Ansage vom 2026-08-29:
+  // nahm den sichtbaren Text von ALLEM darin -- des Owners Ansage vom 2026-08-29:
   // "man kann einzelne Code samples nicht kopieren aktuell". Dieser hier kennt
   // seinen Block: er sitzt darin und liest den `<pre>` daneben.
   //
@@ -8710,7 +8710,7 @@ document.addEventListener("paste", e => {
   const types = dt ? Array.prototype.slice.call(dt.types || []) : [];
   if(types.indexOf("text/plain") !== -1) return;
   e.preventDefault();
-  // robins Frage 2026-08-29 ("wieso geht vision nicht mehr"): der Pfad als
+  // des Owners Frage 2026-08-29 ("wieso geht vision nicht mehr"): der Pfad als
   // Text war die Route von VOR #142. Ein Paste-Bild ist ein Bild -- es geht
   // denselben Weg wie ein gedropptes: Chip, Vision, Transcript.
   pywebview.api.paste_clipboard().then(path => {
@@ -8719,7 +8719,7 @@ document.addEventListener("paste", e => {
 });
 
 // THE GAP UNDER THE FLOW IS THE COMPOSER'S OWN HEIGHT, measured and never
-// guessed. robin's rule for the floating box is absolute: THE LAST LINE MUST
+// guessed. The owner's rule for the floating box is absolute: THE LAST LINE MUST
 // NEVER COME TO REST BEHIND IT, because a line you cannot read is a line that
 // was not printed. A constant would break in exactly the cases that matter --
 // the textarea grows to 140px as you type, and the foot row wraps to two lines
@@ -8907,7 +8907,7 @@ window.addEventListener("contextmenu",e=>{
 // blocked the key -- nothing could be selected. WebView2 keeps Ctrl+C with
 // browser accelerators off (Microsoft: editing keys are not affected), and
 // WebKitGTK copies natively; whether GTK's clipboard reaches Hyprland from the
-// WebKit process was NOT measured (that would write robin's live clipboard),
+// WebKit process was NOT measured (that would write the owner's live clipboard),
 // so the selection also goes the way the copy button proves works. Not in a
 // field: there the engine's own copy is the whole story. A focused link or
 // path with nothing selected copies its target, the keyboard's "Copy path".
@@ -8932,7 +8932,7 @@ crow.toolsCount();
 crow.brDraw();
 // #327: A PANEL RESTORED OPEN GETS ITS FIRST TAB, as `toggleBrowser` gives
 // one on unfolding. Without it the panel came up with no tab and stayed blank
-// until `+` (robin, Windows, 2026-09-30). The bar's focus is taken back by
+// until `+` (the owner, Windows, 2026-09-30). The bar's focus is taken back by
 // `pywebviewready` (input.focus), which fires after this.
 if(document.body.dataset.browser!=="shut" && !crow.tabs.length) crow.brNew();
 // #175. DIE SCHEIBE FOLGT DER FLAECHE. Fenstergroesse, Code-Panel, der Griff --
@@ -8947,7 +8947,7 @@ new ResizeObserver(() => crow.brPlace()).observe($("#brbody"));
   new MutationObserver(() => requestAnimationFrame(() => crow.brCover()))
     .observe(el, {attributes:true, attributeFilter:["hidden","class","style"]}); });
 // KEINE STARTBREITEN-AUTOMATIK MEHR. #138c richtete eine nie gezogene Breite
-// an der halben Flaeche aus -- auf robins Fenster am 2026-08-27 war genau das
+// an der halben Flaeche aus -- auf dem Fenster des Owners am 2026-08-27 war genau das
 // der zu breite Start, und die Icons standen wieder neben der Maske. Seine
 // Ansage ersetzt das Feature: die Vorgabe ist CODE_DEFAULT (das Minimum), und
 // wer mehr Panel will, zieht den Griff einmal. Dass der Composer bei KEINER
@@ -9100,7 +9100,7 @@ REMOTE_DESKTOP_BOUND = {
     "dictate_start": "dictate", "dictate_stop": "dictate",
     "stage_image": "upload", "pick_root": "root", "open_url": "link",
     # #312: a picture dropped into the page as bytes -- the desktop
-    # window, and a phone or browser mirror the same way (robin 2026-09-27:
+    # window, and a phone or browser mirror the same way (the owner 2026-09-27:
     # "Handy auch, wichtig")
     "stage_image_data": "upload",
     "drop_seen": "desktop-only",
@@ -9113,7 +9113,7 @@ REMOTE_DESKTOP_BOUND = {
     "remote_use_https": "desktop-only",
     "remote_stop": "desktop-only",
     # #311: the lightbox's actions act on the desktop's file and machine --
-    # its file manager, clipboard, viewer and trash (robin's "im File
+    # its file manager, clipboard, viewer and trash (the owner's "im File
     # Explorer oeffnen" is the first of them).
     "image_reveal": "desktop", "image_copy": "desktop",
     "image_open": "desktop", "image_trash": "desktop",
@@ -9149,11 +9149,11 @@ REMOTE_HEAD = ('<meta name="viewport" content="width=device-width,'
                ' content="#ffffff">'
                '<meta name="theme-color" media="(prefers-color-scheme: dark)"'
                ' content="#181818">'
-               # robin's iPhone, 2026-09-24: "Add to Home Screen" drew a
+               # the owner's iPhone, 2026-09-24: "Add to Home Screen" drew a
                # generic "1" tile. The tile, the title and standalone mode.
                #
                # THE STATUS BAR IS OPAQUE (`default`), NOT black-translucent.
-               # robin's iPhone (iOS 27, home-screen app): with the page under
+               # The owner's iPhone (iOS 27, home-screen app): with the page under
                # a translucent bar, iOS fills that inset with the Liquid Glass
                # scroll-edge blur, and the band reaches ~35 pt below the bar,
                # over the header's icons -- although the page's own solid
@@ -9188,7 +9188,7 @@ REMOTE_CSS = """
    Same PAGE, same elements, same handlers; this block only rearranges them.
    REMOTE_HEAD carries the viewport meta (viewport-fit=cover), without which
    iOS lays it out at 980 px and env(safe-area-inset-*) stays 0. The design
-   is robin's approved step-0 mockups (2026-09-24). */
+   is the owner's approved step-0 mockups (2026-09-24). */
 @media (max-width:700px){
 
 /* ---- the column: the #280 variables, not the selectors ------------------ */
@@ -9279,7 +9279,7 @@ body:not([data-browser="shut"]) #side{transform:none;visibility:visible}
   opacity:0;pointer-events:none;transition:opacity .2s}
 body.m-drawer #mscrim{opacity:1;pointer-events:auto}
 
-/* ---- the home-screen app's header (robin, iOS 27, 2026-09-24) -----------
+/* ---- the home-screen app's header (the owner, iOS 27, 2026-09-24) -----------
    iOS draws a blur band ~35 pt under the status bar that nothing switches
    off; a permanent offset was either blurred (8 px) or ugly (18/36 px). So in
    standalone mode only (REMOTE_JS adds .m-auto there) the header leaves: 5 s
@@ -9296,7 +9296,7 @@ body.m-auto.m-rev #bar{top:calc(var(--safe-t) + 18px);transform:none;
   background:var(--bg);border-bottom:1px solid var(--line);
   box-shadow:0 6px 18px var(--shadow)}
 /* ...and the strip above it (status bar + 18 px) is filled, or the chat shows
-   through it (robin, 2026-09-24). Only plain background lies in the blur band.
+   through it (the owner, 2026-09-24). Only plain background lies in the blur band.
    On .m-hid too, so it leaves with the bar instead of vanishing first. */
 body.m-auto.m-hid #bar::before,body.m-auto.m-rev #bar::before{content:"";
   position:absolute;left:0;right:0;bottom:100%;height:calc(var(--safe-t) + 19px);
@@ -9314,7 +9314,7 @@ body.m-auto.m-hid #mnudge{display:flex;position:fixed;z-index:70;
   background:var(--dim);box-shadow:0 0 0 4px var(--bg)}
 @keyframes mnudge-in{from{opacity:0}to{opacity:1}}
 /* The goal/sub bars sit at the top of #main; while the header is out of
-   the layout they move down below the pill (robin: the pill lay on the goal
+   the layout they move down below the pill (the owner: the pill lay on the goal
    bar), and #flow's padding follows. Also while revealed, so they don't jump. */
 body.m-auto:is(.m-hid,.m-rev) #panels{padding-top:40px}
 body.m-auto:is(.m-hid,.m-rev) #main:has(#goalpanel:not([hidden])) #flow,
@@ -9370,7 +9370,7 @@ body:not([data-git="shut"]) #panels{z-index:95}   /* out of #panels' stacking co
   margin-right:-10px}     /* over #subpanel's 10 px: its X lines up with the goal's */
 #subpanel.shut{max-height:var(--tap)}
 
-/* ---- composer (robin, 2026-09-24): ONE row, like iMessage ----------------
+/* ---- composer (the owner, 2026-09-24): ONE row, like iMessage ----------------
    One frame (#box), one 44 pt row:  [+ 44][input, grows up to 5 lines][send/Stop 44]
    The context is the frame's top 2 px (a background layer, clipped by the
    radius). Everything else -- attach, dictate, mode, model, folder, the
@@ -9459,7 +9459,7 @@ body.m-tools #mtools{transform:none;opacity:1;visibility:visible;transition-dela
    set per frame from an AnalyserNode) instead of the desktop's breathing. */
 #mic.rec{animation:none;box-shadow:0 0 0 calc(2px + var(--lvl,0) * 7px) rgba(126,176,248,.35);
   transition:box-shadow .07s linear}
-/* robin, 2026-09-24: while it records, the button IS the stop -- a filled
+/* The owner, 2026-09-24: while it records, the button IS the stop -- a filled
    square in the button's own colour (so both themes), the ring still around
    it, the 44 px target unchanged. The microphone comes back with the class. */
 #mic.rec svg{display:none}
@@ -9483,7 +9483,7 @@ body.m-tools #mtools{transform:none;opacity:1;visibility:visible;transition-dela
 #model::before{content:"model";color:var(--dimmer);margin-right:2px}
 #model b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-weight:500;line-height:1}
-#model .lvl{display:none!important}   /* no level on the phone (robin) */
+#model .lvl{display:none!important}   /* no level on the phone (the owner) */
 /* menus that open upward from the composer: full width, big rows */
 #modemenu,#rootmenu,#modelmenu,#submenu{position:fixed;left:8px;right:8px;
   bottom:calc(var(--comph,0px) + var(--toolsh,0px) + 4px);z-index:60;min-width:0;max-width:none;width:auto;
@@ -9620,7 +9620,7 @@ REMOTE_JS = r"""
   // 2. DRAWERS. The page stamps data-rail/-code/-git/-browser from the desktop's
   //    settings; on the phone every drawer starts closed and one is out at most.
   //
-  //    CLOSED MEANS GONE (robin's iPhone, iOS 26, 2026-09-24): after a drawer
+  //    CLOSED MEANS GONE (the owner's iPhone, iOS 26, 2026-09-24): after a drawer
   //    had been open, Safari's bars kept a different tint and a vertical swipe
   //    no longer moved the page, until a reload. A closed drawer and the dim
   //    layer used to stay in the render tree -- fixed, full height, edge to
@@ -9777,13 +9777,13 @@ REMOTE_JS = r"""
   }
   new MutationObserver(measure).observe(document.getElementById("flow"),
     {childList:true, subtree:true});
-  // 5. THE COMPOSER (robin: remove nothing, shorten). Only on a phone.
+  // 5. THE COMPOSER (the owner: remove nothing, shorten). Only on a phone.
   if(phone.matches) composer();
   function composer(){
     const box = document.getElementById("box"), line = document.getElementById("line"),
           go = document.getElementById("go"), foot = document.getElementById("foot"),
           input = document.getElementById("in"), ctx = document.getElementById("ctx");
-    // ONE ROW (robin, 2026-09-24): [+][input][send/Stop], all 44 pt. The +
+    // ONE ROW (the owner, 2026-09-24): [+][input][send/Stop], all 44 pt. The +
     // opens #mtools above the composer with every other control, moved there
     // from #foot / #acts (same ids, same handlers).
     const $id = x => document.getElementById(x);
@@ -9845,7 +9845,7 @@ REMOTE_JS = r"""
       if(b && this.modelName){ b.textContent = shortModel(this.modelName);
         document.getElementById("model").title = this.modelName; }
       return r; };
-    // NO REASONING LEVEL ON THE PHONE (robin, 2026-09-24): the operating
+    // NO REASONING LEVEL ON THE PHONE (the owner, 2026-09-24): the operating
     // point fixes it (manifests/operating-point.json reasoning_fixed), so the
     // menu lists models only; the chip shows the family name only.
     const plan = crow.modelPlan;
@@ -9866,7 +9866,7 @@ REMOTE_JS = r"""
     bar.addEventListener("click", () => setOpen(true));
     crow.showModel();
   }
-  // THE FAMILY ONLY (robin, 2026-09-24): the first run of letters, capitalised,
+  // THE FAMILY ONLY (the owner, 2026-09-24): the first run of letters, capitalised,
   // at most 8 characters. "Qwen3.8-Flash-Next" -> "Qwen", "Gemma-5-12B" ->
   // "Gemma", "claude-sonnet-5" -> "Claude", "qwen/qwen3.8-flash" -> "Qwen".
   function shortModel(name){
@@ -9910,7 +9910,7 @@ REMOTE_JS = r"""
   // finished.
   const SPEECH_LVL = 0.04, SPEECH_MS = 200, SILENCE_MS = 2000;
   // THE FINAL CAN BE SLOW -- the first dictation loads (or downloads) the
-  // model, ~52 s on robin's first try -- but a push that never comes must not
+  // model, ~52 s on the owner's first try -- but a push that never comes must not
   // keep the field read-only for good.
   const WRITE_MS = 180000;
   // A PAGE-WIDE COUNTER, SEEDED WITH THE CLOCK: the PC drops a partial whose
@@ -10430,7 +10430,7 @@ class Unescaper:
     """JSON-String-Escapes entfalten, waehrend der Text noch stroemt.
 
     #138. Was ueber die Leitung kommt, ist ein JSON-String und nicht Quelltext:
-    `\\n` sind zwei Zeichen, `\\"` sind zwei Zeichen. robin am 2026-08-24, als das
+    `\\n` sind zwei Zeichen, `\\"` sind zwei Zeichen. der Owner am 2026-08-24, als das
     Mitlesen zum ersten Mal lief -- lesbar, aber muehsam.
 
     SPRACHUNABHAENGIG OHNE ZUTUN. Die Escapes gehoeren dem Transport, nicht der
@@ -10534,7 +10534,7 @@ class Sink(ReplyEvents, FenceEvents):
         hand the same work back through a different queue.
 
         THE DENOMINATOR IS WALL CLOCK, AND THAT IS A DECISION -- NOT THE BUG IT
-        LOOKS LIKE (robin, #97, 2026-08-14). Divided this way the figure is
+        LOOKS LIKE (the owner, #97, 2026-08-14). Divided this way the figure is
         always LOWER than the server's `tg`, because `elapsed` also holds the
         wait for the first token, every tool call and the prefill of every tool
         result: 9.5 tok/s on screen beside a server logging 17.99-19.29 t/s for
@@ -10770,7 +10770,7 @@ class Turn(TurnEvents):
         """
         # #165. DAS PANEL FOLGT DEM WERKZEUG, nicht dem Zugende. Es hing bis
         # hier an `_pump`, also erschien ein Plan erst, wenn der Zug fertig war
-        # -- bei einem Zug mit 24 Runden Minuten spaeter, und robin sah ihn
+        # -- bei einem Zug mit 24 Runden Minuten spaeter, und der Owner sah ihn
         # zuerst beim Beenden. Der Aufruf IST das Ereignis.
         if name in ("goal_set", "goal_step") and self._goal_reload:
             self._goal_reload()
@@ -10912,7 +10912,7 @@ class Turn(TurnEvents):
                    "lines": lines})
         self._put({"k": "note", "t": "rolled over at %d tokens -> %s"
                                      % (tokens, os.path.basename(path))})
-        # robins Live-Test 2026-08-29: unten links stand bis zum Turn-Ende der
+        # des Owners Live-Test 2026-08-29: unten links stand bis zum Turn-Ende der
         # Fuellstand von VOR dem Roll. Der Kern zaehlt ab dem Roll von 0, also
         # geht dieselbe Zahl sofort an die Seite -- als EIGENES Ereignis, nicht
         # als `cost`: cost() raeumt den Stream-Cursor ab, und der Turn laeuft
@@ -10927,7 +10927,7 @@ class Turn(TurnEvents):
 
     def rollover_refused(self) -> None:
         # #152: die Verweigerung war ein No-op der Basisklasse -- der Turn
-        # endete wortlos, und robin sah nur Zuege, die "einfach aufhoerten".
+        # endete wortlos, und der Owner sah nur Zuege, die "einfach aufhoerten".
         # Ehrlich rot, mit Grund.
         self._put({"k": "fail",
                    "t": "rollover already spent this turn -- "
@@ -11097,7 +11097,7 @@ class _DuringPush:
 # toplevel ("crow-browser"). Wayland gives a client no way to place its own
 # toplevel (xdg_toplevel has no set_position; `gtk_window_move` is a no-op,
 # measured 2026-09-16), so the pane could never sit on `#brbody`. It also has
-# Crow's app id, so robin's live rule set (`~/.config/hypr/crow.lua`: float,
+# Crow's app id, so the owner's live rule set (`~/.config/hypr/crow.lua`: float,
 # center, size 1180x800 for `^([Cc]row)$`) turns it into a second 1180x800
 # window centred over Crow. XEmbed (GtkSocket/GtkPlug) is X11-only, and the
 # rules cannot place one window relative to another (the Hyprland wiki's
@@ -11249,7 +11249,7 @@ class InWindowPane:
         # loaded in the sandboxed pane with nothing added (title "... 1786x1119
         # pixels") -- presumably because the unsandboxed network process reads
         # files, not the web process (inferred, not traced). Adding $HOME is refused anyway ("Attempted to add
-        # disallowed path to sandbox: /home/...", a g_critical on the terminal).
+        # disallowed path to sandbox: <home dir>/...", a g_critical on the terminal).
         if shutil.which("bwrap") and os.environ.get("CROW_PANE_SANDBOX") != "0":
             try:
                 ctx.set_sandbox_enabled(True)
@@ -11423,7 +11423,7 @@ class InWindowPane:
         """#227. target=_blank and window.open land in the panel.
 
         pywebview sent these to `webbrowser.open` (gtk.py:460), which on
-        robin's machine is Chromium in a window of its own. Returning None
+        the owner's machine is Chromium in a window of its own. Returning None
         refuses the second view; the address is loaded here instead and
         reported as the page's own navigation.
         """
@@ -11463,7 +11463,7 @@ class InWindowPane:
 
     def _after_death(self, url: str) -> bool:
         """#279 C. 2026-09-24 ~13:47: after six panel crashes the window
-        stopped repainting until robin moved it. The dead view is taken out
+        stopped repainting until the owner moved it. The dead view is taken out
         of the overlay's picture and the window is asked to draw again; the
         one reload, if any, goes after that. GTK main thread only."""
         view = self._view
@@ -11663,7 +11663,7 @@ class Api:
         self._last_cost: dict[str, dict] = {}
         # #173. DIE MARKEN DES OFFENEN CHATS, jede mit der Zahl der Nachrichten,
         # die vor ihr standen. Sie sind keine Nachrichten -- im Nachrichtenband
-        # laese das Modell die Rollover-Notiz als robins Worte -- und sie sind
+        # laese das Modell die Rollover-Notiz als Worte des Nutzers -- und sie sind
         # auch keine reine Bildschirmausgabe: bis hier waren sie beim naechsten
         # Oeffnen weg, und jede spaeter gezeichnete rutschte unter alles, was
         # nach ihr passiert war. Die Rollover-Notiz sagte damit das Gegenteil
@@ -11708,7 +11708,7 @@ class Api:
         # #165/#202. WAS DER MOTOR UEBER SICH SELBST WEISS: wie viele Zuege er
         # gefahren ist, wie viele davon auf denselben Schritt gingen, und was
         # das Modell zuletzt geantwortet hat. Zurueckgesetzt, sobald jemand
-        # tippt: eine Zeile von robin ist der Beweis, dass ein Mensch zusieht,
+        # tippt: eine Zeile des Nutzers ist der Beweis, dass ein Mensch zusieht,
         # und das ist es, was die Deckel eigentlich absichern.
         self._goal_reset()
         # KEIN ZIEL IST DER BEKANNTE ANFANGSZUSTAND, nicht "noch nichts
@@ -12167,7 +12167,7 @@ class Api:
         client = _client()
         if client != DESKTOP:
             items = self.state_snapshot(client)
-            # DELIVERED, NOT PUSHED (robin's iPhone, 2026-09-24: one "no
+            # DELIVERED, NOT PUSHED (the owner's iPhone, 2026-09-24: one "no
             # folder" note became 32 in session.json and 15+ rows on the
             # phone). The snapshot is a copy of state that is already
             # recorded; through `push` every note in it was appended to
@@ -12357,7 +12357,7 @@ class Api:
     def _bind_root(self, path: str, mode: str | None = None) -> None:
         """Declare `path` a root, remember it, and adopt the level stored there.
 
-        THE LEVEL FOLLOWS THE ROOT (robin, #92): opening a directory restores
+        THE LEVEL FOLLOWS THE ROOT (the owner, #92): opening a directory restores
         what it was last allowed to do. `_args.mode` is the same field
         `set_mode` writes, so the two ways of changing the level end in one
         place rather than two -- the divergence #90 exists to prevent.
@@ -12414,7 +12414,7 @@ class Api:
         # is drawn and not merely what it may write. This door bound the root,
         # printed the note and stopped -- so a chat moved into a project stayed
         # in place until something unrelated reloaded the rail, which is how
-        # robin found it: folding the project was what finally showed the move.
+        # the owner found it: folding the project was what finally showed the move.
         self._reload_rail()
         self.push({"k": "note", "t": "working directory: %s (%s)" % (path, wanted)})
 
@@ -12452,7 +12452,7 @@ class Api:
         the symptom would be a boundary that depends on how you got here.
 
         #119: TWO OF THE THREE STILL DO. `fresh` is the new chat, and it binds
-        NOTHING -- robin's rule once the rail was grouped by the boundary, because
+        NOTHING -- the owner's rule once the rail was grouped by the boundary, because
         `active` is rewritten by every bind and the template therefore carried the
         last project into every chat started after it. It stays one place: the
         difference is a parameter, not a second copy.
@@ -12462,7 +12462,7 @@ class Api:
         ticket looks like. Never to "whatever happened to be bound", which is the
         defect this ticket exists to remove.
 
-        THE LEVEL FOLLOWS THE FOLDER, NOT THE CHAT (robin's rule, #101): it is a
+        THE LEVEL FOLLOWS THE FOLDER, NOT THE CHAT (the owner's rule, #101): it is a
         statement about the project, so two chats in one folder share it. Put it
         in the chat and the same directory has different rights depending on
         which conversation is open.
@@ -12761,7 +12761,7 @@ class Api:
 
         EIN ORT, WEIL SIE SONST STEHENBLEIBT. Sie wurde beim Hinsehen gesetzt
         und nie wieder -- also behauptete sie "still running" ueber einen Zug,
-        der laengst fertig war (robin, 2026-08-30). Jeder Zustandswechsel, der
+        der laengst fertig war (der Owner, 2026-08-30). Jeder Zustandswechsel, der
         sie betrifft, ruft jetzt hierher, und sie liest, statt sich zu merken.
         """
         # #249: JE CLIENT SEINE LEISTE. Der Worker ist niemandes Client, also
@@ -12830,7 +12830,7 @@ class Api:
             # #261. A ROLLOVER IS NOT A CHAT, IT IS THE SAME
             # CHAT'S EARLIER HALF. Listed here, every cut added an entry beside
             # the live chat, titled by whatever user-role line opened the
-            # segment (robin, 2026-09-23: "[The tool budget for this turn is
+            # segment (the owner, 2026-09-23: "[The tool budget for this turn is
             # ..." and "Hey", both "rolled over"). They are kept on disk where
             # the rollover note points and listed in the archive drawer
             # (`_archived`). The one exception is a rollover somebody opened:
@@ -13132,7 +13132,7 @@ class Api:
         but a pin that names ANOTHER working area tells the model "use this
         exact path" for a folder the tools no longer write to. Only then is
         the head re-pinned, with `_bind_root`'s cost line before it; a pin
-        that already names the stated root (robin's live case) stays, cache
+        that already names the stated root (the owner's live case) stays, cache
         and all. The chat's own file is stamped now, as `_bind_root` does,
         so the rail reads the same boundary the window holds (#119).
         """
@@ -13170,7 +13170,7 @@ class Api:
         return "the model can call:\n" + "\n".join(lines)
 
     # #94. THE WINDOW RUNS THE COMMAND. The first attempt did not, and both
-    # ways it failed were found by robin in the window inside a minute.
+    # ways it failed were found by the owner in the window inside a minute.
     #
     # It answered each one with a sentence naming the control that does the same
     # job -- "/reset: that is the new button, top left of the chat rail".
@@ -13373,7 +13373,7 @@ class Api:
         # out of the rail keeps `_current_path`, and on the way out `_archive()`
         # writes the open conversation THERE -- except `save_session` refuses an
         # empty one, so the file kept its old messages and the next start found
-        # them again. robin, 2026-08-14: "/reset in einem EARLIER Fenster geht
+        # them again. The owner, 2026-08-14: "/reset in einem EARLIER Fenster geht
         # erst, aber nach Neustart ist der Text samt cache und context wieder
         # da." Reproduced before this line existed.
         #
@@ -13579,7 +13579,7 @@ class Api:
     # sichert das GANZE Ziel und merkt deshalb nicht, dass ein Plan mit sechs
     # Schritten seit fuenfzig Zuegen an Schritt 5 haengt -- am 2026-09-18 genau
     # so passiert. Ein Schritt, der nach 25 Zuegen nicht fertig ist, ist entweder
-    # falsch geschnitten oder nicht zu machen, und beides sind Fragen an robin
+    # falsch geschnitten oder nicht zu machen, und beides sind Fragen an den Nutzer
     # und nicht an noch einen Zug.
     GOAL_STEP_TURN_CAP = 25
 
@@ -13627,7 +13627,7 @@ class Api:
         self._goal_rung_said = None
 
     def _goal_typed(self) -> None:
-        """#294: a line robin typed -- the engine starts over, and a paused
+        """#294: a line the user typed -- the engine starts over, and a paused
         goal resumes. Only the typed-line paths call this: a window that
         opens, a `/goal` that shows, a goal that closes resume nothing."""
         self._goal_reset()
@@ -13638,13 +13638,13 @@ class Api:
     def _goal_hold(self, goal: dict, index: int, cls: str,
                    why: str) -> "str | None":
         """#294: pause the goal at step `index` and hand out the report
-        turn -- every stop of the engine that is not robin's own Stop."""
+        turn -- every stop of the engine that is not the user's own Stop."""
         crow_core.goal_pause(index, cls, why)
         return self._goal_pause_turn(crow_core.goal_load() or goal)
 
     def _goal_pause_turn(self, goal: dict) -> "str | None":
         """#294 B. A paused goal gets ONE more turn: the model prepares the
-        pause for robin -- what it found, why it cannot go on, 2-3 proposals,
+        pause for the user -- what it found, why it cannot go on, 2-3 proposals,
         and the question. Then the engine waits for a typed line; the next
         call keeps the report on the pause record and says so."""
         pause = crow_core.goal_paused(goal) or {}
@@ -13712,10 +13712,10 @@ class Api:
             return 0
         self._notes = [n for n in self._notes if n.get("at", 0) <= cut]
         self._timings = [t for t in self._timings if t.get("at", 0) <= cut]
-        # NICHT STILL, ABER NICHT IM CHAT (#262, robin 2026-09-23):
+        # NICHT STILL, ABER NICHT IM CHAT (#262, the owner 2026-09-23):
         # die Zeile stand bis hier im Verlauf und fuellte ihn -- "157 messages
         # of an empty loop dropped" und gleich danach 52 mehr. Sie ist ein
-        # Diagnosefakt und steht jetzt mit Zeitstempel in crow.log. Was robin
+        # Diagnosefakt und steht jetzt mit Zeitstempel in crow.log. Was der Owner
         # sieht, ist "goal mode stopped", wenn die Bremse endgueltig greift.
         crow_core.log_note("goal mode: %d message%s of an empty loop dropped "
                            "from the history"
@@ -13786,13 +13786,13 @@ class Api:
 
           kein Ziel          nichts zu tun
           kein offener Schritt   fertig, und das Panel sagt Complete
-          Stop gedrueckt     robins Wille schlaegt jeden Plan
+          Stop gedrueckt     der Wille des Nutzers schlaegt jeden Plan
           die Bremse (#202)  dreimal dieselbe oder dreimal eine leere Antwort:
                              der Kreis wird aus der Geschichte genommen, EINMAL
                              anders gefragt, und wenn auch das leer bleibt, ist
                              hier nichts mehr zu holen
           der Schrittdeckel  ein Schritt, der 25 Zuege gebraucht hat, ist eine
-                             Frage an robin und nicht an noch einen Zug (#202)
+                             Frage an den Nutzer und nicht an noch einen Zug (#202)
           der Deckel         ein Plan, der nach so vielen Zuegen nicht fertig
                              ist, laeuft im Kreis -- und ein Kreis ohne Grenze
                              ist ein Fenster, das den Rechner die Nacht ueber
@@ -13809,7 +13809,7 @@ class Api:
 
         DER TEXT IST EINE ANWEISUNG AN DAS MODELL, keine Nutzerzeile: er steht
         in eckigen Klammern wie die Rollover-Notiz, damit `_spoken_carry` ihn
-        beim naechsten Schnitt NICHT als robins eigene Worte mitnimmt.
+        beim naechsten Schnitt NICHT als eigene Worte des Nutzers mitnimmt.
         """
         goal = crow_core.goal_load()
         if not goal or goal.get("status") == crow_core.GOAL_DONE:
@@ -13825,7 +13825,7 @@ class Api:
         # it: `run_turn` consumes INTERRUPT when it ends the stopped turn
         # (crow_core.run_turn, `if owns_turn_state: INTERRUPT.clear()`), so by
         # the time the pump asked here the flag was down and the next turn went
-        # out at once -- robin, live 2026-09-24: "Stop, and the goal engine
+        # out at once -- the owner, live 2026-09-24: "Stop, and the goal engine
         # instantly starts the next turn". `stop()` sets this one; only a typed
         # line (`_goal_reset`) lifts it.
         # The flag still counts when it is up: a Stop between two turns (the
@@ -13901,11 +13901,11 @@ class Api:
             self.push_goal()
         # #202. DIESELBE FEHLERKLASSE, NICHT DERSELBE SCHRITTTEXT. Gezaehlt
         # wird der Zug, der gerade zu Ende ging -- ab seinem Anfang, Crows
-        # Anstoss oder robins Zeile --, in die Zaehler des Schritts; hat der
+        # Anstoss oder die Zeile des Nutzers --, in die Zaehler des Schritts; hat der
         # Schritt gerade gewechselt, nur was nach dem Abschluss des alten kam.
         # Hat eine Klasse die Schwelle erreicht und kam seitdem wieder,
         # bekommt das Modell statt des Schritts, der es an dieselbe Wand
-        # schickt, die Wand beim Namen und den Weg darum herum. robin sieht es
+        # schickt, die Wand beim Namen und den Weg darum herum. der Owner sieht es
         # als Notiz, wie die Bremse.
         payload = self._conversation.payload()
         start = crow_core.goal_turn_start(payload)
@@ -13961,7 +13961,7 @@ class Api:
         due = crow_core.goal_trouble_due(self._goal_trouble)
         if due:
             # #262: the NUDGE is unchanged and still goes to the
-            # model; only robin's copy of it moved from the flow to crow.log.
+            # model; only the owner's copy of it moved from the flow to crow.log.
             crow_core.log_note("goal mode, step %d: the same failure keeps "
                                "coming back -- %s. The nudge names the way "
                                "around it."
@@ -14051,7 +14051,7 @@ class Api:
         EINE METHODE FUER DEN ROLL: Mode, Modell, Panel. Die Chips der Seite
         sind Fensterzustand, kein Gespraechszustand -- nach dem Roll stand da,
         was zuletzt stand, und jede Neudarstellung liess sie leer (gemessen
-        2026-09-22 in robins Test: Modell-Chip und Berechtigungsstufe fort,
+        2026-09-22 im Test des Owners: Modell-Chip und Berechtigungsstufe fort,
         bis der naechste Neustart sie neu fuellte). Dieselben Formen, die der
         Start und die Probe schicken -- keine zweite Schreibweise fuer
         dieselben Tatsachen, sonst laufen Seite und Wahrheit auseinander.
@@ -14078,7 +14078,7 @@ class Api:
     def push_goal(self, force: bool = False, moved: bool = False) -> None:
         """Was die Seite ueber das Ziel wissen muss. Ohne Ziel: nichts.
 
-        KEIN LEERER RAHMEN (robin, 2026-08-30): das Panel erscheint nur, wenn
+        KEIN LEERER RAHMEN (der Owner, 2026-08-30): das Panel erscheint nur, wenn
         ein Ziel gesetzt wurde -- ein Kasten mit `0/0` waere eine Anzeige ueber
         etwas, das es nicht gibt.
 
@@ -14091,7 +14091,7 @@ class Api:
         #289: `moved` IS THE PER-ROUND CALL (`Turn.round_finished`). It draws
         only when a step or the goal changed state -- not for the token count,
         which grows every round and is drawn at the turn's end. A goal.json
-        edited outside the goal tools (robin's hand skip, 2026-09-24) reached
+        edited outside the goal tools (the owner's hand skip, 2026-09-24) reached
         the page only at the end of the NEXT turn: nothing else read the file.
         """
         goal = crow_core.goal_load()
@@ -14112,7 +14112,7 @@ class Api:
             "done": done, "total": total,
             # #289: the numbers of the skipped steps, for the head of the bar.
             "skipped": crow_core.goal_skipped(goal),
-            # #294: the pause robin has to answer -- step, class, why, and
+            # #294: the pause the user has to answer -- step, class, why, and
             # the model's report once it is written.
             "pause": ({k: (crow_core.goal_paused(goal) or {}).get(k)
                        for k in ("step", "class", "why", "report")}
@@ -14180,7 +14180,7 @@ class Api:
         NO `user` ECHO FROM HERE. `go()` draws the typed line before it calls
         in. Pushing one from this side put the command on screen TWICE -- wrong
         for `/tools` since the day it was handled here, and wrong for all seven
-        after #94. Found by robin in the window, not by the cases that drive
+        after #94. Found by the owner in the window, not by the cases that drive
         this Api with no page on the other side.
         """
         # SLASH COMMANDS ARE ANSWERED HERE, NOT BY THE MODEL. Typed into the
@@ -14215,7 +14215,7 @@ class Api:
         # frei und diese Zeile sagte besetzt, und die Zeile fiel dazwischen.
         #
         # SIE FIEL AUCH NICHT STILL: `go()` malt die getippte Zeile, BEVOR es
-        # hier ankommt. robin sah am 2026-08-26 dieselbe Frage zweimal im
+        # hier ankommt. der Owner sah am 2026-08-26 dieselbe Frage zweimal im
         # Verlauf, `Memory updated (2)` dazwischen, und nur die zweite lief.
         #
         # `True` HEISST HIER "ANGENOMMEN", nicht "gestartet". Die Seite laesst
@@ -14250,7 +14250,7 @@ class Api:
                 return True
             # #165: EINE GETIPPTE ZEILE SETZT DEN MOTOR-ZAEHLER ZURUECK. Der
             # Deckel sichert gegen einen Plan, der ohne Aufsicht im Kreis
-            # laeuft -- und eine Zeile von robin ist der Beweis, dass jemand
+            # laeuft -- und eine Zeile des Nutzers ist der Beweis, dass jemand
             # zusieht.
             #
             # #202: UND MIT IHM DIE WIEDERHOLUNGSSPUR UND DER SCHRITTDECKEL.
@@ -14489,7 +14489,7 @@ class Api:
 
         #285. AND ONE THAT DID NOT, as a note where the tile was. The empty
         answer used to redraw an empty -- hidden -- tile and nothing else, so a
-        refused, duplicate or expired write vanished under robin's click.
+        refused, duplicate or expired write vanished under the owner's click.
         """
         if yes:
             saved, failed = crow_core.approve_pending()
@@ -14514,7 +14514,7 @@ class Api:
 
         #211. GEWARTE, NICHT ABGEWIESEN. Der Goal-Motor faehrt Zug um Zug auf
         einem Worker, der dazwischen nicht stirbt -- die Weigerung hatte also
-        kein Ende, solange ein Ziel lief (robins Live-Befund 2026-09-22). Ein
+        kein Ende, solange ein Ziel lief (des Owners Live-Befund 2026-09-22). Ein
         Level, das mitten im Zug gewaehlt wird, wartet auf den Spalt zwischen
         zwei Zuegen und heisst das auch in der Notiz.
 
@@ -14668,7 +14668,7 @@ class Api:
             self._subs_sig = ""
             self._push_subs()
             # #119 OVERTURNS #101's ANSWER FOR THIS ONE EVENT. A new chat used to
-            # start from the template in roots.json; robin, on the built window:
+            # start from the template in roots.json; the owner, on the built window:
             # "ein neuer Chat soll immer wurzellos sein".
             #
             # WHY THE TEMPLATE STOPPED BEING HARMLESS. `_bind_root` writes `active`,
@@ -14981,7 +14981,7 @@ class Api:
         at `new` is simply live in it now. The caller and `_movers` (who typed
         the queued line) follow the switch. Returns who changed, for the bar.
 
-        robin, 2026-09-23: switching the chat on the phone never switches the
+        The owner, 2026-09-23: switching the chat on the phone never switches the
         desktop, and the other way round."""
         keep = set(self._movers) | {_client()}
         changed = []
@@ -15068,7 +15068,7 @@ class Api:
         self._reload_rail()
         # #143. THE CARDS ARE PART OF THE REPLAY. They are drawn from the
         # registry, not from the history, so a reopened chat came back without
-        # them and a subtask row had nothing to jump to -- robin, 2026-08-27:
+        # them and a subtask row had nothing to jump to -- the owner, 2026-08-27:
         # "Ich kann die Subtasks nicht mehr anklicken." The signature is
         # dropped so the push fires even though nothing changed.
         self._subs_sig = ""
@@ -15079,7 +15079,7 @@ class Api:
         # vorbei ist: dann ist ein Rail-Klick kein Blick mehr, sondern geht
         # durch diese Methode -- und die kannte weder `_done_paths` noch die
         # Leiste. Der gelesene Chat blieb amber, und ueber ihm stand weiter
-        # "still running" (robin, 2026-08-30 abends).
+        # "still running" (der Owner, 2026-08-30 abends).
         self._done_paths.discard(path)
         self._say_where()
         self._push_cost_for(path, self._context_tokens)
@@ -15155,7 +15155,7 @@ class Api:
         und `reset` gehen durch `_leave`, und an dieser Stelle ist sein Zug
         wirklich fertig.
 
-        DIE ANSICHT FOLGT DEM NUTZER, NIE DEM ZUG (robin, 2026-08-30). Steht er
+        DIE ANSICHT FOLGT DEM NUTZER, NIE DEM ZUG (der Owner, 2026-08-30). Steht er
         beim Ziel -- der Normalfall, weil er die Zeile dort getippt hat --, wird
         sie zum laufenden Chat und die Leiste geht weg. Steht er inzwischen
         woanders, bekommt er seinen Chat zurueck: der Wechsel passiert unter ihm
@@ -15562,7 +15562,7 @@ class Api:
         except Exception:                  # noqa: BLE001
             self.push({"k": "fail", "t": "deleting failed"})
             return False
-        # robin, 2026-08-28 abends: der geloeschte Chat nimmt seine Subtasks
+        # der Owner, 2026-08-28 abends: der geloeschte Chat nimmt seine Subtasks
         # mit -- Registry, Rail-Zeilen, Chip und Transkripte. BEFORE the
         # open-branch below clears `_current_path`: unstamped rows still
         # stamp to the chat they were spawned in.
@@ -16326,7 +16326,7 @@ class Api:
     def open_url(self, url: str, outside: bool = False) -> bool:
         """A link in an answer, opened in the panel or outside. True when it went.
 
-        #201. IN THE PANEL WHEN THE PANEL IS IN THE WINDOW: robin, 2026-09-23,
+        #201. IN THE PANEL WHEN THE PANEL IS IN THE WINDOW: the owner, 2026-09-23,
         the browser belongs inside Crow and not in an extra window, and on his
         machine `webbrowser.open` is Chromium (`xdg-settings get
         default-web-browser` -> chromium.desktop) in a window Hyprland places
@@ -16412,7 +16412,7 @@ class Api:
         # `off` THE MOMENT THE STREAM CLOSES, not when the text arrives. The
         # button has two states and recording is over, so it goes grey now --
         # an in-between colour for "the machine is busy" was built once, in
-        # yellow, and robin cut it: a state nobody can act on is furniture.
+        # yellow, and the owner cut it: a state nobody can act on is furniture.
         self.push({"k": "mic", "state": "off"})
         threading.Thread(target=self._dictate_finish, daemon=True).start()
 
@@ -16526,7 +16526,7 @@ class Api:
     def set_server_key(self, name: str, value: str) -> str:
         """Keep a static key for one HTTP server, or forget it when cleared.
 
-        IT GOES TO THE TOKEN STORE, NOT TO `mcp.json`. robin decided that on
+        IT GOES TO THE TOKEN STORE, NOT TO `mcp.json`. The owner decided that on
         2026-08-24, and the reference agrees: Hermes writes keys to `.env` and
         leaves the configuration carrying references. The configuration is the
         file people copy; the token store is the one with 0o600 on it.
@@ -16583,7 +16583,7 @@ class Api:
     def openrouter_set(self, on) -> str:
         """Park or unpark the broker (its own page, 2026-08-28). Refusal or "".
 
-        ON NEVER MOVES A TURN -- robins Regel: no endpoint change, so it is
+        ON NEVER MOVES A TURN -- the owner's Regel: no endpoint change, so it is
         allowed mid-turn and the machine keeps answering. OFF while turns sit
         on the broker IS an endpoint change and walks `provider_pick`'s road:
         refused mid-turn, both lines said, the chat emptied -- and refused
@@ -17219,8 +17219,8 @@ class Api:
     def github_account_click(self) -> None:
         """The account button in the panel head. It only ever CONNECTS.
 
-        IT WAS A TOGGLE FOR ONE EVENING, and that evening it cost robin his
-        token: the head still read "not connected" from before the flow ran, he
+        IT WAS A TOGGLE FOR ONE EVENING, and that evening it cost the owner their
+        token: the head still read "not connected" from before the flow ran, they
         clicked it to connect, and the toggle -- reading the stored token rather
         than the stale label -- disconnected instead. A control whose action
         depends on state the label may be lagging behind is a control that does
@@ -17654,7 +17654,7 @@ class Api:
                 said = {"k": "heard", "note": why}
             else:
                 # THE FIRST ONE LOADS THE MODEL -- or downloads it, ~52 s on
-                # robin's first try -- and the phone says so meanwhile.
+                # the owner's first try -- and the phone says so meanwhile.
                 if not crow_voice.model_loaded():
                     self._push_to({"k": "heard", "loading": True}, (device,))
                 text = crow_voice.transcribe_file(path, stats)
@@ -17905,7 +17905,7 @@ class Api:
         its root. "" adopts only "" -- the live chat gaining its first file --
         and a real path matches by absolute path, for the archive move that
         relocates a chat. Nothing else is touched: a child re-hung under
-        whatever is active was the wandering robin filmed on 2026-08-27.
+        whatever is active was the wandering the owner filmed on 2026-08-27.
         """
         for ident, parent in list(self._sub_parent.items()):
             if old == "":
@@ -17915,7 +17915,7 @@ class Api:
                 self._sub_parent[ident] = new
 
     def _drop_chat_subtasks(self, parent: str) -> None:
-        """#143-Nachtrag (robin, 2026-08-28 abends): ein geloeschter Chat
+        """#143-Nachtrag (der Owner, 2026-08-28 abends): ein geloeschter Chat
         nimmt seine Subtasks mit. Unstamped rows are stamped first, the way
         `_subs_items` would, so a delete before the first tick loses nothing
         to timing; "" is the live chat without a file, as everywhere."""
@@ -17955,7 +17955,7 @@ class Api:
             # every snapshot anew. The page used to compare its own cached
             # `live` against `parent` -- two values frozen on two sides of the
             # seam at two different moments, and the mismatch drew no card at
-            # all in a fresh chat (robin, 2026-08-27, screenshot 2). One side
+            # all in a fresh chat (the owner, 2026-08-27, screenshot 2). One side
             # computing both in the same breath cannot drift, and a wrong
             # frame heals on the next tick.
             # #249: "DER OFFENE CHAT" IST DER DES AUFRUFERS -- das Telefon kann
@@ -18004,7 +18004,7 @@ class Api:
 
     def _sub_share(self, before: "set") -> str:
         """The cost line's delegation share: THIS turn's subtasks, by token
-        count and nothing else -- no money figure, robin's call 2026-08-27."""
+        count and nothing else -- no money figure, the owner's call 2026-08-27."""
         turn = [r for r in crow_core.subtask_view() if r["i"] not in before]
         if not turn:
             return ""
@@ -18132,7 +18132,7 @@ class Api:
                     # True, weil erst diese Schleife entscheidet, ob ein zweiter
                     # Zug folgt. Danach fiel das Flag und niemand zeichnete
                     # nochmal: die Kachel behielt ihre Amber-Marke, bis
-                    # zufaellig etwas anderes die Rail anfasste. robin,
+                    # zufaellig etwas anderes die Rail anfasste. der Owner,
                     # 2026-08-31: "zeigt weiterhin aktiver turn, obwohl turn
                     # durch". Nach dem Lock, weil ein Push kein Lock braucht.
                     self._reload_rail()
@@ -18203,7 +18203,7 @@ class Api:
         pane.throttle(on)
 
     def _run(self, text: str) -> None:
-        # #152, zweiter Akt -- robins Retest: der Kern prueft `should_roll`
+        # #152, zweiter Akt -- des Owners Retest: der Kern prueft `should_roll`
         # erst am ENDE einer Runde. Eine Session, die schon UEBER der
         # Schwelle steht (die RT-Session: 200,2k von 200.192), scheitert
         # aber an der ERSTEN Anfrage (HTTP 400 exceed_context_size) und
@@ -18453,7 +18453,7 @@ class Api:
         # happened to redraw the list.
         self._reload_rail()
         self.push({"k": "idle"})
-        # #122. AFTER `idle`, AND THAT ORDER IS THE FIX FOR A DEFECT robin found
+        # #122. AFTER `idle`, AND THAT ORDER IS THE FIX FOR A DEFECT the owner found
         # live on 2026-08-21. The review sat inside `run_turn`, so the turn did
         # not end until it had thought about the whole conversation at the
         # chat's reasoning level: the answer stood complete on screen, the cost
@@ -18463,7 +18463,7 @@ class Api:
         # happened by the time this line runs -- cost, rail, idle -- so the
         # review costs the reader nothing but the slot, and the glow line
         # arrives on its own whenever it arrives.
-        # TWICE PER WINDOW, NOT PER TURN (robin, 2026-08-21): "es soll ja auch
+        # TWICE PER WINDOW, NOT PER TURN (der Owner, 2026-08-21): "es soll ja auch
         # nicht jede neue Zeile ins MEMORY, sondern nur was wichtig ist pro
         # Unterhaltung". `review_due` answers with the share this turn crossed,
         # or None.
@@ -18613,7 +18613,7 @@ def main(argv: list[str] | None = None) -> int:
     # FRAMELESS, because the title bar is part of the design: the caption is
     # drawn in the page with the wordmark in it, the way the mockup shows it.
     title = "CROW %s" % (client_version() or "")
-    # DIE MINDESTBREITE IST DIE GARANTIE DER MASKE (robin, 2026-08-27, "zum
+    # DIE MINDESTBREITE IST DIE GARANTIE DER MASKE (the owner, 2026-08-27, "zum
     # 10000000x"): selbst mit der Rail am Anschlag (RAIL_MAX 520) und jedem
     # erlaubten Code-Panel bleibt der Chatspalte ihr min-width von 560 --
     # 520 + 560 + 50 Spalten-Chrome = 1130. Das Code-Panel hat KEIN hartes
@@ -18770,7 +18770,7 @@ def daemon_bridge_threads() -> None:
     semaphore with no timeout for WebKit's asynchronous reply
     (platforms/gtk.py:693-695). An answer still in flight when the window goes
     never gets that reply -- the GTK loop has ended -- and Python's exit joins
-    that thread forever. MEASURED: the exit watchdog's stacks on robin's close
+    that thread forever. MEASURED: the exit watchdog's stacks on the owner's close
     (crow.log 2026-09-27 09:39:45: MainThread in `threading._shutdown`,
     `Thread-14 (_call)` in `evaluate_js`); a harness with one answer in flight
     at the close hangs 2 of 2 without this and ends 2 of 2 with it. Nothing
@@ -18783,7 +18783,7 @@ def daemon_bridge_threads() -> None:
 
 
 # #313. THE WINDOW IS SHUT, SO THE PROCESS ENDS -- within seconds.
-# robin, 2026-09-27: after Crow's X the process stayed (pid 34193: main thread in
+# The owner, 2026-09-27: after Crow's X the process stayed (pid 34193: main thread in
 # a futex wait, 43 threads, SIGINT ignored, SIGTERM ended it), and from a
 # terminal Ctrl+C was always needed on top. Python's exit joins every non-daemon
 # thread and runs the atexit hooks; one that never returns keeps a window-less

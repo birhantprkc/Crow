@@ -10751,7 +10751,7 @@ class TheGoalEnginePausesAndAsksTests(ApiCase):
         report = api._goal_nudge()
         self.assertIn("PAUSED at step 2 (environment)", report)
         self.assertIn("Two or three concrete proposals", report)
-        self.assertIn("Ask robin whether he has further input", report)
+        self.assertIn("Ask the user whether they have further input", report)
         self.turn(api, report, "1. software GL 2. no GPU 3. A) stop serve "
                                "B) llama.cpp 4. Do you have more input?")
         self.assertIsNone(api._goal_nudge())

@@ -58,6 +58,12 @@ function Get-ModelTable {
     if (-not $json.models -or -not $json.models.entries) {
         throw "model table has no models.entries: $ManifestPath"
     }
+    # #196 C1: the shipped manifest carries no `_root` (it named one machine).
+    # The tree is the client's: $env:CROW_MODELS, else <repo>\models.
+    if (-not $json.models._root) {
+        $root = if ($env:CROW_MODELS) { $env:CROW_MODELS } else { Join-Path (Split-Path $PSScriptRoot -Parent) 'models' }
+        $json.models | Add-Member -NotePropertyName _root -NotePropertyValue $root -Force
+    }
     return $json.models
 }
 
