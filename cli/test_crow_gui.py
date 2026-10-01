@@ -16824,5 +16824,57 @@ class TheCloseSavesThenEndsTests(unittest.TestCase):
         self.assertIn('body.closing::after{content:"saving the chat', source)
 
 
+
+class TheWindowWarmsOnlyOnTheImageStackTests(unittest.TestCase):
+    """#196 C3: with `active-point.json` naming `27b` or `flash-next` the
+    window starts no sd-server; `image-stack` and no file warm as before.
+    The real core decides; only the disk and the thread are stand-ins."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-c3-gui-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        weights = os.path.join(self.dir, "w.safetensors")
+        open(weights, "w").close()
+        self.thread = mock.Mock()
+        for target, attr, value in (
+                (crow_platform, "config_dir", mock.Mock(return_value=self.dir)),
+                (crow_core, "image_server_binary",
+                 mock.Mock(return_value=os.path.join(self.dir, "sd-server"))),
+                (crow_core, "_image_model_files", lambda _m: [weights] * 3),
+                (crow_core.subprocess, "Popen",
+                 mock.Mock(side_effect=AssertionError("Popen must not run"))),
+                (crow_gui.threading, "Thread", self.thread)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _point(self, point):
+        with open(os.path.join(self.dir, "active-point.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"point": point, "base_url": "http://127.0.0.1:8099/v1",
+                       "started_at": "2026-10-01T10:00:00+02:00",
+                       "pids": {"serve": os.getpid(), "image": None}}, fh)
+
+    def test_27b_and_flash_next_warm_nothing_image_stack_warms(self):
+        for point in ("27b", "flash-next"):
+            self._point(point)
+            self.assertFalse(crow_gui.warm_image_server(), point)
+        self.thread.assert_not_called()
+        self._point("image-stack")
+        self.assertTrue(crow_gui.warm_image_server())
+        self.assertEqual(self.thread.call_args.kwargs.get("target"),
+                         crow_core.image_server_warm)
+
+    def test_no_file_or_a_broken_one_warms_as_before(self):
+        self.assertTrue(crow_gui.warm_image_server())            # no file
+        with open(os.path.join(self.dir, "active-point.json"), "w") as fh:
+            fh.write("{broken")
+        self.assertTrue(crow_gui.warm_image_server())
+        self.assertEqual(self.thread.call_count, 2)
+        self._point("27b")
+        self.assertFalse(crow_gui.warm_image_server())
+        self.assertEqual(self.thread.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
