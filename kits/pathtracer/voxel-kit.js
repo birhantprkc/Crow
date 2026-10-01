@@ -551,7 +551,7 @@ export function createDiorama(grid, opts = {}) {
     // Camera: telephoto PhysicalCamera, near-isometric, slight depth of field.
     // A person opening the page gets the whole window at the display's real
     // resolution (2026-09-25: a fixed 1024x1024 canvas at pixel ratio 1 looked
-    // pixelated on robin's scaled 1440p screen). Checkers pass ui=0 and keep the
+    // pixelated on the owner's scaled 1440p screen). Checkers pass ui=0 and keep the
     // fixed width x height, so captures stay comparable.
     const fit = url.ui && o.fit !== false && typeof window !== 'undefined';
     const size = () => fit ? [Math.max(200, window.innerWidth), Math.max(200, window.innerHeight)] : [o.width, o.height];
@@ -665,7 +665,7 @@ export function createDiorama(grid, opts = {}) {
 
     // LIVE (default, 2026-09-25): the static island is path-traced and keeps
     // converging while the camera rests; only the animated parts (d.part) are
-    // rasterised on top, depth-tested against the island. robin opened the old
+    // rasterised on top, depth-tested against the island. The owner opened the old
     // flat raster preview after a 6/6 run and it looked nothing like the photos:
     // the view people open must carry the photo's light. `?mode=raster` keeps
     // the old flat preview for debugging.

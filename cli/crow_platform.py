@@ -164,7 +164,7 @@ def install_dir() -> str:
 def log_dir() -> str:
     """Where a server boot writes its .out.log and .err.log.
 
-    WINDOWS KEEPS `runs\\` UNDER THE CURRENT DIRECTORY, which is robins Ansage
+    WINDOWS KEEPS `runs\\` UNDER THE CURRENT DIRECTORY, which is the owner's Ansage
     vom 2026-08-28: the traces of a Crow boot lie beside the ones the B5 runs
     already write, not under a random name in %TEMP% that nobody finds after a
     crash. On Linux the window is started from a desktop entry and the current
@@ -249,7 +249,7 @@ def binary_is_for_this_os(path: str) -> bool:
     """Could this spelling of a path name a program on THIS platform?
 
     #140 lets a server line name its own binary, and the flash-next line names
-    `C:/Users/.../dev/crow-lab/.../llama-server.exe`. On Windows a missing
+    `bin\\llama-server.exe`. On Windows a missing
     binary at that path is ITS OWN error -- falling back would boot a build that
     cannot load the architecture. On Linux the same string is not a statement
     about this machine at all: it is a Windows path, it can never exist here,
@@ -640,7 +640,7 @@ def image_server_platform_args() -> list[str]:
     """What this platform appends to sd-server's argv (#320).
 
     WINDOWS: `--mmap`. Under WDDM every CUDA allocation also counts against
-    the system commit limit (robin's machine: no pagefile, 64,901 MB). serve
+    the system commit limit (the owner's machine: no pagefile, 64,901 MB). serve
     holds 26.7 GB of it, and sd-server without --mmap needs ~37 GB more (the
     CPU text encoder's copy 14.4 GB + pinned DiT staging 14 GB), so every job
     died in `cudaMalloc failed: out of memory` with VRAM free; a VRAM loan
@@ -658,7 +658,7 @@ def oom_hint() -> str:
 
     WINDOWS: under WDDM every CUDA allocation also counts against the system
     commit limit, so a `cudaMalloc failed: out of memory` can come with VRAM
-    free (robin's machine, 2026-09-28: 10 GB free, commit exhausted).
+    free (the owner's machine, 2026-09-28: 10 GB free, commit exhausted).
     ELSEWHERE nothing: the card is what runs out.
     """
     if not IS_WINDOWS:
@@ -1096,7 +1096,7 @@ def terminate_tree(proc, grace: float = 5.0) -> None:
     """End a child this process started, and whatever it started in turn.
 
     THE HANDLE, NEVER A NAME. #158 was paid once: a measurement script swept
-    "every llama-server" and took robins running test server with it. What dies
+    "every llama-server" and took the owner's running test server with it. What dies
     here is the process this caller spawned.
 
     Windows: killing the handle is the whole story (TerminateProcess). Linux:
@@ -1243,7 +1243,7 @@ def find_browser_path() -> "str | None":
 _GPU_HEADROOM_MIB = 512
 
 # #279. CROW'S OWN BROWSER PANEL IS A SECOND GPU CLIENT. Measured
-# 2026-09-24 (robin's diorama run, serve up, ~560 MiB free at boot): the
+# 2026-09-24 (the owner's diorama run, serve up, ~560 MiB free at boot): the
 # panel's WebKitWebProcess held 343 MiB of the card, and twice a GPU render
 # 5-10 s earlier was followed by a SIGSEGV of that process inside
 # libnvidia-eglcore (coredumpctl, 13:15:20 and 13:16:01 local). 512 MiB was
@@ -1461,7 +1461,7 @@ def render_gl_mode(free_mib: "int | None" = None, panel: bool = False) -> str:
                        and free_mib >= gpu_headroom_mib(panel)) else "unavailable"
 
 
-# #293. THE ANGLE BACKENDS, IN ORDER. `vulkan` is robin's decision of
+# #293. THE ANGLE BACKENDS, IN ORDER. `vulkan` is the owner's decision of
 # 2026-09-25 and the launcher line of the research brief (Chromium's
 # "Using GPU hardware in headless Chrome",
 # https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/gpu/using-gpu-hardware-in-headless-chrome.md;
@@ -1515,7 +1515,7 @@ def render_renderer_verdict(renderer: "str | None", why: str = "",
     UNMASKED_RENDERER_WEBGL) is the real GPU, else the reason it is not.
 
     A software string is refused by name. When nvidia-smi names an NVIDIA
-    card, the string must say NVIDIA -- robin's rule of 2026-09-25: the
+    card, the string must say NVIDIA -- the owner's rule of 2026-09-25: the
     capture is taken on the card or not at all. `card` is the suite's seam
     (a (name, MiB) tuple, or False for none)."""
     if not renderer:

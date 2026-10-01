@@ -136,7 +136,7 @@ LANGUAGE_RULE = "Always reply in the same language the user wrote in. "
 def system_in_language(system: "str | None", language: "str | None") -> "str | None":
     """The system prompt with the reply language PINNED, or unchanged.
 
-    WHY A PIN EXISTS AT ALL (robin, 2026-09-19, seen live on both engines): the
+    WHY A PIN EXISTS AT ALL (the owner, 2026-09-19, seen live on both engines): the
     rule "reply in the language the user wrote in" is decided by the FIRST
     message, and a chat that opens with "Hey" has no language. The model
     guessed German, and from then on the German history outweighed the rule --
@@ -272,7 +272,7 @@ SEARCH_SNIPPET = 400
 # So the value lives in a FILE instead: %LOCALAPPDATA%\Crow\secrets.json, a flat
 # {"NAME": "value"} object next to approvals.json and booted.json, in the
 # directory install.ps1 already owns. tools/migrate-secrets.ps1 writes it, sets
-# the ACL and takes the variable out of the user scope; robin runs it once.
+# the ACL and takes the variable out of the user scope; the owner runs it once.
 # On Linux the same file sits in ~/.config/crow, where the rest of what the
 # user configured lives -- crow_platform.config_dir() is the whole difference.
 #
@@ -622,7 +622,7 @@ def _entry_for(model: "str | None", manifest: "dict | None" = None) -> dict:
 # either -- while Crow sent the card's THINKING sampling row to both. An entry
 # that declares `reasoning_fixed` gets that word on every request of every
 # sender (turn, digest leg, review), whatever the chat stored, and the window
-# offers no choice for it. robin, 2026-09-22: both Qwen3.8-Flash-Next points
+# offers no choice for it. The owner, 2026-09-22: both Qwen3.8-Flash-Next points
 # think at the template default -- `high`, which renders as xhigh on both
 # engines (llama: the off/high group, #160; serve: `map_reasoning_effort`).
 # Flipping a point is one manifest value.
@@ -1471,7 +1471,7 @@ CHAT_TEMPLATES = (os.path.join("templates", "0731-chat-template.jinja"),
 
 # THE ONE SENTENCE A CLIENT WITH NOTHING TO TALK TO SAYS, written here so both
 # surfaces say it. `[WinError 10061]` alone reads like a permission refusal --
-# robin reported exactly that on 2026-08-24 ("Zugriff verweigert trotz auto")
+# the owner reported exactly that on 2026-08-24 ("Zugriff verweigert trotz auto")
 # while the real cause was a llama-server ended in the Task Manager. The error
 # names what failed; this names what to do about it.
 SERVER_DOWN_HINT = "start llama-server first, then retry."
@@ -1538,12 +1538,14 @@ def model_candidates(key: str, manifest: dict | None = None,
                      install: str | None = None) -> list[str]:
     """Every path this build would accept as the GGUF for `key`, in order.
 
-    THREE PLACES BECAUSE THERE ARE TWO LAYOUTS AND THEY DISAGREE. The manifest's
-    `models._root` is the measurement machine's tree, where the path is
-    `0731-gguf/UD-IQ2_XXS/...`; an install keeps its models under
-    <install>\\models and README.md spells that one `models\\UD-IQ2_XXS\\...`.
-    The same manifest entry cannot be right for both, so the basename is tried
-    under the install root as well.
+    THREE PLACES BECAUSE THERE ARE TWO LAYOUTS AND THEY DISAGREE. The
+    measurement machine's tree spells the path `0731-gguf/UD-IQ2_XXS/...`; an
+    install keeps its models under <install>\\models and README.md spells that
+    one `models\\UD-IQ2_XXS\\...`. The same manifest entry cannot be right for
+    both, so the basename is tried under the root as well. A manifest's
+    `models._root` is tried first when it has one; the shipped manifest has
+    none since #196 C1 (it named one person's machine on every install), so a
+    measurement machine reaches its tree through `$CROW_MODELS`.
 
     THE SECOND ROOT IS `crow_platform.models_dir()` and not literally
     <install>\\models, because a quant is the one part of an install that moves:
@@ -1625,7 +1627,7 @@ def model_label(key: str) -> str:
     THE KEY IS THE TABLE'S WORD, NOT THE MODEL'S. `operating-point` says which
     row of the manifest this is and nothing at all about what would load; a
     person choosing between two models is choosing between DeepSeek and Qwen.
-    robin, 2026-08-21, at the first picker that listed keys.
+    The owner, 2026-08-21, at the first picker that listed keys.
 
     DERIVED FROM THE ENTRY'S OWN PATH through `model_display_name` -- the same
     function /props answers are run through, which is what makes the label and
@@ -1665,6 +1667,18 @@ def server_binary(install: str | None = None) -> tuple[str | None, list[str]]:
     return crow_platform.find_server_binary(install or INSTALL_ROOT)
 
 
+def binary_env_var(key: str) -> str:
+    """The environment variable that names a custom llama-server for `key`.
+
+    `CROW_LLAMA_SERVER_` plus the key in upper case, every run of other
+    characters as one `_`: `flash-next-q2-k-xl` -> CROW_LLAMA_SERVER_FLASH_NEXT_Q2_K_XL.
+    One variable PER LINE and not one for all, because a lab build is measured
+    for the line that needs it; a single global override would quietly put it
+    under every other model too.
+    """
+    return "CROW_LLAMA_SERVER_" + re.sub(r"[^A-Z0-9]+", "_", key.upper()).strip("_")
+
+
 def server_command(key: str, manifest: dict | None = None,
                    install: str | None = None) -> list[str]:
     """The argv for one model key, built from the manifest and nothing else.
@@ -1699,19 +1713,35 @@ def server_command(key: str, manifest: dict | None = None,
 
     # A line may name its own binary: a model whose architecture only exists in
     # a lab engine (#140, qwen4exp needs the PR build) points there, and absent
-    # the key the packaged binary resolves as it always has. Absolute, and its
-    # absence is ITS OWN error -- falling back to a binary that cannot load the
-    # architecture would boot a server that dies one step later with less to say.
+    # the key the packaged binary resolves as it always has. Its absence is ITS
+    # OWN error -- falling back to a binary that cannot load the architecture
+    # would boot a server that dies one step later with less to say.
+    #
+    # NO MACHINE'S PATH IN THE MANIFEST (#196 C1). The shipped value is relative
+    # to the install (`bin\\llama-server.exe`), and a machine that runs its own
+    # build says so in the environment: binary_env_var(key) wins when set, on
+    # every platform, because it is a statement about THIS machine.
+    env_name = binary_env_var(key)
+    override = (os.environ.get(env_name) or "").strip()
     binary = line.get("binary")
-    if binary and crow_platform.binary_is_for_this_os(str(binary)):
-        binary = os.path.normpath(str(binary))
+    if override:
+        binary = os.path.normpath(os.path.expanduser(override))
+        if not os.path.isfile(binary):
+            raise ServerBootError("%s names the server binary for model %r and it "
+                                  "is not on disk: %s" % (env_name, key, binary))
+    elif binary and crow_platform.binary_is_for_this_os(str(binary)):
+        binary = str(binary)
+        if not os.path.isabs(binary):
+            binary = os.path.join(install, binary)
+        binary = os.path.normpath(binary)
         if not os.path.isfile(binary):
             raise ServerBootError("model %r names its own server binary and it is "
-                                  "not on disk: %s" % (key, binary))
+                                  "not on disk: %s (a build elsewhere is named by %s)"
+                                  % (key, binary, env_name))
     else:
         # A BINARY SPELLED FOR THE OTHER PLATFORM IS NOT A STATEMENT ABOUT THIS
-        # ONE. `flash-next-q2-k-xl` names the lab build as
-        # `C:/Users/.../dev/crow-lab/.../llama-server.exe`; on Linux that
+        # ONE. `flash-next-q2-k-xl` names its build as
+        # `bin\\llama-server.exe`, a Windows spelling; on Linux that
         # string can never exist, and reading it as "the binary is missing"
         # would refuse a boot over a fact about somebody else's machine. The
         # same line's llama.cpp requirement still holds -- the pin and the two
@@ -1817,7 +1847,7 @@ def running_base_url(default: str) -> str:
     WHY A CLIENT MAY NOT ASSUME 8081. That is 0731's port and it was the only
     one until a second model arrived on 8082. A window started while Qwen is up
     then knocks on an empty port and says "no endpoint" -- about a server the
-    user can see running. robin, 2026-08-21: "NEIN ICH HAENGE NICHTS AN."
+    user can see running. The owner, 2026-08-21: "NEIN ICH HAENGE NICHTS AN."
 
     ASKED IN THIS ORDER ON PURPOSE. If something answers where the caller was
     already pointed, that is the answer: an explicit --base-url is a decision
@@ -2044,7 +2074,7 @@ def refuse_images(base_url: str, timeout: float = 3.0) -> "str | None":
 _BOOTED: "dict[int, tuple]" = {}
 _BOOTED_NOTED: "set[int]" = set()
 
-# UND AUF PLATTE, nicht nur im Prozess -- das Loch der Nacht: robin startete
+# UND AUF PLATTE, nicht nur im Prozess -- das Loch der Nacht: der Owner startete
 # das Fenster neu (auf meine eigene Ansage), damit verwaiste der laufende
 # Server, und der naechste Tod traf ein Fenster, das "seinen" Boot nicht mehr
 # kannte -- keine Exit-Zeile, kein Reboot, roter Abbruch wie eh. Die Datei
@@ -2236,7 +2266,7 @@ def start_server(key: str, base_url: str, install: str | None = None,
             # sentence for it here would compete with the real one.
             pass
     say("starting %s" % os.path.basename(argv[0]))
-    # robins Ansage vom 2026-08-28 abends: die Spuren eines Crow-Boots liegen
+    # des Owners Ansage vom 2026-08-28 abends: die Spuren eines Crow-Boots liegen
     # in runs\llama-server-<port>.{out,err}.log -- der Konvention, in der die
     # B5-Starts schon schreiben -- statt unter einem Zufallsnamen in %TEMP%,
     # den nach einem Absturz niemand findet (der 0xc0000409 dieses Abends
@@ -2615,7 +2645,7 @@ SESSION_TOOLS_CLEARED_KEY = "tools_cleared"
 
 # #173. DIE MARKEN IM VERLAUF -- Rollover-Notiz, `Memory updated`, Moduswechsel.
 # Sie sind KEINE Nachrichten und duerfen es nicht werden: im Nachrichtenband
-# stuenden sie als robins Worte im naechsten Prompt. Sie sind auch keine reine
+# stuenden sie als Worte des Nutzers im naechsten Prompt. Sie sind auch keine reine
 # Bildschirmausgabe, denn dann waren sie beim naechsten Oeffnen weg und jede
 # spaeter gezeichnete rutschte unter alles, was nach ihr passiert war -- die
 # Rollover-Notiz behauptete damit das Gegenteil ihrer Aussage. Jede Marke traegt
@@ -2645,7 +2675,7 @@ SESSION_NOTES_MAX = 400
 
 # #262. CROW'S OWN LOG FILE, and what goes there instead of the chat.
 #
-# robin, 2026-09-23: the grey status lines Crow writes about its own machinery
+# The owner, 2026-09-23: the grey status lines Crow writes about its own machinery
 # -- the goal brake's dropped loops, the same-failure streak, a discarded
 # degenerate round, a cache that did not hold, a spent tool budget -- clutter a
 # long session. Measured the same day in session.json: "goal mode: 157 messages
@@ -2657,7 +2687,7 @@ SESSION_NOTES_MAX = 400
 # rollover card (its "rolled over at N tokens" line is log-only since
 # 2026-09-24), "goal mode stopped/
 # paused" (the goal needs a typed line to go on), the server reboot lines
-# (robin, 2026-08-28: a silent 70 s reboot looks exactly like the crash it
+# (the owner, 2026-08-28: a silent 70 s reboot looks exactly like the crash it
 # repairs), alarms, memory lines, and every answer to a command.
 #
 # UNDER THE STATE DIRECTORY ON BOTH PLATFORMS, beside the boot logs on Linux
@@ -2692,22 +2722,22 @@ LOG_ONLY_NOTE_PREFIXES = (
     "tool budget spent after",              # the terminal's budget_spent
     # #279: the panel's web process crashed. The model's render_page captures
     # are unaffected (2026-09-24: 2 panel crashes, every capture written);
-    # robin, 2026-09-24: "nur noch ins Logfile". The memory-ceiling stop
+    # The owner, 2026-09-24: "nur noch ins Logfile". The memory-ceiling stop
     # ("… was stopped: it grew past …", #226) stays in the chat.
     "the page in the browser panel stopped (",
-    # robin, 2026-09-24 (screenshots of a fresh goal chat): the chat-open and
+    # the owner, 2026-09-24 (screenshots of a fresh goal chat): the chat-open and
     # goal-setup bookkeeping lines are for the log, not the conversation.
     "the working area and its project memory changed",   # MEMORY_COST_NOTE
     "working directory: ",                  # the bound folder, (auto)/(chosen)
     "mode yolo -- ",                        # the mode line at chat open
     "archived: ",                           # the chat file moved to archiv/
     "the goal goes into the head of every prompt",       # GOAL_COST_NOTE
-    # robin, 2026-09-24 (phone screenshot): the "no folder" line (`clear_root`)
+    # the owner, 2026-09-24 (phone screenshot): the "no folder" line (`clear_root`)
     # is bookkeeping too; the root chip already says "no folder". The start-up
     # "the last working directory is gone: … running without one" is a `fail`,
     # not this note, and stays in the chat.
     "no working directory -- writes are unbounded",
-    # robin, 2026-09-24 (diorama run screenshots): the rollover card itself
+    # the owner, 2026-09-24 (diorama run screenshots): the rollover card itself
     # stays in the chat; its "rolled over at N tokens -> file" line and the
     # #98 boundary alarm with its explanation go to the log. The alarm is kind
     # `alarm`, so LOG_ONLY_NOTE_KINDS below lets the same prefixes catch it.
@@ -2719,7 +2749,7 @@ LOG_ONLY_NOTE_PREFIXES = (
 LOG_ONLY_NOTE_KINDS = ("note", "alarm")
 # The /goal setup echo ("goal: <title> -- 9 steps, acceptance check: …") is
 # log-only too; the status answer "goal: <title> -- 3/9, 12 min so far" that
-# robin asks for with /goal is not, so the steps count decides, not the prefix.
+# the user asks for with /goal is not, so the steps count decides, not the prefix.
 _LOG_ONLY_NOTE_RE = re.compile(r"^goal: .+ -- \d+ steps\b")
 
 
@@ -2766,7 +2796,7 @@ def log_note(text: str, kind: str = "note") -> None:
 # damit hinterher nicht auswertbar, und hinterher ist genau, wann jemand es will.
 #
 # UND NICHT IN DIE NACHRICHTENLISTE, aus demselben Grund wie die Marken: dort
-# laese das Modell seinen eigenen Durchsatz als robins Worte.
+# laese das Modell seinen eigenen Durchsatz als Worte des Nutzers.
 SESSION_TIMINGS_KEY = "timings"
 SESSION_TIMINGS_MAX = 2000
 
@@ -2782,7 +2812,7 @@ SESSION_TIMINGS_MAX = 2000
 SESSION_MEMORY_KEY = "memory"
 
 # #122. WHEN THE REVIEW RUNS, and it is not after every turn -- that was the
-# first build and robin stopped it on 2026-08-21: "es soll ja auch nicht jede
+# first build and the owner stopped it on 2026-08-21: "es soll ja auch nicht jede
 # neue Zeile ins MEMORY, sondern nur was wichtig ist pro Unterhaltung".
 #
 # THREE TIMES PER WINDOW, at a fifth, a half and three quarters of the context.
@@ -2791,7 +2821,7 @@ SESSION_MEMORY_KEY = "memory"
 # in it is easy to see; one when there is real material; and one more before the
 # rollover at 0.9 takes the whole thing away.
 #
-# 0.20 IS THE SAFETY MARK (robin, 2026-08-21: "dann sind wir safe"). Plenty of
+# 0.20 IS THE SAFETY MARK (the owner, 2026-08-21: "dann sind wir safe"). Plenty of
 # conversations here never reach half a 200k window -- they are answered and
 # closed -- and under two marks alone every one of those would end without
 # anything having been written down at all.
@@ -3113,7 +3143,7 @@ def forget_session(path: str | None = None) -> bool:
     said" from "the user just emptied it on purpose", and `/reset` is the second
     one. So the emptying reaches the disk from here instead.
 
-    MEASURED 2026-08-14, and it had been true since `/reset` existed: robin
+    MEASURED 2026-08-14, and it had been true since `/reset` existed: the owner
     dropped the context in the window and closed it. `save_session` saw one
     message (the system prompt), returned None, wrote nothing -- and
     `session.json` still held the three messages the last turn had put there,
@@ -3142,7 +3172,7 @@ class _ReplaceWhole:
 
     `open(path, "w")` truncates first and writes second; the exit watchdog
     ending the process in between left session.json at 0 bytes and the chat
-    lost (robin's Windows machine, 2026-09-28 16:22), and a Ctrl+C during the
+    lost (the owner's Windows machine, 2026-09-28 16:22), and a Ctrl+C during the
     close does the same. With the tmp the old file stays whole until the new
     one is complete. A failed write removes the tmp and still raises, so the
     caller sees the failure it always saw.
@@ -3189,7 +3219,7 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
     match and the whole thing would be re-read anyway. Restoring only the
     messages costs a full prefill. Both, or nothing.
 
-    ON EXIT, NOT PER TURN, on robin's call 2026-08-08: a save is ~17 MiB plus
+    ON EXIT, NOT PER TURN, on the owner's call 2026-08-08: a save is ~17 MiB plus
     ~6.9 KiB per token -- about 1.3 GiB at a full 200k window -- and this is the
     one place Crow writes to the SSD rather than reading it. Per turn that
     accumulates; once per session it does not.
@@ -3413,7 +3443,7 @@ def session_tools_cleared(path: str | None = None) -> int:
     """How many tool rows this chat has already had dismissed.
 
     A COUNT AND NOT A FLAG, so that clearing means "everything up to here" and a
-    call made afterwards still shows. robin, 2026-08-22: what was deleted stays
+    call made afterwards still shows. The owner, 2026-08-22: what was deleted stays
     deleted, unless something new happened.
     """
     try:
@@ -3532,7 +3562,7 @@ def set_aside_unreadable_session(path: str | None = None) -> str | None:
     """#325: the line for a session file that exists and cannot be read, or None.
 
     `load_session` answers None for it, the same as for "no session", so the
-    window opened an empty chat and said nothing -- measured on robin's 0-byte
+    window opened an empty chat and said nothing -- measured on the owner's 0-byte
     session.json (2026-09-28). The file is MOVED ASIDE to `<path>.unreadable`,
     not deleted: that says it once (the next start finds no file) and keeps
     whatever is left of it for whoever wants to look.
@@ -3576,7 +3606,7 @@ def should_roll(context_tokens: int, n_ctx: int, at: float = ROLLOVER_AT) -> boo
 # #263. CLEAR OLD TOOL RESULTS BEFORE THE WINDOW HAS TO BE CUT.
 #
 # The rollover above is a cliff: everything goes, a note comes back, and the
-# model re-orients (#210). Measured on robin's diorama run (2026-09-23, the two
+# model re-orients (#210). Measured on the owner's diorama run (2026-09-23, the two
 # rollover archives and session.json, rendered with the model's own template
 # and tokenizer, within 0.05 % of the server's count): a third of every full
 # window -- 33.0 to 39.9 % -- is tool output, and 97 % of it sits behind the
@@ -3988,7 +4018,7 @@ _STUB_TERMINAL = frozenset(".!?…)]}\"'»。！？")
 # A LAST LINE THAT IS A LIST ITEM, A TABLE ROW OR A HEADING ends an answer
 # without punctuation by design ("- update the docs"), and is never a cut.
 _STUB_STRUCTURED_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||#)")
-# NO PUNCTUATION IS NOT EVIDENCE (lead review of ba48641): robin writes German,
+# NO PUNCTUATION IS NOT EVIDENCE (lead review of ba48641): the owner writes German,
 # and "Ja", "Erledigt", "Fertig", "ok", "42" or a bare `src/app.js` are whole
 # answers. A stub needs POSITIVE evidence of a sentence that stopped: a
 # trailing comma, dash or opening bracket, an inline span or `**` left open,
@@ -4203,7 +4233,7 @@ def rollover_note_split(text: str) -> "tuple[dict | None, str]":
 # ansteht, liegt der volle Praefix noch warm im Server-Cache -- EINE kurze
 # Frage kostet ihren Prompt und den Decode des Digests, kein 180k-Prefill.
 # Nach conversation.reset() ist dieselbe Frage unmoeglich. Der Digest ist
-# Modelltext und wird als solcher gekennzeichnet, nicht als Fakt; robins
+# Modelltext und wird als solcher gekennzeichnet, nicht als Fakt; des Owners
 # woertliche Zeilen (#147) bleiben unangetastet daneben.
 ROLLOVER_DIGEST_DEFAULT = 400
 ROLLOVER_DIGEST_TOKENS = ROLLOVER_DIGEST_DEFAULT   # 0 schaltet den Digest ab
@@ -4226,7 +4256,7 @@ DIGEST_ASK = (
     "No tool calls. Stay under 500 words: a longer answer is cut off. "
     "Be dense -- every line must still be true after the cut.]")
 
-# #210. DIE EINEN WIEDERHOLUNG. Gemessen am 2026-09-22 in robins Test: die Leg
+# #210. DIE EINEN WIEDERHOLUNG. Gemessen am 2026-09-22 im Test des Owners: die Leg
 # schickt die Werkzeugtabelle mit (sie muss, siehe Rumpf -- der warme Praefix
 # rendert sie), der Prompt sagt "No tool calls", und das Modell rief TROTZDEM
 # `goal_step` auf -- finish=tool_calls, 482 Tokens, und das, was als Digest
@@ -5398,7 +5428,7 @@ class Conversation:
         THE ONE EVENT THAT JUSTIFIES THIS is a person binding a different working
         directory to an open chat. They have just said which project this
         conversation belongs to, and answering "you get that project's memory in
-        the next chat" would be a rule nobody asked for -- robin, 2026-08-21:
+        the next chat" would be a rule nobody asked for -- the owner, 2026-08-21:
         a user moves a project chat into its project, and that move is when the
         memory should follow.
 
@@ -5655,7 +5685,7 @@ TRANSPORT_MESSAGES = "anthropic_messages"
 # no measurement asked for one". A measurement asked on 2026-09-18. A body
 # without the field does not run uncapped -- it inherits the SERVER's default,
 # and that default is not this client's to choose. crow-nest's was 1024, and
-# robin's live turn paid it: a `write_file` carrying a whole SVG hit `finish
+# the owner's live turn paid it: a `write_file` carrying a whole SVG hit `finish
 # length` after 1024 generated tokens, BEFORE the model had written the `path`
 # argument, so the call arrived without one and the file was never written
 # ("The file path was missing"). The engine defaults to 8192 now (crow-nest
@@ -5679,7 +5709,7 @@ MAX_TOKENS = int(os.environ.get("CROW_MAX_TOKENS") or 16384)
 # ABOVE rather than left to the model. The write_file/append_file wording of
 # 2026-09-20 (6301e0e) was written for a 2.4 MB page under an 8192 cap and
 # told the model to build "a large file" as a head plus "one append per
-# section" without saying what large is. On robin's diorama run (2026-09-23,
+# section" without saying what large is. On the owner's diorama run (2026-09-23,
 # crow-nest, cap 16384, the three session files) that produced 61 write_file
 # (median 940 B) and 50 append_file calls (median 319 B), each alone in its
 # round; 49 of the 50 appends left a file of at most 10 KB, and none of the
@@ -6496,7 +6526,7 @@ class CodeFences:
 
 # ------------------------------------------------------------------ markdown
 #
-# ROBIN, 2026-08-23: an answer arrived reading `**Wetter:**` with a table drawn
+# THE OWNER, 2026-08-23: an answer arrived reading `**Wetter:**` with a table drawn
 # as pipes. Only fenced code had ever been cut into blocks -- everything else
 # reached the screen as its own source.
 #
@@ -7191,7 +7221,7 @@ class TurnCost:
         # DECODE AND PREFILL TIME SEPARATELY, and not `model_s`, because tok/s is a decode figure.
         # The first version divided tokens by the whole round and printed 1.49 tok/s for a turn the
         # server had just measured at 14.77 and 16.46 -- 252 tokens against 169 s, of which 150 s
-        # were prefill. Caught by robin on the first live run, 2026-08-11.
+        # were prefill. Caught by the owner on the first live run, 2026-08-11.
         self.decode_s = 0.0
         self.prefill_s = 0.0
         self.tool_s = 0.0
@@ -7348,7 +7378,7 @@ class TurnCost:
 # the question the rule actually asks -- DOES THE MODEL KNOW WHAT IT IS ABOUT
 # TO OVERWRITE -- and a nudge changes nothing about that answer.
 #
-# #215-H (robin, 2026-09-22): THE STATE IS THE FILE'S, NOT THE CLOCK'S. Per
+# #215-H (the owner, 2026-09-22): THE STATE IS THE FILE'S, NOT THE CLOCK'S. Per
 # canonical path, the (mtime_ns, size) the file had when the model read it --
 # or when crow itself wrote it, since crow then knows the bytes. write_file and
 # edit_file go through only while the file on disk still carries that stamp:
@@ -7462,9 +7492,9 @@ def _key(path: str) -> str:
 #
 # A marker that appears by itself cannot testify to an intention. `root.json` is
 # written only when someone picks a directory, and it carries what that pick
-# means: the release level remembered for this root (robin's decision, #92).
+# means: the release level remembered for this root (the owner's decision, #92).
 #
-# WRITES ONLY, and both halves of that are robin's decision of 2026-08-14
+# WRITES ONLY, and both halves of that are the owner's decision of 2026-08-14
 # recorded on #92. `read_file` stays unbounded, because a read boundary makes the
 # model blind to its own installation -- a real use -- and a read destroys
 # nothing.
@@ -7759,7 +7789,7 @@ def run_command_cwd_refusal(arguments: str) -> "str | None":
 # resolves inside the cwd by construction, and flagging it would turn every
 # `copy a.txt b.txt` into a question.
 #
-# THE BARE DRIVE MUST NOT START MID-WORD. Seen live 2026-08-28 (robins Frage
+# THE BARE DRIVE MUST NOT START MID-WORD. Seen live 2026-08-28 (Frage des Owners
 # im Lernkit-Lauf): `http://127.0.0.1:8082/v1/models` matched at the `p:` of
 # its scheme and invented drive P:, so a python -c with a URL asked at auto.
 # A URL is not a filesystem path; the lookbehind keeps the token to word
@@ -7795,7 +7825,7 @@ _PATH_TOKENS = re.compile(
     r'"([A-Za-z]:[\\/][^"]*)"'
     r"|'([A-Za-z]:[\\/][^']*)'"
     r'|(?<![A-Za-z0-9])([A-Za-z]:[\\/][^\s"\';|&<>]*)'
-    # robins Live-Fund 2026-08-29: 'n\\xe4chste' (ein Escape fuer "naechste")
+    # Live-Fund des Owners 2026-08-29: 'n\\xe4chste' (ein Escape fuer "naechste")
     # in einem Select-String-Muster wurde als UNC-Pfad \\xe4chste gelesen und
     # die Karte fragte fuer ein Phantom. Ein \\name ohne Share ist kein Pfad
     # (\\host\share ist die kleinste echte Form), und mitten im Wort beginnt
@@ -7809,7 +7839,7 @@ _PATH_TOKENS = re.compile(
 
 # #243. THE NULL DEVICE NAMES NO FILE. `2>/dev/null` stood in 202 of 775
 # distinct stored run_command lines (2026-09-23 copies of the state dir); at
-# `auto` each one stops on the card unless an "always" covers it, and robin's
+# `auto` each one stops on the card unless an "always" covers it, and the owner's
 # approvals.json holds `/dev/null` and -- from a `$(... 2>/dev/null)` --
 # `/dev/null)`. Claude Code
 # exempts the same target ("Targets with no file behind them aren't checked:
@@ -7926,7 +7956,7 @@ def read_root_mode(root: str) -> str | None:
     it. The caller then falls back to DEFAULT_MODE, which is what a root without
     a level has always meant.
 
-    YOLO IS A SESSION'S WORD (robin, 2026-09-19): it is chosen per start and
+    YOLO IS A SESSION'S WORD (the owner, 2026-09-19): it is chosen per start and
     dies with the process, so a file that names it reads as UNSET rather than
     as a standing bypass. `write_root_mode` never writes it; this line is the
     second half of the same rule, for a file edited by hand.
@@ -7949,7 +7979,7 @@ def write_root_mode(root: str, mode: str) -> bool:
 
     YOLO IS NOT WRITTEN, for the same rule `read_root_mode` keeps: the level
     belongs to the session that asked for it, so binding a root while yolo
-    runs stores `auto` -- the file never holds a bypass (robin, 2026-09-19).
+    runs stores `auto` -- the file never holds a bypass (the owner, 2026-09-19).
     """
     try:
         os.makedirs(os.path.join(root, ROOT_MARKER), exist_ok=True)
@@ -8232,7 +8262,7 @@ def adopt_root(stated: str | None,
         # still wins: standing INSIDE a declared project means that project,
         # whatever was picked last somewhere else.
         #
-        # The pick is GLOBAL (robin, 2026-08-14) and survives a restart, including
+        # The pick is GLOBAL (the owner, 2026-08-14) and survives a restart, including
         # an explicit "no folder". Where you stand still wins over both.
         #
         # THE TWO SURFACES DIVIDE HERE, AND THEY DIVIDE ON EXPECTATION rather
@@ -8307,7 +8337,7 @@ MEMORY_TARGETS = ("memory", "user")
 #
 #   %LOCALAPPDATA%\Crow\skills\<name>\SKILL.md
 #
-# GLOBAL, NOT PER PROJECT (robin, 2026-08-21). A procedure that only works in
+# GLOBAL, NOT PER PROJECT (the owner, 2026-08-21). A procedure that only works in
 # one directory is not a procedure, it is a note -- and notes already have a
 # home one section up.
 #
@@ -9190,7 +9220,7 @@ def index_sources(session_file: str | None = None) -> "list[str]":
     chats are there", and a rollover segment is not one (#261). Search asks
     "where was this said", and the earlier half of a long goal run is exactly
     where. Coupled into one list, #261 took every segment out of the search as
-    well: 0 of 6 on robin's disk were searchable on 2026-09-24. A segment moved
+    well: 0 of 6 on the owner's disk were searchable on 2026-09-24. A segment moved
     into `archiv/` by hand is still one, so both folders are read.
     """
     live = session_file or SESSION_FILE
@@ -9378,13 +9408,13 @@ _REFUSED: set[str] = set()
 #   Crow because the user asked for it .......... YES
 #
 # and both regardless of mode -- the level decides who is ASKED, never what the
-# user is allowed to order (robin, 2026-08-15).
+# user is allowed to order (the owner, 2026-08-15).
 #
 # WHY THE PATH ALONE COULD NEVER DECIDE THIS. `_outside_root` saw a path and
 # nothing else, so it answered identically in two situations that are not alike:
 # the model inventing a location while doing something else, and the user typing
 # a location into the prompt. #98's founding turn was the SECOND kind --
-# `Erstell mir bitte die Datei "C:\Users\...\Desktop\x.txt"` -- so the client
+# `Erstell mir bitte die Datei "%USERPROFILE%\Desktop\x.txt"` -- so the client
 # refused an explicit instruction and then reported the model for carrying it
 # out anyway. An assistant that argues with the address its user typed is not
 # careful, it is broken, and the ticket had recorded that as a security finding.
@@ -9401,7 +9431,7 @@ _MANDATED: set[str] = set()
 # begins releasing places nobody named. That limit is real and it is the price
 # of not guessing -- naming the path releases it.
 # Der UNC-Zweig verlangt \\host\share und ein Wortanfangs-Lookbehind -- die
-# gleiche Haertung wie in _PATH_TOKENS (robins \\xe4chste-Phantom, 2026-08-29):
+# gleiche Haertung wie in _PATH_TOKENS (das \\xe4chste-Phantom des Owners, 2026-08-29):
 # ein \\x-Escape in zitiertem Code darf kein Mandat erzeugen.
 #
 # Der POSIX-Zweig gilt nur auf POSIX, aus dem Grund, den _PATH_TOKENS nennt,
@@ -9446,8 +9476,8 @@ _AMBIGUOUS: set[str] = set()
 def _extend_over_spaces(base: str, rest: str) -> "str | None":
     """`base` um Woerter aus `rest` verlaengern, solange es das auf der Platte gibt.
 
-    DIE PLATTE IST DER EINZIGE ZEUGE, DEN ES HIER GIBT. `C:\\Users\\x\\Test runs`
-    und `C:\\Users\\x\\Test` sind beide plausibel; existiert genau eines davon,
+    DIE PLATTE IST DER EINZIGE ZEUGE, DEN ES HIER GIBT. `D:\\work\\Test runs`
+    und `D:\\work\\Test` sind beide plausibel; existiert genau eines davon,
     ist die Frage beantwortet, ohne zu raten. Existiert keines -- der Ordner ist
     geloescht oder soll erst angelegt werden --, antwortet diese Funktion None,
     und der Aufrufer verwirft lieber, als das kuerzere freizugeben.
@@ -9475,8 +9505,8 @@ def _mandates_in(text: str) -> "list[str]":
       abgeschnitten      MEHRDEUTIG -- verlaengern, sonst verwerfen
 
     Warum verwerfen und nicht das Kuerzere nehmen: der abgeschnittene Anfang ist
-    kein toter Text. `C:\\Users\\robin\\Desktop\\Test runs` ergibt
-    `C:\\Users\\robin\\Desktop\\Test`, und das ist auf dieser Maschine ein ECHTES
+    kein toter Text. `%USERPROFILE%\\Desktop\\Test runs` ergibt
+    `%USERPROFILE%\\Desktop\\Test`, und das ist auf dieser Maschine ein ECHTES
     Verzeichnis -- der Elternordner des gebundenen Arbeitsbereichs. Eine Regel,
     die das freigibt, gibt einen Ort frei, den niemand genannt hat, waehrend sie
     den genannten verweigert. Beide Richtungen falsch, aus einem Treffer
@@ -9565,7 +9595,7 @@ def _prose_follows(rest: str) -> bool:
 # Umlaute werden beim NACHSCHLAGEN gefaltet, nicht in der Liste geschrieben.
 # Zwei Gruende, und der zweite ist der wichtigere: der Fensterpruefer verlangt
 # ASCII in Zeichenketten (eine Regel fuer NUTZERTEXTE, die ein Woerterbuch nicht
-# unterscheiden kann) -- und robin tippt mal `fuer`, mal `für`. Beides trifft
+# unterscheiden kann) -- und der Owner tippt mal `fuer`, mal `für`. Beides trifft
 # denselben Eintrag, wenn hier gefaltet wird, und nur dann.
 _FOLD = {0xE4: "ae", 0xF6: "oe", 0xFC: "ue", 0xDF: "ss",
          0xC4: "Ae", 0xD6: "Oe", 0xDC: "Ue"}
@@ -9713,7 +9743,7 @@ def _outside_root(path: str) -> str | None:
     resolved = _resolve(path)
     _REFUSED.add(resolved)
     # #179. DER SATZ, DEN NIEMAND BESTREITEN KANN, DARF NICHT FALSCH SEIN. Am
-    # 2026-08-31 bekam robin "Nobody asked for this location" fuer einen Ordner,
+    # 2026-08-31 bekam der Owner "Nobody asked for this location" fuer einen Ordner,
     # den er in derselben Nachricht getippt hatte -- der Pfad trug ein
     # Leerzeichen und wurde beim Einlesen verworfen. Eine Ablehnung, die dem
     # Nutzer sein eigenes Fenster bestreitet, ist schlimmer als eine Ablehnung.
@@ -11578,7 +11608,7 @@ def _render_page(path: str, wait_ms: int | None = None,
 
     ES TOETET SEIN EIGENES KIND UND NIE NACH NAMEN. Das ist die #158-Falle,
     einmal bezahlt: ein Messskript raeumte "jeden llama-server" ab und nahm
-    robins laufenden Testserver mit. Hier gibt es ein Handle, ein Timeout und
+    den laufenden Testserver des Owners mit. Hier gibt es ein Handle, ein Timeout und
     `proc.kill()` darauf -- kein `taskkill /IM`, keine Prozessliste, keine
     Namen.
 
@@ -11876,7 +11906,7 @@ def _render_page(path: str, wait_ms: int | None = None,
         return captured, reason
 
     # #293. THE BACKENDS IN ORDER, a fresh pipe and profile each: Vulkan
-    # first (robin's decision), the measured `--use-gl=angle` line once more
+    # first (the owner's decision), the measured `--use-gl=angle` line once more
     # when the renderer check rejects it. Without the pipe (Windows) one
     # attempt, and its renderer is unverified.
     backends = crow_platform.render_angle_backends()
@@ -12155,7 +12185,7 @@ IMAGE_DEFAULT_ASPECT = "16:9"
 IMAGE_STEPS = 40
 IMAGE_MAX_INPUTS = 10
 
-# THE EDIT RUNS TWICE, and robin chose it on the pictures (2026-09-27). A 4 MP
+# THE EDIT RUNS TWICE, and the owner chose it on the pictures (2026-09-27). A 4 MP
 # edit OUTPUT is grainy whatever the reference size: E1 (4 MP ref, 4 MP out)
 # and E2 (1 MP ref, 4 MP out) both show frame-wide grain, E3 (1 MP ref, 1 MP
 # out, the diffusers pipeline's own output_resolution=1024) is clean. B5 then
@@ -12238,7 +12268,7 @@ def image_model_dir() -> str:
     inside = os.path.join(root, IMAGE_MODEL_NAME)
     # BESIDE THE LINKED TREE, the layout install.sh makes: `<install>/models`
     # -> ~/Projects/models/qwen3.8-flash-next, the image model at
-    # ~/Projects/models/qwen-image-2.1 (robin's machine, 2026-09-27). Asked
+    # ~/Projects/models/qwen-image-2.1 (the owner's machine, 2026-09-27). Asked
     # only when the plain place has nothing, so an install that keeps the
     # image model inside the models root is read exactly as before.
     beside = os.path.join(os.path.dirname(os.path.realpath(root)), IMAGE_MODEL_NAME)
@@ -14495,7 +14525,7 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     # #221: A CWD THAT IS NO DIRECTORY RUNS NOTHING, and says where
     # the working area and the near miss are (cwd_refusal). `~` expands here
     # because #144's guard expands it too: the approval card showed
-    # `/home/u/x` while the tool would have run in `<root>/~/x`.
+    # `$HOME/x` while the tool would have run in `<root>/~/x`.
     refused = cwd_refusal(cwd)
     if refused:
         return refused
@@ -14505,7 +14535,7 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         # DAS KIND BEKOMMT KEINE TASTATUR (2026-08-29, live gefunden). Ein
         # `Invoke-WebRequest` ohne `-UseBasicParsing` stellt in PS 5.1 eine
         # Sicherheitsruefrage -- und die erschien in dem Terminal, aus dem
-        # das FENSTER gestartet war, wo niemand sie erwartet und robin sie erst
+        # das FENSTER gestartet war, wo niemand sie erwartet und der Owner sie erst
         # nach Minuten fand. Der Zug stand still, ohne dass irgendwo etwas
         # dazu stand: die Frage ging an die Konsole, nicht durch die Rohre,
         # die hier abgehoert werden.
@@ -15455,7 +15485,7 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
 # a person needs to decide: the approval card said `git push origin main` and
 # nothing about which branch, how far ahead, or what is in it. And an "always
 # for git" -- one click, one program key -- released `git push` for good, which
-# is the exact opposite of robins Ansage vom 2026-08-29: PUSH NUR AUF MEINE
+# is the exact opposite of the owner's Ansage vom 2026-08-29: PUSH NUR AUF MEINE
 # ANSAGE.
 #
 # So the five below run a FIXED ARGV WITH NO SHELL (`shell=False`, a list), read
@@ -15483,7 +15513,7 @@ def git_events_file() -> str:
     computed at import, and the suite redirects `SESSION_DIR` before it imports
     anything so that no test can write into the real installation. A constant
     derived from it at import time would freeze whichever value existed first;
-    read through a call, this follows the redirect -- and robins Regel "kein
+    read through a call, this follows the redirect -- and the owner's Regel "kein
     Testlauf schreibt in %LOCALAPPDATA%\\Crow" holds without anybody having to
     remember to add a name to a list. THAT is why this one is derived from
     `SESSION_DIR` and not from `crow_platform.state_dir()` directly -- the
@@ -15858,7 +15888,7 @@ GITHUB_CLIENT_ID_KEY = "github_client_id"
 # registriert -- dann sagt `github_connect` das, statt einen Fehler von GitHub
 # durchzureichen.
 GITHUB_CLIENT_ID_SHIPPED = ""
-# ONE ENTRY, BECAUSE THE TOKEN DOES NOT EXPIRE. robins Entscheid 2026-08-29:
+# ONE ENTRY, BECAUSE THE TOKEN DOES NOT EXPIRE. The owner's Entscheid 2026-08-29:
 # die OAuth-App wird OHNE "Expire user access tokens" registriert -- ein Konto,
 # das man einmal verbindet, bleibt verbunden. Das ist auch GitHubs Vorgabe fuer
 # OAuth-Apps; das Ablaufen ist die Option, die man ankreuzt.
@@ -15908,7 +15938,7 @@ def github_client_id() -> str:
     IT SHIPS WITH THE PROGRAM, and that is the correction of 2026-08-29. It
     stood in `providers.json` first, which made every user register their own
     OAuth app before they could connect an account -- a setup step no other
-    client asks for, and robin said so: "die brauchen nicht fuer jedes repo
+    client asks for, and the owner said so: "die brauchen nicht fuer jedes repo
     eine app". They do not, and neither does anyone here.
     THE ID IS NOT A SECRET. The device flow has none: authorisation happens on
     github.com, in the user's own browser, against a code they typed. That is
@@ -16191,7 +16221,7 @@ def _http_text(url: str, timeout: int = WEB_TIMEOUT, data: bytes | None = None,
 def _url_complaint(url: str) -> "str | None":
     """What is wrong with this URL before anything is fetched, or None.
 
-    #203, robin live on 2026-09-18. The model wrote
+    #203, the owner live on 2026-09-18. The model wrote
     `https://collectionapi.metm...org/v1/objects/343580` -- it ABBREVIATED the
     hostname the way prose does, "metmuseum" to "metm..." -- and the fetch came
     back `did not answer within 20s ('idna' codec can't encode character
@@ -16656,7 +16686,7 @@ def _src_ddg_answer(query: str, want: int) -> list[dict]:
 # concatenating the sources put github first unconditionally, so "requests
 # library current version" answered with a stranger's library-management project
 # while pypi's exact `requests 2.34.2` sat further down. The merge below is
-# round-robin in this order, so the first three lines are the three best
+# rotating in this order, so the first three lines are the three best
 # ANSWERS rather than the first source's first three guesses.
 KEYLESS_SOURCES = (_src_packages, _src_huggingface, _src_ddg_answer,
                    _src_stackoverflow, _src_github, _src_wikipedia)
@@ -16695,7 +16725,7 @@ def _search_keyless(query: str, want: int) -> dict:
     queues = [[h for h in g if h.get("url")] for g in collected]
     results, seen = [], set()
     for rank in range(max((len(q) for q in queues), default=0)):
-        for queue in queues:                      # round-robin: one each, in turn
+        for queue in queues:                      # rotating: one each, in turn
             if rank >= len(queue):
                 continue
             hit = queue[rank]
@@ -16959,7 +16989,7 @@ TOOL_CLASS = {
     #
     # `git_commit` and `git_push` get classes of their OWN rather than joining
     # `executing`, because `executing` is a class that `auto` releases -- and
-    # robins Ansage vom 2026-08-29 is that a push asks at EVERY level, always.
+    # the owner's Ansage vom 2026-08-29 is that a push asks at EVERY level, always.
     # These two names are what `ALWAYS_ASKS` reads; they appear in no row of
     # MODE_ASKS, so no level can release them, and `approval_scope` answers
     # None for both, so no "always" can remember them either.
@@ -16977,7 +17007,7 @@ TOOL_CLASS = {
 
 # Which classes stop and ask, per level. A class not named here runs.
 #
-# `network` IS ABSENT FROM EVERY LEVEL, DELIBERATELY (robin, #96, 2026-08-14):
+# `network` IS ABSENT FROM EVERY LEVEL, DELIBERATELY (the owner, #96, 2026-08-14):
 # a search happens because a task was given, and giving the task is the release.
 # Asking "may I look this up?" of the person who just asked the question is the
 # same protection-nobody-keeps-on that the reading rule already names -- it would
@@ -16990,10 +17020,10 @@ MODE_ASKS = {
     "allowedit": ("executing",),
     "auto": (),
     # YOLO READS AS ITS NAME, and it exists FOR the completely-AFK run
-    # (robin, 2026-09-19): every class the table names runs unasked, and the
+    # (the owner, 2026-09-19): every class the table names runs unasked, and the
     # two questions the gate adds BESIDE the table -- the #144 outside-path
     # ask and #156's git_commit -- fall silent with it. The one thing it
-    # cannot buy is `publish`: robin, wörtlich: "YOLO hebt NIEMALS git_push
+    # cannot buy is `publish`: the owner, wörtlich: "YOLO hebt NIEMALS git_push
     # auf". That lock is `NEVER_RELEASED` below and is checked BEFORE the
     # dial, because a dial position that released a push would be a position
     # that lied. The row here is auto's on purpose: the table stays "what a
@@ -17010,14 +17040,14 @@ MODE_ASKS = {
 #
 # WHAT THEY ARE INSTEAD: two acts that ask every single time, whatever the dial
 # reads -- a commit writes the project's history, a push leaves the machine.
-# robins Ansage vom 2026-08-29, wörtlich: PUSH NUR AUF MEINE ANSAGE. Being
+# des Owners Ansage vom 2026-08-29, wörtlich: PUSH NUR AUF MEINE ANSAGE. Being
 # outside the table is what makes that true and keeps it true: no level can be
 # switched to release them, and `approval_scope` answers None for both, so no
 # "always" can remember them either. Two independent locks, neither of which is
 # a setting.
 ALWAYS_ASKS = frozenset({"history", "publish"})
 
-# 2026-09-19, ROBIN SPLIT THE TWO LOCKS. `publish` stays unconditional --
+# 2026-09-19, THE OWNER SPLIT THE TWO LOCKS. `publish` stays unconditional --
 # "YOLO hebt NIEMALS git_push auf", wörtlich -- while `history` (a commit to
 # the LOCAL history) is exactly what an AFK run may do unasked, so yolo buys
 # it back. `NEVER_RELEASED` is checked before the dial in `stops_for`: a dial
@@ -19146,7 +19176,7 @@ def mcp_key_for(name: str) -> str:
     IT LIVES IN THE TOKEN STORE, NOT IN `mcp.json`, and that is a decision
     rather than a filing preference. The configuration is the file that gets
     copied to another machine, attached to an issue and read out loud in a
-    screenshot -- on robin's install it carries 565,729 characters of schema
+    screenshot -- on the owner's install it carries 565,729 characters of schema
     and nothing worth hiding. The token store is the one with 0o600 on it.
     """
     key = mcp_token_for(name).get("api_key")
@@ -19668,7 +19698,7 @@ def mcp_name_from(argv: list) -> str:
     if parts and _mcp_is_url(parts[0]):
         return _mcp_name_from_host(parts[0])
     # THE FIRST TOKEN AFTER THE LAUNCHER, NOT THE LAST. `npx -y
-    # @modelcontextprotocol/server-filesystem C:/Users/.../dev/Crow` ends in
+    # @modelcontextprotocol/server-filesystem D:/work/dev/Crow` ends in
     # the directory the server was pointed AT -- reading backwards named that
     # server "crow", after the folder it happens to serve.
     for token in (parts[1:] or parts):
@@ -19774,7 +19804,7 @@ def mcp_write(doc: dict) -> "str | None":
 def set_mcp_enabled(name: str, enabled: bool) -> bool:
     """Flip one server on or off, keeping everything else in the file.
 
-    THE SHEET COULD READ THIS STATE AND NOT WRITE IT, which is how robin ended
+    THE SHEET COULD READ THIS STATE AND NOT WRITE IT, which is how the owner ended
     up locked out of his own server on 2026-08-24: the row said "(switched
     off)", offered `ask again` and `remove`, and the only way back was a text
     editor in %LOCALAPPDATA%. A state a program can enter and not leave is not
@@ -19855,7 +19885,7 @@ def mcp_add_server(name: str, block: dict) -> "tuple[dict | None, str | None]":
 
     stored = {k: v for k, v in block.items() if k not in ("schema",)}
     stored["schema"] = {"tools": tools}
-    # ADDING A SERVER MAKES IT USABLE, and that is robin's call on 2026-08-22
+    # ADDING A SERVER MAKES IT USABLE, and that is the owner's call on 2026-08-22
     # against the way I first built it. Every other client works this way -- one
     # command and the tools are there -- and a client that demands twelve ticks
     # before anything works is a client nobody configures twice.
@@ -19871,7 +19901,7 @@ def mcp_add_server(name: str, block: dict) -> "tuple[dict | None, str | None]":
     # A HAND-WRITTEN GLOB SURVIVES A REFRESH. It matches no name in `offered`,
     # so a filter that only kept known names would quietly delete the one line
     # somebody wrote to keep 3,000 tools out.
-    # A NEW SERVER GETS NO FILTER AT ALL, and that is the whole of robin's
+    # A NEW SERVER GETS NO FILTER AT ALL, and that is the whole of the owner's
     # 2026-08-24 requirement: "wenn ich 'n neuen MCP Server hinzufuege und da
     # neue Tools mit beisein, dann muessen die auch funktionieren". Writing
     # every offered name here made the catalogue of that minute permanent --
@@ -20084,7 +20114,7 @@ def mcp_view() -> dict:
 def mcp_installed(view: dict, name: str) -> str:
     """What `/mcp add` says when it worked. NOT the listing.
 
-    robin, 2026-08-22, having watched it: printing the whole table and the
+    The owner, 2026-08-22, having watched it: printing the whole table and the
     command palette after an install is not a confirmation -- the user asked one
     question ("did it install?") and got the same answer `/mcp` gives, which is
     indistinguishable from having changed nothing. What each tool may do is a
@@ -20568,7 +20598,7 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
 
 # #289: `/goal skip 4 not verifiable here`.
 _GOAL_SKIP = re.compile(r"(?i)^skip[ \t]+(\d+)(?:[ \t]+([^\n]*))?$")
-# #296: `/goal redo 4` -- robin takes his skip back.
+# #296: `/goal redo 4` -- the user takes their skip back.
 _GOAL_REDO = re.compile(r"(?i)^redo[ \t]+(\d+)[ \t]*$")
 
 
@@ -20764,8 +20794,8 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     # #210. DER ALTE PLAN VOR DEM NEUEN GELESEN -- `goal_start` ueberschreibt
     # goal.json, und was dann noch in ihm stand, steht nur noch hier.
     before = goal_load()
-    # #294: A PAUSED GOAL IS ROBIN'S TO RESUME. A fresh plan written over it
-    # would clear the pause without him -- the silent move-on again.
+    # #294: A PAUSED GOAL IS THE USER'S TO RESUME. A fresh plan written over it
+    # would clear the pause without them -- the silent move-on again.
     if goal_paused(before) is not None:
         return json.dumps({"ok": False, "error": (
             "the goal is PAUSED and waits for the user's line; a new plan "
@@ -20816,17 +20846,17 @@ def tool_goal_step(step: int, status: str, note: str = "", checklist=None,
     current = goal_load()
     steps = (current or {}).get("steps") or []
     if 0 <= index < len(steps):
-        # #294: A PAUSED GOAL WAITS FOR ROBIN. The report turn says "no
-        # tools"; a model that moves a step anyway would move it past him.
+        # #294: A PAUSED GOAL WAITS FOR THE USER. The report turn says "no
+        # tools"; a model that moves a step anyway would move it past them.
         pause = goal_paused(current)
         if pause is not None:
             return json.dumps({"ok": False, "error": (
-                "the goal is PAUSED at step %s and waits for robin's line (%s). "
-                "Call no tools: write your report for him and stop."
+                "the goal is PAUSED at step %s and waits for the user's line (%s). "
+                "Call no tools: write your report for them and stop."
                 % (pause.get("step"), _clip(pause.get("why") or "", 200)))})
-        # #296: ROBIN'S SKIP IS HIS WORD. The model may not turn it into
-        # `done` (2026-09-24: step 4 "skipped by robin" stored as done) nor
-        # take it up again; `/goal redo n` is the way back, and it is his.
+        # #296: THE USER'S SKIP IS THEIR WORD. The model may not turn it into
+        # `done` (2026-09-24: step 4 "skipped by the owner" stored as done) nor
+        # take it up again; `/goal redo n` is the way back, and it is theirs.
         mine = steps[index]
         if (mine.get("status") == GOAL_SKIPPED
                 and mine.get("skipped_by") == GOAL_BY_USER):
@@ -21062,7 +21092,7 @@ _GOAL_BUILDS = re.compile(r"(?i)\b(?:build|implement|render|draw|code|write "
 # and "fix" further on are part of planning when the step's deliverable is a
 # document. A real making verb anywhere ("build", "render", "write the page")
 # still makes it visual, so "Think and plan the page, then build it" keeps
-# the gate, and so does robin's "Verify offline via file://, fix, report fps".
+# the gate, and so does the owner's "Verify offline via file://, fix, report fps".
 _GOAL_MAKES = re.compile(r"(?i)\b(?:build|implement|render|draw|code|write "
                          r"(?:the )?(?:page|html|shader|scene))\b")
 _GOAL_DOC = re.compile(r"(?i)(?:\.(?:md|txt|rst)\b|\b(?:plan|notes|report|"
@@ -21277,7 +21307,7 @@ def goal_next_open(goal: "dict | None" = None) -> "int | None":
 
     #289: UEBERSPRUNGEN IST KEINE ARBEIT MEHR. Ein gescheiterter Schritt kommt
     noch einmal dran (`GOAL_STEP_TRIES`); ein uebersprungener -- zweimal
-    gescheitert, oder von robin per `/goal skip` -- nicht, sonst stuende der
+    gescheitert, oder vom Owner per `/goal skip` -- nicht, sonst stuende der
     Motor wieder vor derselben Wand wie am 2026-09-24."""
     goal = goal if goal is not None else goal_load()
     if not goal:
@@ -21308,7 +21338,7 @@ def goal_retry_nudge(goal: dict, index: int, note: str) -> str:
             "different approach -- not the one that failed. Step %d: %s\n"
             "If it fails again, call goal_step with 'failed' and say why: the "
             "step is never skipped -- it gets a fresh context, then a split, "
-            "then it pauses for robin (#294).%s]"
+            "then it pauses for the user (#294).%s]"
             % (index + 1, _clip(note, 600), index + 1,
                goal["steps"][index]["text"],
                goal_nudge_evidence(goal, index)))
@@ -21316,7 +21346,7 @@ def goal_retry_nudge(goal: dict, index: int, note: str) -> str:
 
 # ------------------------------------------- #294, the failure ladder ------
 #
-# NO SILENT SKIP. robin's decision of 2026-09-25, after the diorama goal ended
+# NO SILENT SKIP. The owner's decision of 2026-09-25, after the diorama goal ended
 # "complete with 4 skipped": steps 5-8 were skipped by #289 on their second
 # `failed`, every one of them judged on a software-GL capture, and nobody was
 # asked. A failure now has a class, and each class a ladder:
@@ -21338,7 +21368,7 @@ def goal_retry_nudge(goal: dict, index: int, note: str) -> str:
 #
 # A RUNG IS CLIMBED ONLY ONCE THE ONE BEFORE WAS TAKEN (`pending`): a model
 # that calls judge three times in one turn has had one attempt, not three.
-# Every PAUSE ends in a report the model writes for robin and a question;
+# Every PAUSE ends in a report the model writes for the user and a question;
 # goal mode then waits for a typed line (the window's `_goal_nudge`).
 
 GOAL_LADDER_REFLECT = "reflect"
@@ -21406,7 +21436,7 @@ def goal_budget_due(goal: "dict | None", index: int,
 
 
 def goal_paused(goal: "dict | None" = None) -> "dict | None":
-    """#294: the pause record when the goal waits for robin, else None."""
+    """#294: the pause record when the goal waits for the user, else None."""
     goal = goal if goal is not None else goal_load()
     if not goal or goal.get("status") != GOAL_PAUSED:
         return None
@@ -21460,7 +21490,7 @@ def goal_pause_asked() -> "dict | None":
 
 
 def goal_pause_report(text: str) -> None:
-    """#294: keep the model's report for robin on the pause record."""
+    """#294: keep the model's report for the user on the pause record."""
     with _GOAL_LOCK:
         goal = goal_load()
         pause = goal_paused(goal)
@@ -21472,7 +21502,7 @@ def goal_pause_report(text: str) -> None:
 
 
 def goal_resume(now: "float | None" = None) -> "dict | None":
-    """#294: robin typed a line -- the pause is over. The step's counters
+    """#294: the user typed a line -- the pause is over. The step's counters
     start again and so does its budget; the pause is kept as `last_pause`
     for the record. None when nothing was paused."""
     with _GOAL_LOCK:
@@ -21527,7 +21557,7 @@ def goal_fail(index: int, cls: str, why: str, capture: "str | None" = None,
     """#294. Count one failure of class `cls` on step `index` and decide the
     next rung. Returns {"counted", "action", "class", "count"}; `action` is
     one of retry/reflect/fresh/decompose/subs/unknown/pause, or "paused"
-    when the goal already waits for robin."""
+    when the goal already waits for the user."""
     at = float(now if now is not None else time.time())
     with _GOAL_LOCK:
         goal = goal_load()
@@ -21605,7 +21635,7 @@ def goal_fail_said(index: int, verdict: dict) -> str:
     """#294: what a `goal_fail` result means, for the tool answer."""
     n, action = index + 1, verdict.get("action")
     if action in ("pause", "paused"):
-        return ("goal PAUSED at step %d: this goes to robin now. Stop working, "
+        return ("goal PAUSED at step %d: this goes to the user now. Stop working, "
                 "call no more tools, and wait -- the next turn asks you for "
                 "a report." % n)
     if action == GOAL_LADDER_RETRY:
@@ -21677,7 +21707,7 @@ def goal_step_split(index: int, substeps) -> "tuple[dict | None, str | None]":
         step = steps[index]
         if step.get("subs"):
             return None, ("step %d is already split; a failed sub-step pauses "
-                          "the goal for robin" % (index + 1))
+                          "the goal for the user" % (index + 1))
         if step.get("pending") != GOAL_LADDER_SPLIT:
             return None, ("step %d is not due for a split -- that comes after "
                           "three failed attempts" % (index + 1))
@@ -22082,13 +22112,13 @@ def capture_precheck(paths: "list[str]", contract: "dict | None",
 
 # ------------------------------------------- #295, reference images --------
 #
-# ROBIN'S PICTURES OF WHAT GOOD LOOKS LIKE. `reference: <path> -- <criterion>`
+# THE USER'S PICTURES OF WHAT GOOD LOOKS LIKE. `reference: <path> -- <criterion>`
 # in `/goal`: the judge gets the image after the capture and answers "is the
 # capture as good as the reference on <criterion>" (MLLM-as-a-Judge: pairwise
 # is where MLLM judges agree with humans; GPTEval3D, Prometheus-Vision). The
 # user's word, so it lives beside the accept lines in SESSION_DIR, keyed by
 # the goal's path -- never a path written into the code. ADVISORY for now
-# (`must: false`): a local model against robin's reference would never pass,
+# (`must: false`): a local model against the user's reference would never pass,
 # and a gate that cannot pass is a pause generator until it is calibrated.
 GOAL_REFERENCE_PREFIX = "reference:"
 GOAL_REFERENCE_FILE = "goal-references.json"
@@ -22155,7 +22185,7 @@ def goal_reference_parse(line: str) -> "tuple[dict | None, str | None]":
 # ------------------------------------------- #294, what the engine says -----
 
 def goal_pause_nudge(goal: dict) -> str:
-    """#294 B: the one turn a pause gets -- the model prepares it for robin."""
+    """#294 B: the one turn a pause gets -- the model prepares it for the user."""
     pause = goal_paused(goal) or {}
     n = pause.get("step")
     steps = goal.get("steps") or []
@@ -22164,12 +22194,12 @@ def goal_pause_nudge(goal: dict) -> str:
     last = "\n".join("- %s: %s" % (f.get("class"), _clip(f.get("why") or "", 240))
                      for f in fails[-4:])
     return ("%s PAUSED at step %s (%s): %s\n%s"
-            "Do not call any tools now. Write a short report for robin, in this "
+            "Do not call any tools now. Write a short report for the user, in this "
             "order:\n1. What you identified -- the facts, with the captures, "
             "judge answers and log lines that show them.\n2. Why you cannot "
             "proceed on your own.\n3. Two or three concrete proposals, each with "
-            "what robin would do or decide.\n4. Ask robin whether he has "
-            "further input. Then stop: goal mode continues only after his "
+            "what the user would do or decide.\n4. Ask the user whether they have "
+            "further input. Then stop: goal mode continues only after their "
             "reply.]"
             % (GOAL_NUDGE_MARK, n if n is not None else "?",
                pause.get("class") or "?", pause.get("why") or "?",
@@ -22204,7 +22234,7 @@ def goal_ladder_nudge(goal: dict, index: int, rung: str) -> str:
                 "Retry %d of %d: render again with render_page and read its "
                 "render_mode and precheck before you judge. If this machine "
                 "cannot produce a valid capture now, say so plainly -- after "
-                "the %s retry the goal pauses for robin. Step %d: %s]"
+                "the %s retry the goal pauses for the user. Step %d: %s]"
                 % (GOAL_NUDGE_MARK, n, why,
                    int(step.get("env_failures") or 1), GOAL_ENV_RETRIES,
                    "second" if GOAL_ENV_RETRIES == 2 else "last", n, text))
@@ -22250,7 +22280,7 @@ def goal_ladder_nudge(goal: dict, index: int, rung: str) -> str:
                 "itself: %s%s]" % (GOAL_NUDGE_MARK, n, n, text, evidence))
     return ("%s. Step %d is split. Sub-step %d.%d of %d: %s\nReport it with "
             "goal_step(step=%d, sub=%d, status='done' and what proves it, or "
-            "'failed' and why). A failed sub-step pauses the goal for robin. "
+            "'failed' and why). A failed sub-step pauses the goal for the user. "
             "(Step %d: %s)]"
             % (GOAL_NUDGE_MARK, n, n, k + 1, len(subs), subs[k]["text"], n,
                k + 1, n, text))
@@ -22320,7 +22350,7 @@ def goal_message_text(message: "dict | None") -> str:
 
 # #258. THE LINES `run_turn` ITSELF WRITES INSIDE ONE TURN. They are user
 # messages, but they do not open a turn: the round behind them belongs to the
-# turn the nudge (or robin's line) opened.
+# turn the nudge (or the owner's line) opened.
 _GOAL_IN_TURN_NOTES = (BUDGET_SPENT, TOKEN_BUDGET_SPENT, THINK_ONLY_NUDGE)
 
 
@@ -22429,7 +22459,7 @@ def goal_turn_empty(messages: "list | None") -> bool:
 
 
 def goal_is_nudge(message: "dict | None") -> bool:
-    """Ist diese Nachricht Crows eigener Anstoss und nicht robins Zeile?"""
+    """Ist diese Nachricht Crows eigener Anstoss und nicht die Zeile des Nutzers?"""
     return ((message or {}).get("role") == "user"
             and goal_message_text(message).startswith(GOAL_NUDGE_MARK))
 
@@ -22657,7 +22687,7 @@ def _trouble_mentioned(path: str, text: str) -> bool:
     GEMESSEN 2026-09-22: `/tmp/water.js` stand vorher nur als Ende von
     `~/.local/state/crow/tmp/water.js` im Gespraech -- einer anderen Datei.
     Ein absoluter Pfad braucht deshalb eine Grenze davor; ein relativer darf
-    das Ende eines laengeren sein (`src/app.js` in `/home/.../src/app.js`),
+    das Ende eines laengeren sein (`src/app.js` in `/srv/.../src/app.js`),
     denn so schreibt man ihn aus dem Arbeitsverzeichnis heraus. Dahinter
     duerfen weder Pfadzeichen noch eine Endung folgen: `src/water.js` ist
     nicht `src/water.js.bak`.
@@ -22685,7 +22715,7 @@ def goal_trouble_scan(messages: "list | None", start: int,
 
     `new_step`: der Schritt hat seit dem letzten Anstoss gewechselt. Dann
     gehoert der Zug bis zum abschliessenden `goal_step` dem ALTEN Schritt und
-    wird nicht gezaehlt -- ohne einen solchen Aufruf im Zug (robin hat im
+    wird nicht gezaehlt -- ohne einen solchen Aufruf im Zug (der Owner hat im
     Panel gewechselt) gar nichts davon.
 
     WAS "SCHON GESEHEN" HEISST, fuer einen Pfad: er steht in irgendeiner
@@ -22811,7 +22841,7 @@ def goal_trouble_due(counts: "dict | None") -> "list[dict]":
 
 
 def goal_trouble_label(entry: dict) -> str:
-    """Die kurze Form fuer robins Notiz: was ausgeloest hat, wie oft."""
+    """Die kurze Form fuer die Notiz des Nutzers: was ausgeloest hat, wie oft."""
     cls, tool, n = entry["cls"], entry["tool"], entry["n"]
     if cls == GOAL_TROUBLE_DEAD:
         return "%s dead (%s, %d×)" % (tool, entry["detail"], n)
@@ -22825,7 +22855,7 @@ def goal_trouble_label(entry: dict) -> str:
 
 
 def goal_turn_start(messages: "list | None") -> "int | None":
-    """Wo der letzte Zug anfing: Crows Anstoss oder robins getippte Zeile.
+    """Wo der letzte Zug anfing: Crows Anstoss oder die getippte Zeile des Nutzers.
 
     NICHT JEDE NUTZERZEILE BEGINNT EINEN ZUG. Die Notiz ueber das verbrauchte
     Werkzeugbudget und die Rollover-Notiz stehen mitten in einem -- beide in
@@ -23157,7 +23187,7 @@ def stops_for(name: str, mode: str, outside: bool) -> bool:
     the table.
 
     ORDER IS THE CONTRACT. `publish` first, BEFORE the dial -- no level
-    releases it, yolo included (robin, 2026-09-19: NIEMALS). yolo next,
+    releases it, yolo included (the owner, 2026-09-19: NIEMALS). yolo next,
     because its whole point is that the other two sources go silent for the
     AFK run. Everything else reads the table exactly as it always has.
     """
@@ -23191,7 +23221,7 @@ def mode_description(mode: str) -> str:
             # THE GENERIC BUILDER WOULD LIE HERE. "Every tool runs unasked"
             # is true of the table and false of the gate: yolo keeps the
             # #144 outside-path question silent AND the git_push ask on
-            # (robin, 2026-09-19). One honest line, said the same way in
+            # (the owner, 2026-09-19). One honest line, said the same way in
             # both surfaces.
             return ("every tool runs unasked -- outside paths and git commit "
                     "included; git_push still asks")
@@ -23273,10 +23303,10 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
     return None
 
 
-# robins Ansage vom 2026-08-28 spaetabends: "allowed, and from now on" hiess
+# The owner's Ansage vom 2026-08-28 spaetabends: "allowed, and from now on" hiess
 # bis hierher "bis zum naechsten Chat" -- die Freigaben lebten im Prozess-Set
 # und starben mit jedem /reset, jedem neuen Chat und jedem Fensterstart, und
-# robin gab dieselben Vault-Pfade jede Sitzung neu frei. AB JETZT heisst
+# der Owner gab dieselben Vault-Pfade jede Sitzung neu frei. AB JETZT heisst
 # "from now on" genau das: jede "always"-Entscheidung wird neben
 # providers.json abgelegt und gilt, bis jemand sie aus der Datei nimmt.
 #
@@ -23310,7 +23340,7 @@ def _approvals_stored() -> "set[tuple[str, str]]":
 def _approval_scopes(name: str, arguments: str) -> "list[tuple[str, str]] | None":
     """Every scope one call touches -- run_command with N outside paths has N.
 
-    robins Live-Bild vom 2026-08-28 nachts: ein Kommando nannte Chrome, Edge
+    des Owners Live-Bild vom 2026-08-28 nachts: ein Kommando nannte Chrome, Edge
     UND Firefox, gemerkt wurde nur der erste Pfad -- die naechste Frage las
     sich als Vergessen. Und die Gegenrichtung war ein LOCH: remembered prüfte
     nur den ersten Pfad, ein fremder zweiter ritt auf dessen Freigabe durch.
@@ -23340,7 +23370,7 @@ def scope_from_a_store(scope: "tuple[str, str] | None") -> bool:
 
     #178, seen live 2026-08-31. For a step whose own text said "write a file
     only in this folder", the model's first attempt was a `run_command` into
-    `C:\\Users\\robin\\Desktop\\Test runs` -- a path out of the USER PROFILE
+    `%USERPROFILE%\\Desktop\\Test runs` -- a path out of the USER PROFILE
     block of the system prompt, named by nobody in the chat. The card asked, the
     answer was "and from now on", and the path stood in approvals.json for good.
 
@@ -23362,13 +23392,13 @@ def scope_from_a_store(scope: "tuple[str, str] | None") -> bool:
     precise rule would be to pull the paths out of the entry and ask `_inside`,
     so that a store path releases itself and what is under it and nothing else.
     Measured 2026-08-31 against the live profile: `_PATH_IN_TEXT` ends a path at
-    the first space, so the entry `LP-50-Auftrag (C:\\Users\\robin\\Desktop\\Test
-    runs)` yields `C:\\Users\\robin\\Desktop\\Test`, and `_inside` on that answers
+    the first space, so the entry `LP-50-Auftrag (%USERPROFILE%\\Desktop\\Test
+    runs)` yields `%USERPROFILE%\\Desktop\\Test`, and `_inside` on that answers
     False for the very path this rule exists to catch. The precise version would
     silently switch the protection off.
 
     The price of the substring is over-reach in one direction: a PARENT of a
-    store path (`C:\\Users\\robin\\Desktop`) matches too and is likewise not
+    store path (`%USERPROFILE%\\Desktop`) matches too and is likewise not
     written down. That errs toward asking again rather than toward a standing
     release, so it is the safe side of the trade -- but it is a side, not the
     intended rule, and it goes away with #179.
@@ -23442,7 +23472,7 @@ def forget_approvals() -> None:
     from where they sit. `/reset` and the window's new-chat button are the
     places a session actually ends, and they are what call this.
 
-    THE STANDING STORE STAYS (2026-08-28, robins Ansage): dropping a chat ends
+    THE STANDING STORE STAYS (2026-08-28, des Owners Ansage): dropping a chat ends
     the chat, not the user's written "from now on" decisions -- those live in
     APPROVALS_FILE until somebody removes them there.
     """
@@ -23480,7 +23510,7 @@ def forget_approvals() -> None:
 # and a delay. An entry nobody approves EXPIRES and is dropped. Expiry has to
 # fall on the side of not writing, or the gate is a speed bump.
 #
-# ON BY DEFAULT (robin, 2026-08-22), against this file's own precedent, and the
+# ON BY DEFAULT (the owner, 2026-08-22), against this file's own precedent, and the
 # reason the precedent loses here. `DEFAULT_MODE` is `auto` because every
 # release before it ran the tools unasked and a commit that adds a CHOICE must
 # not change what an existing session does -- a good rule, and it was the first
@@ -23613,7 +23643,7 @@ def pending_view() -> "list[dict]":
     `text`. `arguments`, `id` and the staged clock are this module's business.
 
     #285. `text` STAYS THE 160-CHAR PREVIEW; `full` is the untruncated body and
-    `old` the whole entry a replace or remove takes out, looked up now. robin
+    `old` the whole entry a replace or remove takes out, looked up now. The owner
     could not tell an append from a swap in the middle of the file, because the
     preview showed only the new words and cut those. `find` is the `old_text`
     itself, for the case where no single entry matches it.
@@ -23669,7 +23699,7 @@ def approve_pending(ident: "int | None" = None) -> "tuple[list[str], list[dict]]
 
     #285. EVERY ENTRY GETS AN OUTCOME. `failed` holds one {"what", "why"} per
     entry that did not land: the tool's refusal, shortened, or the expiry. The
-    old version swallowed both -- robin pressed save, the file stayed as it was
+    old version swallowed both -- the owner pressed save, the file stayed as it was
     and the window said nothing. A write that did not happen is announced as
     surely as one that did, and the same line goes to crow.log.
     """
@@ -24265,7 +24295,7 @@ def run_tool(name: str, arguments: str) -> str:
     extra = sorted(k for k in args if k not in declared)
     # #214. UNBEKANNT UND FEHLEND ZUGLEICH IST KEIN
     # STOWAWAY, SONDERN EIN FALSCHER NAME -- und dann laeuft nichts. Gemessen
-    # in robins Sitzung vom 2026-09-22 nach dem Schnitt um 17:12: 22 von 22
+    # in der Sitzung des Owners vom 2026-09-22 nach dem Schnitt um 17:12: 22 von 22
     # `edit_file`-Aufrufen kamen mit `old_string`/`new_string` (der Name eines
     # anderen Harness), 22 von 22 scheiterten, keiner korrigierte sich. 15 der
     # 22 Antworten sagten zuerst "read ... before editing it" -- die
@@ -24401,13 +24431,13 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
 
     IT IS CALLED AFTER THE TURN IS OVER ON SCREEN, never inside it. It sat
-    inside `run_turn` for one afternoon and robin found it live on 2026-08-21:
+    inside `run_turn` for one afternoon and the owner found it live on 2026-08-21:
     the answer was complete, the cost line never came and the composer still
     said `Stop`, because the turn does not end until this returns -- and at
     `high` it thinks about a 20k conversation first. What a person waits for is
     the answer; the review is something that happens afterwards.
 
-    `events` FIRES PER SAVED ENTRY, IN THE LOOP, not once at the end -- robin,
+    `events` FIRES PER SAVED ENTRY, IN THE LOOP, not once at the end -- the owner,
     same evening. The return value still carries everything, for the caller that
     wants the total rather than the moments.
 
@@ -24637,7 +24667,7 @@ class TurnEvents:
         `tool_finished`. Fired from the turn's thread while the call blocks it.
 
         THE CLOCK (#172) ANSWERS "IS A CALL OUTSTANDING", THIS ANSWERS "HOW
-        FAR". On 2026-09-27 robin watched 10 min 47 s of an image generation
+        FAR". On 2026-09-27 the owner watched 10 min 47 s of an image generation
         with nothing on the screen naming a phase, a step or an error.
 
         `state` keys, all present on every event:
@@ -24681,7 +24711,7 @@ class TurnEvents:
         same grammar the recording microphone already uses.
 
         AND IT HAS TO BE ACTIONABLE. A state nobody can act on is furniture with
-        a colour (robin, on the microphone, and it holds here): whatever the
+        a colour (the owner, on the microphone, and it holds here): whatever the
         surface raises has to be the thing you press to see the entries.
         """
 
@@ -24689,7 +24719,7 @@ class TurnEvents:
         """#122. The background review saved something, and this is how anyone knows.
 
         NOT OPTIONAL AND NOT SWITCHABLE. There is no write-approval gate here --
-        robin declined it on 2026-08-21 -- so this line is the ONLY moment a
+        the owner declined it on 2026-08-21 -- so this line is the ONLY moment a
         person finds out that something entered the head of their next session.
         A silent learner is a system nobody can correct.
 
@@ -24923,7 +24953,7 @@ def run_turn(
     # A different argument is a different attempt, and only FAILURES count --
     # a slow success repeated on purpose is the model's business.
     failures: dict[tuple, int] = {}
-    # #98-Nachtrag (robin, 2026-08-28 abends): which refused paths this turn
+    # #98-Nachtrag (the owner, 2026-08-28 abends): which refused paths this turn
     # has ALREADY ANNOUNCED. One refused path and a dozen shell calls papered
     # the chat with the same warning -- a line that is always there is a line
     # nobody reads. Per turn like `_REFUSED` itself.
@@ -25008,7 +25038,7 @@ def run_turn(
             # the turn. Once per turn; a server that is actually gone refuses
             # the retry too, and that failure is then reported as before.
             said = str(exc).lower()
-            # 2026-08-28 spaetabends, robins Abend in einem Satz: der Server,
+            # 2026-08-28 spaetabends, des Owners Abend in einem Satz: der Server,
             # den dieses Fenster selbst gebootet hat, beendet sich unter Last
             # still mit Exit 1 -- und jeder Tod riss den Lauf rot ab, fuenf
             # Laeufe an einem Abend. Crow ist der Booter: EIN Neustart des
@@ -25526,7 +25556,7 @@ def run_turn(
             # eine, den beide Oberflaechen schon sagen.
             # #175. DAS FENSTER ERFAEHRT, WAS DAS MODELL ANGESEHEN HAT. Ohne
             # das ist der Browser im Fenster leer, waehrend das Modell von
-            # einer Seite erzaehlt -- gefragt von robin am 2026-08-31: "wieso
+            # einer Seite erzaehlt -- gefragt vom Owner am 2026-08-31: "wieso
             # sieht man google nicht in seinem browser?".
             page = take_render_ride()
             if page is not None:
@@ -25663,7 +25693,7 @@ def run_turn(
 # full of local promises standing.
 #
 # WHAT IS DELIBERATELY NOT HERE: a price display. Whoever brings their own key
-# knows their own costs (robin, 2026-08-22), and a figure this client invents
+# knows their own costs (the owner, 2026-08-22), and a figure this client invents
 # about somebody else's billing is one nobody can hold it to.
 #
 # THE FILE, beside `mcp.json` and `settings.json` because a provider binds the
@@ -26130,7 +26160,7 @@ def provider_model_set(name: str, model: str) -> "str | None":
     return provider_write(doc)
 
 
-# robins Regel vom 2026-08-28, aus dem laufenden Fenster heraus angesagt:
+# des Owners Regel vom 2026-08-28, aus dem laufenden Fenster heraus angesagt:
 # Aktiviert man OpenRouter, darf sich lokal NICHT abschalten -- beide laufen
 # parallel. The broker got its own page in the sheet for exactly this reason:
 # its switch says whether the SUBSYSTEM is in operation -- delegation,
@@ -26173,7 +26203,7 @@ def provider_active(doc: "dict | None" = None) -> str:
     does have -- the machine, which is always there. A file naming the PARKED
     broker takes the same road home: off means off, however the file got there.
 
-    THERE IS NO TURNS OVERLAY -- robins dritter Brueller vom 2026-08-28 abends
+    THERE IS NO TURNS OVERLAY -- des Owners dritter Brueller vom 2026-08-28 abends
     zog den zweiten zurueck: die Broker-Seite routet GAR NICHTS, default ist
     immer lokal, bis der User auf der Model-Seite etwas anderes waehlt. An
     `openrouter_turns` key the one build that had one may have left in the
@@ -26272,7 +26302,7 @@ def sticky_key(session_path: "str | None") -> str:
     different upstream companies, and nothing either of them cached can hold.
 
     IT IS A HASH AND NOT THE PATH, and that is the whole reason this is a
-    function. A chat path is `C:\\Users\\<a person>\\...` -- sending it would
+    function. A chat path is `%USERPROFILE%\\...` -- sending it would
     hand a stranger's name and directory layout to a third party on every
     request, to identify something only this client needs to tell apart. A
     digest is stable, is 64 characters against a documented 256, and says
@@ -27173,7 +27203,7 @@ def _free_model_for(name: str, doc: "dict | None" = None) -> str:
     if picked.endswith(FREE_MODEL_SUFFIX) and picked not in _SPOT_DEAD:
         return picked
     # #148: a favourite the person picked beats the largest window, in the
-    # person's order -- PAID INCLUDED, robins correction of 2026-08-28: a
+    # person's order -- PAID INCLUDED, the owner's correction of 2026-08-28: a
     # billed favourite is the user's explicit choice on their own key. Only
     # what nobody chose stays free. The health memo (#146) speaks first.
     catalogue = {str(m.get("id")) for m in provider_models(name, doc)}
@@ -27235,7 +27265,7 @@ def delegate_target(doc: "dict | None" = None) -> "tuple[dict | None, str | None
              "params": provider_params(name, model, doc)}, None)
 
 
-# #148. THREE FAVOURITES, DEFAULT FREE. robin's parked routing ask of
+# #148. THREE FAVOURITES, DEFAULT FREE. The owner's parked routing ask of
 # 2026-08-27: the free default used to be "largest declared window", and the
 # largest declared window was the dead provider. Favourites are picked by a
 # person, tried in THEIR order, and skipped while the health memo says dead --
@@ -27256,7 +27286,7 @@ def delegate_favorites_set(models: "list | None") -> "str | None":
              if isinstance(m, str) and str(m).strip()][:3]
     if clean:
         doc["delegate_favorites"] = clean
-        # robins Live-Befund 2026-08-28 spaetabends: drei Favoriten standen
+        # des Owners Live-Befund 2026-08-28 spaetabends: drei Favoriten standen
         # in der Oberflaeche, die Delegation nahm weiter den unsichtbaren Pin
         # vom 27.08. Wer Favoriten setzt, sagt die Reihenfolge an -- ein Pin,
         # den keine Seite mehr zeigt, weicht ihnen, statt sie stumm zu
@@ -27353,7 +27383,7 @@ def forget_subtasks() -> None:
         _SUBTASK_SEQ = 0
 
 
-# robins Ansage vom 2026-08-28 spaetnachts: delegierte Aufgaben ueberleben
+# des Owners Ansage vom 2026-08-28 spaetnachts: delegierte Aufgaben ueberleben
 # den Crow-Neustart, solange ihr Chat lebt. Die Registry bleibt das
 # Prozessgedaechtnis der THREADS; ihre RECORDS liegen zusaetzlich auf Platte
 # im Subtask-Regal der Session und kommen im naechsten Prozess zurueck --
@@ -27483,7 +27513,7 @@ def subtask_close(idents: "list[str]", closed: bool = True) -> int:
 
 
 def drop_subtasks(idents: "list[str]") -> int:
-    """A deleted chat takes its subtasks along (robin, 2026-08-28 abends).
+    """A deleted chat takes its subtasks along (der Owner, 2026-08-28 abends).
 
     The records leave the registry, so no listing, chip or rail row shows
     them again. A still-running one is CANCELLED first -- the thread cannot
@@ -27503,7 +27533,7 @@ def drop_subtasks(idents: "list[str]") -> int:
             except OSError:
                 pass
     # Der Chat-Loeschpfad raeumt die Platte mit: was hier geht, kommt nach
-    # dem naechsten Start nicht wieder (robins Ansage, 2026-08-28 spaetnachts).
+    # dem naechsten Start nicht wieder (des Owners Ansage, 2026-08-28 spaetnachts).
     _subtask_persist()
     return len(subs)
 
@@ -27552,7 +27582,7 @@ def _subtask_transcript(sub: Subtask, conversation: Conversation,
     other writer can land on because the id is in the name.
 
     IN ITS OWN SHELF, `subtasks/` UNDER THE SESSION FOLDER, AND NEVER FLAT.
-    robin, 2026-08-27, at the window: "Subtasks bekommen keinen eigenen
+    The owner, 2026-08-27, at the window: "Subtasks bekommen keinen eigenen
     Wurzelchat, nur Subchats unter dem jeweiligen Wurzelchat". The rail lists
     every flat `chat-*.json` as a root chat, so a transcript written there IS
     a root chat, drawn twice and openable as a live conversation -- measured
@@ -27700,7 +27730,7 @@ def delegate_fallbacks(spot: dict, doc: "dict | None" = None) -> "list[dict]":
     if spec is None:
         return []
     skip = {spot.get("model")} | set(_SPOT_DEAD)
-    # #148, robins correction: favourites lead the chain in the person's order
+    # #148, the owner's correction: favourites lead the chain in the person's order
     # and MAY be paid -- their own pick on their own key. Behind them only
     # FREE models follow, by declared window: what nobody chose must not fall
     # forward onto a bill.
@@ -28836,7 +28866,7 @@ GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED = ("open", "running",
 # counts as NOT done, and the goal moves on past it. 2026-09-24, diorama run:
 # step 4 went `failed` with an honest note (software GL cannot show ray
 # lighting), `goal_next_open` handed it back as the next step on every turn,
-# and the run sat on it for ~2 h 20 min until robin edited goal.json by hand.
+# and the run sat on it for ~2 h 20 min until the user edited goal.json by hand.
 GOAL_SKIPPED = "skipped"
 # #289: THE GOAL'S OWN STATE when every step is done or skipped and at least
 # one is skipped -- "complete with N skipped", never `done`: a skipped step
@@ -28845,7 +28875,7 @@ GOAL_PARTIAL = "partial"
 # #294: NO STEP IS SKIPPED BY THE ENGINE. #289 skipped a step on its second
 # `failed`; on 2026-09-24/25 that skipped steps 5-8 of the diorama goal on
 # software-GL captures, and nobody was asked (goal.json `failures` 3/2/2/2,
-# session.json msg 176/269/313/347). Only robin skips (`/goal skip n`). A
+# session.json msg 176/269/313/347). Only the user skips (`/goal skip n`). A
 # failure now has a CLASS and a ladder, and the end of every ladder is a
 # PAUSE that reports and asks -- see `goal_fail`.
 GOAL_PAUSED = "paused"
@@ -28997,7 +29027,7 @@ GOAL_FILE = "goal.json"
 def goal_path() -> str:
     """Wo das Ziel liegt: im gebundenen Arbeitsbereich, NICHT global.
 
-    ROBIN, 2026-08-31, LIVE GESEHEN: ein zweites Fenster fing von selbst an,
+    DER OWNER, 2026-08-31, LIVE GESEHEN: ein zweites Fenster fing von selbst an,
     ein Ziel abzuarbeiten, das in einem anderen gesetzt worden war. Der Grund
     stand genau hier -- `SESSION_DIR/goal.json` ist EIN Ort fuer alle Fenster,
     also liest jeder Motor dasselbe Ziel und pumpt darauf los. Zwei Fenster
@@ -29055,7 +29085,7 @@ def goal_load() -> "dict | None":
 
 # #296: A `done` WHOSE NOTE BEGINS "skipped" WAS NEVER DONE. 2026-09-24 ~22:00,
 # before `/goal skip` existed, step 4 of the diorama goal was set `done` by
-# hand with the note "skipped by robin (2026-09-24 ~22:00): ray lighting is
+# hand with the note "skipped by the owner (2026-09-24 ~22:00): ray lighting is
 # not verifiable ..." -- and `goal_counts` counted it, 5/9. Narrow on
 # purpose: only a note that STARTS with the word.
 _GOAL_SKIP_NOTE = re.compile(r"(?i)^\s*skipped\b")
@@ -29134,7 +29164,7 @@ def goal_start(title: str, steps: "list[str]",
             # WANN CROW ANGEFANGEN HAT, und das ist NICHT, wann der Plan
             # geschrieben wurde. Zwischen `/goal` und der Zeile, die die Arbeit
             # anstoesst, liegt Tippzeit -- die lief bis hier in der Zielhur mit
-            # und in der Dauer des ersten Schritts gleich mit (robin,
+            # und in der Dauer des ersten Schritts gleich mit (der Owner,
             # 2026-08-31). None heisst: noch kein Lebenszeichen, Uhr auf 0.
             "started": None,
             # WAS DAS ZIEL BISHER GEKOSTET HAT, und der Stand davon beim letzten
@@ -29330,12 +29360,12 @@ def _goal_settle(goal: dict) -> None:
 
 def goal_step_skip(index: int, note: str = "",
                    now: "float | None" = None) -> "tuple[dict | None, str | None]":
-    """#289. `/goal skip <n> [reason]`: robin gives a step up. (goal, None), or
+    """#289. `/goal skip <n> [reason]`: the user gives a step up. (goal, None), or
     (None, why not).
 
     THE USER'S WORD, NOT THE MODEL'S: there is no tool for this. A step the
     model cannot finish goes through `failed` twice; this is the way for the
-    step robin already knows cannot be done here. A `done` step is not
+    step the user already knows cannot be done here. A `done` step is not
     skipped -- that would take back work that happened. There is no
     `/goal done <n>` beside it on purpose: acceptance stays with the evidence
     gate (#250/#267).
@@ -29370,7 +29400,7 @@ def goal_step_skip(index: int, note: str = "",
 
 
 def goal_step_redo(index: int) -> "tuple[dict | None, str | None]":
-    """#296. `/goal redo <n>`: robin takes his own skip back. The step is
+    """#296. `/goal redo <n>`: the user takes their own skip back. The step is
     open again; its failure record stays, its skip mark goes."""
     with _GOAL_LOCK:
         goal = goal_load()

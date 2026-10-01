@@ -1032,7 +1032,7 @@ class _Handler(BaseHTTPRequestHandler):
 #
 # #249 stage 5: WHERE THE HTTPS ADDRESS STANDS, read and never changed. Every
 # call is `tailscale ... --json` without sudo, answered in well under a second
-# on robin's PC (tailscale 1.102.3, 2026-09-24); a hung daemon costs at most
+# on the owner's PC (tailscale 1.102.3, 2026-09-24); a hung daemon costs at most
 # TAILSCALE_TIMEOUT per call. The states, in the order a person meets them:
 #
 #   missing        no `tailscale` on PATH
@@ -1379,7 +1379,7 @@ def qr_svg(text: str, quiet: int = 4) -> str:
 
 # ================================================================ THE ICON ==
 #
-# THE HOME-SCREEN TILE (robin's iPhone, 2026-09-24: "Add to Home Screen" drew a
+# THE HOME-SCREEN TILE (the owner's iPhone, 2026-09-24: "Add to Home Screen" drew a
 # generic tile with a "1"). iOS reads `apple-touch-icon` and fills any
 # transparency with black, so the tile is the window's own bird (cli/icons/,
 # RGBA) composited onto an opaque ground and scaled here. Standard library

@@ -162,6 +162,52 @@ class TheCoreCarriesNoColourTests(unittest.TestCase):
         self.assertEqual(sgr, [], "an ANSI colour sequence is back in crow_core.py")
 
 
+class TheShippedFilesNameNobodyTests(unittest.TestCase):
+    """#196 C1: what the package ships carries no person and no profile path.
+
+    Up to 3.0.0 the shipped sources named the owner in model prompts ("Write a
+    short report for ..."), comments and manifest notes, and the operating
+    point carried a `C:/Users/<name>/...` models root and lab binary that every
+    other Windows machine tripped over. The set scanned is what
+    tools/pack-release.ps1 packs (cli/ minus the suite, kits/, the operating
+    point, the chat template, README.md, NOTICE) plus the two installers, whose
+    printed lines a user copies. Binary files are skipped; `/home/` is matched
+    case-sensitively so "Up/Down/Home/End" is prose, not a path.
+    """
+
+    PATTERN = re.compile(r"(?i:robin)|(?i:[a-z]:[\\/]+users[\\/])|/home/")
+    BINARY = {".ico", ".png", ".ttf", ".otf", ".woff", ".woff2"}
+
+    def _shipped(self):
+        repo = HERE.parent
+        out = []
+        for top in (repo / "cli", repo / "kits"):
+            for path in sorted(top.rglob("*")):
+                rel = path.relative_to(repo).parts
+                if (not path.is_file() or path.suffix.lower() in self.BINARY
+                        or path.name.startswith("test_")
+                        or "__pycache__" in rel or "runs" in rel):
+                    continue
+                out.append(path)
+        for name in ("manifests/operating-point.json",
+                     "manifests/0731-chat-template.jinja",
+                     "README.md", "NOTICE", "install.ps1", "install.sh"):
+            out.append(repo / name)
+        return out
+
+    def test_no_shipped_file_names_the_owner_or_a_profile_path(self):
+        hits = []
+        for path in self._shipped():
+            text = path.read_bytes().decode("utf-8", errors="replace")
+            for number, line in enumerate(text.splitlines(), 1):
+                found = self.PATTERN.search(line)
+                if found:
+                    hits.append("%s:%d: %r" % (path.relative_to(HERE.parent).as_posix(),
+                                               number, found.group(0)))
+        self.assertEqual(hits, [], "%d hit(s), first: %s"
+                         % (len(hits), hits[0] if hits else ""))
+
+
 class TheVersionLivesInTheCoreTests(unittest.TestCase):
     """#187: the terminal client is gone, so the version literal lives in
     cli/crow_core.py. install.ps1 reads the installed version out of that file
@@ -16306,7 +16352,7 @@ class AFailureHasAClassAndALadderTests(_GoalCase):
         for part in ("PAUSED at step 2 (budget)", "Do not call any tools",
                      "What you identified", "Why you cannot proceed",
                      "Two or three concrete proposals",
-                     "Ask robin whether he has further input"):
+                     "Ask the user whether they have further input"):
             self.assertIn(part, nudge)
         self.assertIsNone(goal["steps"][1]["started"], "the clock runs on")
         self.assertIn("PAUSED at step 2", crow_core.goal_summary(goal))
