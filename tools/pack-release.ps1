@@ -47,7 +47,7 @@ now compares the two lists.
 THE PRIVACY GATE. After staging and before MANIFEST.json or the zip exist, every
 staged file is searched as raw bytes, in UTF-8 and in UTF-16LE, ignoring ASCII
 case, for: $env:USERPROFILE (backslash, slash and JSON-escaped spellings), the
-user name as a path segment (\Users\<name>\, /home/<name>/), $env:COMPUTERNAME,
+user name (as a path segment, \Users\<name>\ and /home/<name>/, and bare), $env:COMPUTERNAME,
 and every -PrivatePattern. A hit prints file, pattern and count, removes the
 stage and exits 1. THERE IS NO OVERRIDE SWITCH, on purpose: a switch that ships
 private data on request is a switch somebody passes at 23:00 on release night.
@@ -403,6 +403,9 @@ function Get-PrivatePatterns {
         $pats += "/Users/$User/"
         $pats += "\\Users\\$User\\"
         $pats += "/home/$User/"
+        # The bare name too (#196 C2): "no references to the builder" is wider than paths.
+        if ($User.Length -lt 4) { $notes += "user name '$User' is shorter than 4 characters and is not searched bare" }
+        else                    { $pats  += $User }
     }
     foreach ($h in $Hosts) {
         if (-not $h) { continue }
@@ -747,13 +750,26 @@ function Invoke-Selftest {
         $u = [Text.Encoding]::Unicode.GetBytes($fakeProfile)
         $fs.Write($u, 0, $u.Length)
         $fs.Close()
-        Check "a hit straddling the 4 MB read block is found, once" (@(Find-PrivateData -Root $scan -Patterns $fake.Patterns | Where-Object { $_.Encoding -eq 'utf-16le' -and $_.Pattern -eq $fakeProfile -and $_.Count -eq 1 }).Count -eq 1)
+        $h = Find-PrivateData -Root $scan -Patterns $fake.Patterns
+        Check "a hit straddling the 4 MB read block is found, once" (@($h | Where-Object { $_.Encoding -eq 'utf-16le' -and $_.Pattern -eq $fakeProfile -and $_.Count -eq 1 }).Count -eq 1)
         [IO.File]::WriteAllBytes($dll, [byte[]]@(0x4D, 0x5A) + [Text.Encoding]::Unicode.GetBytes('C:\Windows\System32\kernel32.dll') + [Text.Encoding]::UTF8.GetBytes('/usr/lib/x'))
         Check "NEGATIVE: a clean binary has no hits" ((Find-PrivateData -Root $scan -Patterns $fake.Patterns).Count -eq 0)
         $mine = Get-PrivatePatterns
         Check "by default the gate searches THIS machine's profile path" ((-not $env:USERPROFILE) -or ($mine.Patterns -contains $env:USERPROFILE.TrimEnd('\')))
         $short = Get-PrivatePatterns -ProfilePath $fakeProfile -User 'crow-selftest-fake' -Hosts @('pc')
         Check "a host name under 4 characters is noted, not searched" ($short.Patterns -notcontains 'pc' -and $short.Notes.Count -eq 1)
+
+        # The bare user name, not only as a path segment: prose such as a model prompt
+        # ("Write a report for <name>") is a reference to the builder too.
+        [IO.File]::WriteAllBytes($dll, [Text.Encoding]::UTF8.GetBytes('Write a report for Crow-Selftest-Fake about the run'))
+        $h = Find-PrivateData -Root $scan -Patterns $fake.Patterns
+        $proseUtf8 = @($h | Where-Object { $_.Encoding -eq 'utf-8' -and $_.Pattern -eq 'crow-selftest-fake' })
+        [IO.File]::WriteAllBytes($dll, [Text.Encoding]::Unicode.GetBytes('Write a report for Crow-Selftest-Fake about the run'))
+        $h = Find-PrivateData -Root $scan -Patterns $fake.Patterns
+        $proseUtf16 = @($h | Where-Object { $_.Encoding -eq 'utf-16le' -and $_.Pattern -eq 'crow-selftest-fake' })
+        Check "the bare user name in prose is found, in UTF-8 and in UTF-16LE" ($proseUtf8.Count -ge 1 -and $proseUtf16.Count -ge 1)
+        $shortUser = Get-PrivatePatterns -ProfilePath $fakeProfile -User 'abc' -Hosts @($fakeHost)
+        Check "a user name under 4 characters is noted, not searched bare" ($shortUser.Patterns -notcontains 'abc' -and @($shortUser.Notes | Where-Object { $_ -like "*'abc'*" }).Count -eq 1)
 
         # the stage, end to end: the log is out AND the gate refuses on the DLL
         $stage = Join-Path $pkRoot 'stage'

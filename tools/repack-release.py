@@ -39,7 +39,7 @@ THE PRIVACY GATE. Before the archive or its manifest is written, every file
 that would be packed -- bin/ reused from the previous package included -- is
 searched as raw bytes, in UTF-8 and in UTF-16LE, ignoring ASCII case, for:
 the builder's profile path (both slash spellings and the JSON-escaped one), the
-user name as a path segment (\Users\<name>\, /home/<name>/), the host name,
+user name (as a path segment, \Users\<name>\ and /home/<name>/, and bare), the host name,
 and every --private-pattern. A hit prints file, pattern and count, and the
 tool exits 1. There is no override switch. The patterns describe THIS machine:
 bin/ taken from a package another machine built carries THAT machine's paths,
@@ -150,6 +150,11 @@ def private_patterns(extra=(), profile=None, user=None, host=None) -> tuple[list
     if user:
         pats += ["\\Users\\%s\\" % user, "/Users/%s/" % user,
                  "\\\\Users\\\\%s\\\\" % user, "/home/%s/" % user]
+        # The bare name too (#196 C2): "no references to the builder" is wider than paths.
+        if len(user) < 4:
+            notes.append("user name '%s' is shorter than 4 characters and is not searched bare" % user)
+        else:
+            pats.append(user)
     hosts = [host] if host is not None else [os.environ.get("COMPUTERNAME"), socket.gethostname()]
     for h in _dedupe(hosts):
         if len(h) < 4:

@@ -164,6 +164,17 @@ class PrivacyGateTest(unittest.TestCase):
         home = os.path.expanduser("~").rstrip("\\/")
         self.assertIn(home.replace("/", "\\").lower(), [p.lower() for p in pats])
 
+    def test_the_bare_user_name_in_prose_is_found_in_both_encodings(self):
+        text = "Write a report for FakeBuilder about the run"
+        for enc in ("utf-8", "utf-16le"):
+            hits = self.hit(text.encode(enc))
+            self.assertTrue([h for h in hits if h[2] == enc], (enc, hits))
+
+    def test_a_very_short_user_name_is_noted_not_searched_bare(self):
+        pats, notes = rr.private_patterns(profile=FAKE_PROFILE, user="abc", host=FAKE_HOST)
+        self.assertNotIn("abc", pats)
+        self.assertTrue([n for n in notes if "'abc'" in n])
+
     def test_a_very_short_host_name_is_noted_not_searched(self):
         pats, notes = rr.private_patterns(profile=FAKE_PROFILE, user="fakebuilder", host="pc")
         self.assertNotIn("pc", pats)
