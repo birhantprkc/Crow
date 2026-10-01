@@ -16853,7 +16853,7 @@ class TheWindowWarmsOnlyOnTheImageStackTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             json.dump({"point": point, "base_url": "http://127.0.0.1:8099/v1",
                        "started_at": "2026-10-01T10:00:00+02:00",
-                       "pids": {"serve": 5151, "image": None}}, fh)
+                       "pids": {"serve": os.getpid(), "image": None}}, fh)
 
     def test_27b_and_flash_next_warm_nothing_image_stack_warms(self):
         for point in ("27b", "flash-next"):

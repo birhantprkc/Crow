@@ -1898,8 +1898,13 @@ def read_active_point() -> "dict | None":
 
     TOLERANT ON PURPOSE: a missing, unreadable or corrupt file, or one whose
     `point` is not one of the three, is None -- "no boot script ran", which
-    keeps today's behaviour for a llama.cpp user. The other fields are handed
-    back as found and not checked here.
+    keeps today's behaviour for a llama.cpp user.
+
+    STALE IS ABSENT: when `pids.serve` is missing or that process no longer
+    exists (crow_platform.pid_alive), the file is a leftover of a crashed boot
+    script or of a point stopped by other means, and is None too -- otherwise
+    a later llama.cpp session would have its images gated off forever. The
+    other fields are handed back as found and not checked here.
     """
     try:
         with open(active_point_path(), encoding="utf-8") as fh:
@@ -1908,7 +1913,46 @@ def read_active_point() -> "dict | None":
         return None
     if not isinstance(doc, dict) or doc.get("point") not in ACTIVE_POINTS:
         return None
+    pids = doc.get("pids")
+    if not isinstance(pids, dict) or not crow_platform.pid_alive(pids.get("serve")):
+        return None
     return doc
+
+
+# #196 C3: which crow-nest point a serve is, read off /props `model_path`.
+# Both points listen on 8099; only the container file tells them apart.
+CROW_NEST_POINT_FILES = {"qwen3.8-flash-next-cnq4.5-m.cnq": "flash-next",
+                         "qwen3.8-27b-cnq4.5.cnq": "27b"}
+
+
+def point_for_server(base_url: str, timeout: float = 3.0) -> "str | None":
+    """The operating point the serve at `base_url` is, or None.
+
+    `flash-next` or `27b` by the container file serve has open; `27b` with an
+    sd-server answering on IMAGE_SERVER_URL is `image-stack`. Nothing at the
+    address, or a file that is neither container, is None.
+    """
+    path = server_model_path(base_url, timeout)
+    if not path:
+        return None
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    point = CROW_NEST_POINT_FILES.get(name)
+    if point == "27b" and _image_server_answers(timeout=timeout):
+        return ACTIVE_POINT_IMAGE
+    return point
+
+
+def running_server_label(pid, line: str) -> str:
+    """One line naming a running server, for a picker such as
+    tools/start-server.py: crow-nest's serve by its point and port, a
+    llama-server by the model file on its -m."""
+    if crow_platform.server_kind(line) == crow_platform.KIND_CROW_NEST:
+        port = crow_platform.server_port(line) or CROW_NEST_PORT
+        point = point_for_server("http://127.0.0.1:%d/v1" % port)
+        return ("running (pid %s): crow-nest %s on port %s"
+                % (pid, point or "(point not identified)", port))
+    return ("running (pid %s): %s"
+            % (pid, served_model(line) or "unreadable command line"))
 
 
 def write_active_point(point: str, base_url: str, pids: dict,
@@ -2325,6 +2369,9 @@ def stop_servers(log: Callable[[str], None] | None = None) -> int:
     that is the same arithmetic #114's criterion 2 refuses a second server for.
     #196 C3: for the same reason crow-nest's serve and the image server are
     stopped too (serve has no shutdown endpoint; the pid is the only handle).
+    That includes an sd-server the window itself started for a llama.cpp
+    user -- by design: the next image call starts it again (a weight reload),
+    and a switch that left it on the card could overbook the next model.
 
     Failures are counted, not raised: the next step is a start that polls, and
     it will say the truth about whether the card came free. A kill that reports

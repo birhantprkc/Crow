@@ -1034,6 +1034,48 @@ def kill_pid(pid) -> bool:
     return True
 
 
+def pid_alive(pid) -> bool:
+    """#196 C3: True while a process with this pid exists.
+
+    Windows: OpenProcess + GetExitCodeProcess (STILL_ACTIVE), no subprocess;
+    access denied means it exists. POSIX: signal 0. A pid the OS has since
+    reused for another program also reads as alive -- this answers "exists",
+    not "is still the same program".
+    """
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if number <= 0:
+        return False
+    if IS_WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD)
+        handle = kernel32.OpenProcess(0x1000, False, number)  # QUERY_LIMITED
+        if not handle:
+            return ctypes.get_last_error() == 5               # ACCESS_DENIED
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259                          # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(number, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def kill_tree(pid) -> bool:
     """#310, Windows only: `taskkill /PID <pid> /T /F` -- the process AND the
     children it started. `proc.kill()` on cmd.exe left those running. True

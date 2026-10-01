@@ -28791,6 +28791,59 @@ class OneOperatingPointIsSeenTests(unittest.TestCase):
             self.assertEqual(crow_core.running_base_url("http://127.0.0.1:8083/v1"),
                              "http://127.0.0.1:8083/v1")
 
+    def _http(self, model_path, image_up):
+        """A stand-in for urlopen: serve's /props on 8099, sd-server's
+        capabilities on 8097 (200 when `image_up`, refused otherwise)."""
+        class Answer(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(req, timeout=None):
+            url = getattr(req, "full_url", req)
+            if url == "http://127.0.0.1:8099/props" and model_path:
+                return Answer(json.dumps({"model_path": model_path,
+                                          "n_ctx": 65536}).encode("utf-8"))
+            if url == "http://127.0.0.1:8097/sdcpp/v1/capabilities" and image_up:
+                return Answer(b"{}")
+            raise crow_core.urllib.error.URLError("refused")
+        return mock.patch.object(crow_core.urllib.request, "urlopen", urlopen)
+
+    def test_the_point_is_read_off_the_container_serve_has_open(self):
+        url = "http://127.0.0.1:8099/v1"
+        flash = "C:\\Crow\\models\\Qwen3.8-Flash-Next-CNQ4.5-M.cnq"
+        b27 = "/opt/crow/models/Qwen3.8-27B-CNQ4.5.cnq"
+        with self._http(flash, image_up=True):
+            self.assertEqual(crow_core.point_for_server(url), "flash-next")
+        with self._http(b27, image_up=False):
+            self.assertEqual(crow_core.point_for_server(url), "27b")
+        with self._http(b27, image_up=True):
+            self.assertEqual(crow_core.point_for_server(url), "image-stack")
+        with self._http("/m/Qwen3.8-27B-Q4_K_M.gguf", image_up=True):
+            self.assertIsNone(crow_core.point_for_server(url))
+        with self._http(None, image_up=True):
+            self.assertIsNone(crow_core.point_for_server(url))
+
+    def test_the_picker_names_a_running_serve_by_point_and_port(self):
+        """tools/start-server.py prints this line; a serve has no -m, so it
+        used to say "unreadable command line"."""
+        serve = "C:\\Crow\\bin\\serve.exe --slot-save-path d"
+        with self._http("/m/Qwen3.8-27B-CNQ4.5.cnq", image_up=False):
+            self.assertEqual(crow_core.running_server_label("5151", serve),
+                             "running (pid 5151): crow-nest 27b on port 8099")
+        with self._http(None, image_up=False):
+            self.assertEqual(crow_core.running_server_label("5151", serve),
+                             "running (pid 5151): crow-nest (point not "
+                             "identified) on port 8099")
+        self.assertEqual(crow_core.running_server_label(
+            "4242", "llama-server -m /m/a.gguf --port 8083"),
+            "running (pid 4242): /m/a.gguf")
+        tool = (Path(__file__).resolve().parent.parent / "tools" /
+                "start-server.py").read_text(encoding="utf-8")
+        self.assertIn("crow_core.running_server_label(pid, line)", tool)
+
 
 class TheActivePointGatesTheImageServerTests(unittest.TestCase):
     """#196 C3. `active-point.json` in the config dir says which operating
@@ -28824,7 +28877,7 @@ class TheActivePointGatesTheImageServerTests(unittest.TestCase):
         self._point(json.dumps({"point": "27b",
                                 "base_url": "http://127.0.0.1:8099/v1",
                                 "started_at": "2026-10-01T10:00:00+02:00",
-                                "pids": {"serve": 5151, "image": None}}))
+                                "pids": {"serve": os.getpid(), "image": None}}))
         self.assertFalse(crow_core.image_tools_available())
         why = crow_core.image_server_start()
         self.assertIn("Image Stack operating point", why or "")
@@ -28834,11 +28887,11 @@ class TheActivePointGatesTheImageServerTests(unittest.TestCase):
     def test_image_stack_warms_where_flash_next_does_not(self):
         self._point(json.dumps({"point": "image-stack", "base_url": "x",
                                 "started_at": "t",
-                                "pids": {"serve": 1, "image": 2}}))
+                                "pids": {"serve": os.getpid(), "image": 2}}))
         self.assertIsNone(crow_core.image_tools_unavailable())
         self._point(json.dumps({"point": "flash-next", "base_url": "x",
                                 "started_at": "t",
-                                "pids": {"serve": 1, "image": None}}))
+                                "pids": {"serve": os.getpid(), "image": None}}))
         self.assertIn("Image Stack", crow_core.image_tools_unavailable() or "")
 
     def test_absent_or_corrupt_file_is_todays_behaviour(self):
@@ -28846,18 +28899,18 @@ class TheActivePointGatesTheImageServerTests(unittest.TestCase):
         for broken in ("{not json", "[]", '{"point": "70b"}', ""):
             self._point(broken)
             self.assertIsNone(crow_core.image_tools_unavailable(), broken)
-        self._point('{"point": "27b"}')
+        self._point('{"point": "27b", "pids": {"serve": %d}}' % os.getpid())
         self.assertIsNotNone(crow_core.image_tools_unavailable())
 
     def test_the_contract_file_round_trips_and_tolerates_damage(self):
         self.assertIsNone(crow_core.read_active_point())
         path = crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",
-                                            {"serve": 5151, "image": None})
+                                            {"serve": os.getpid(), "image": None})
         self.assertEqual(path, os.path.join(self.dir, "active-point.json"))
         got = crow_core.read_active_point()
         self.assertEqual((got["point"], got["base_url"], got["pids"]),
                          ("27b", "http://127.0.0.1:8099/v1",
-                          {"serve": 5151, "image": None}))
+                          {"serve": os.getpid(), "image": None}))
         self.assertRegex(got["started_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
         self.assertEqual(sorted(os.listdir(self.dir)),
                          ["active-point.json", "w.safetensors"])
@@ -28865,3 +28918,19 @@ class TheActivePointGatesTheImageServerTests(unittest.TestCase):
             crow_core.write_active_point("70b", "x", {"serve": 1, "image": None})
         self._point("{broken")
         self.assertIsNone(crow_core.read_active_point())
+
+    def test_a_dead_serve_pid_makes_the_file_absent(self):
+        """A crashed boot script, or a later llama.cpp session: the file is
+        still there but its serve is gone, and images must not stay gated."""
+        dead = 2147483644          # no such process on Windows or Linux
+        self._point(json.dumps({"point": "27b",
+                                "base_url": "http://127.0.0.1:8099/v1",
+                                "started_at": "2026-10-01T10:00:00+02:00",
+                                "pids": {"serve": dead, "image": None}}))
+        self.assertIsNone(crow_core.read_active_point())
+        self.assertIsNone(crow_core.image_tools_unavailable())
+        for pids in ({}, {"serve": None}, {"serve": "x"}):
+            self._point(json.dumps({"point": "27b", "pids": pids}))
+            self.assertIsNone(crow_core.read_active_point(), pids)
+        self.assertFalse(crow_platform.pid_alive(dead))
+        self.assertTrue(crow_platform.pid_alive(os.getpid()))
