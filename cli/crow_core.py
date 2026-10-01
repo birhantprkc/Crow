@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """Everything Crow does that never touches a terminal.
 
-Split out of cli/crow.py, unchanged, so that a second client can call the same
-code instead of carrying a second copy of it. Nothing in here writes to stdout,
-reads a keystroke, or emits an escape sequence -- the two exceptions are named
-where they sit (install_font's `verbose` arm, which no caller in this repository
-sets, and the ANSI colour constants, which are STRINGS the caller may or may not
-print).
+Split out of the terminal client (cli/crow.py, removed with #187) so that a
+second client could call the same code instead of carrying a second copy of
+it. The window, cli/crow_gui.py, is that client and since #187 the only one.
+Nothing in here writes to stdout, reads a keystroke, or emits an escape
+sequence -- the two exceptions are named where they sit (install_font's
+`verbose` arm, which no caller in this repository sets, and the ANSI colour
+constants, which are STRINGS the caller may or may not print).
 
 TWO BLOCKS CAME OVER A SEAM RATHER THAN AS THEY STOOD, and they are the only
 two. `stream_reply` had thirteen terminal lines -- two signature parameters and
 eleven statements -- so it could not simply move. They are `ReplyEvents` now,
-four named events the caller decides what to do with, and cli/crow.py's
-`TerminalEvents` still carries those eleven statements verbatim. The rest of
-the function moved line for line.
+four named events the caller decides what to do with. The tool loop out of the
+old `repl()` is the second: twelve terminal lines, eleven named events on
+`TurnEvents`. `run_turn` is the rest of that loop, moved line for line --
+including `_SEEN.clear()`, which was the one line of it that could have been
+left behind without anything failing today.
 
-The tool loop out of `repl()` is the second: twelve terminal lines, eleven
-named events on `TurnEvents`, and cli/crow.py's `TerminalTurnEvents` carrying
-the twelve prints unchanged. `run_turn` is the rest of that loop, moved line
-for line -- including `_SEEN.clear()`, which was the one line of it that could
-have been left behind without anything failing today.
-
-WHY THE MODULE IS CALLED crow_core AND NOT core. `python <abs>\\cli\\crow.py`
+WHY THE MODULE IS CALLED crow_core AND NOT core. `python <abs>\\cli\\crow_gui.py`
 puts the script's own directory on sys.path[0], so a sibling module resolves by
 its bare name. A file called cli/queue.py or cli/json.py would shadow the
 standard library for EVERY client that starts from this directory -- and
@@ -37,16 +34,17 @@ A new top-level directory would never be staged, and the package would be
 missing this file with nothing saying so -- the failure would first appear on a
 user's machine, at import time. Here it costs no change to the shipping path.
 
-THE VERSION IS NOT HERE, and that is a hard rule rather than a preference. It
-lives in cli/crow.py and only there. install.ps1:399-403 reads the installed
-version out of the shipped cli\\crow.py with ^VERSION\\s*=\\s*"([^"]+)"; with the
-literal it reads 0.2.0, with an import it reads nothing, Get-InstalledVersion
-returns $null, and Resolve-InstallAction (install.ps1:428-431) answers 'unknown'
-and refuses with the advice to pass -Force -- which a run through
-`irm ... | iex` cannot do. Every installed base would become un-updatable
-through the documented one-liner. See CLIENT_VERSION below for the way round it.
+THE VERSION IS HERE, and only here (#187). It used to live in cli/crow.py,
+because install.ps1 and install.sh read the installed version straight out of
+the shipped file with ^VERSION\\s*=\\s*"([^"]+)" -- an import answers nothing to
+a regex, the installer then reports 'unknown' and refuses an update that a run
+through `irm ... | iex` cannot force. The terminal client is gone, so the
+literal moved to the one file every install ships: the installers now read
+cli/crow_core.py and fall back to cli/crow.py only for an installation older
+than this change. The line must therefore stay a plain top-level literal,
+`VERSION = "x.y.z"` at column 0 -- never computed, never imported.
 
-Standard library only, same as the client.
+Standard library only.
 """
 
 from __future__ import annotations
@@ -81,18 +79,18 @@ from typing import Callable
 # and does not branch. Its module docstring carries the whole path table.
 import crow_platform
 
-# The client's version, handed over by whoever owns the literal.
-#
-# NOT DEFINED HERE -- see the module docstring: `VERSION = "0.2.0"` may only
-# appear in cli/crow.py, because install.ps1 greps that file for it. So the
-# owner assigns this on import (`crow_core.CLIENT_VERSION = VERSION`) and the
-# three places that need a version read it from here.
-#
-# The empty default is the safe one rather than a placeholder: parse_version("")
-# is None, is_newer() is False whenever either side does not parse, and
-# update_notice therefore says nothing at all. A client that forgot to hand its
-# version over stays quiet instead of announcing an update to everybody.
+# THE VERSION LITERAL, and its only home -- see the module docstring. The
+# installers (install.ps1, install.sh) and tools/pack-release.ps1 read it out of
+# this file with ^VERSION\s*=\s*"([^"]+)", and tools/check_operating_point.py
+# holds it against manifests/operating-point.json, so it stays a literal at
+# column 0. Until #187 it stood in cli/crow.py, which handed it over on import;
+# an installation older than this change still carries it there, and that is
+# the only reason the installers look in crow.py at all.
 VERSION = "2.8.5"
+
+# The name every reader has used since the split: the session file's `version`
+# field, the User-Agents and the update notice. It used to be "" until the
+# terminal client assigned it; it is simply the literal now.
 CLIENT_VERSION = VERSION
 
 
@@ -102,8 +100,8 @@ CLIENT_VERSION = VERSION
 # is the operating point every measurement since #140 has been taken at and the
 # only one of the three that can see (#170).
 # ALL THREE STAY BOOTABLE. This decides one thing: where a client looks first
-# when it was told nothing and found nothing listening. `--base-url` overrides
-# it, and `--serve <key>` names the model directly.
+# when it was told nothing and found nothing listening. The window's model
+# menu boots a model by name.
 DEFAULT_BASE_URL = "http://127.0.0.1:8083/v1"
 DEFAULT_MODEL = "crow"
 
@@ -704,9 +702,9 @@ def resolve_sampling(model: str | None, overrides: dict | None = None,
                      level: "str | None" = None) -> dict:
     """The model's sampling, with anything the user typed on top.
 
-    `overrides` carries ONLY what was actually given -- see `_Explicit` in
-    cli/crow.py. A dict of every flag with its default would put the terminal's
-    idea of min_p back on top of the model's and undo the whole stage.
+    `overrides` carries ONLY what was actually given. A dict of every flag
+    with its default would put the caller's idea of min_p back on top of the
+    model's and undo the whole stage.
     """
     out = sampling_for(model, level)
     for name, value in (overrides or {}).items():
@@ -1374,8 +1372,8 @@ TOOLS = [
 
 # THE BUILT-INS AS SHIPPED -- twelve until #143 added the delegation three --
 # AND THE FLOOR EVERY LATER ENTRY SITS ON. `TOOLS` grows from `mcp.json` at
-# import (see MCP_FILE), and it grows IN PLACE because `crow.py` binds the value
-# rather than the name. Keeping the built-ins under a second name is what lets
+# import (see MCP_FILE), and it grows IN PLACE because `crow_gui.py` binds the
+# value rather than the name. Keeping the built-ins under a second name is what lets
 # that rebuild be idempotent: drop everything above the floor, then add. A count
 # would do the same job and say nothing about why.
 BUILTIN_TOOLS = tuple(TOOLS)
@@ -1490,8 +1488,9 @@ REPO_URL = f"https://github.com/{REPO}"
 
 
 # The command that updates an installation. It is the SAME line that installs
-# one: install.ps1 reads the version out of the cli\crow.py it finds in the
-# target and updates when its own is newer. Until 2026-08-08 that line refused a
+# one: install.ps1 reads the version out of the cli\crow_core.py it finds in
+# the target (cli\crow.py on an installation older than #187) and updates when
+# its own is newer. Until 2026-08-08 that line refused a
 # non-empty target outright, so there was no route from one version to the next
 # short of deleting the directory by hand.
 # ON LINUX IT IS THE SAME LINE IN THE OTHER SHELL's words, and it names
@@ -4992,11 +4991,10 @@ def update_state(timeout: float = 4.0, current: str = "") -> dict:
     that promises a version -- the same rule `update_notice` follows for the
     line it prints.
     """
-    # THE CALLER MAY KNOW BETTER, AND ONE OF THEM DOES. `CLIENT_VERSION` is
-    # assigned on import by cli/crow.py; the window does not import that file,
-    # it reads the literal out of it. Left to the constant, the window would
-    # compare against "" -- which `parse_version` refuses, so `is_newer` would
-    # answer False for every release there will ever be.
+    # `current` lets a caller compare another version than this file's own
+    # literal; left empty it is `CLIENT_VERSION`. Until #187 that constant was
+    # "" unless the terminal client assigned it, which is why the parameter
+    # exists.
     current = current or CLIENT_VERSION
     latest = fetch_latest_version(timeout)
     return {"current": current, "latest": latest,
@@ -6221,10 +6219,10 @@ class ReplyEvents:
     nothing and gets silence.
 
     THE FIRST FOUR are the THIRTEEN terminal lines the old `stream_reply` in
-    cli/crow.py carried -- two signature parameters (`out=sys.stdout`,
+    the terminal client carried -- two signature parameters (`out=sys.stdout`,
     `prefix: str = ""`) and eleven statements -- regrouped by the moment they
-    fired at. cli/crow.py's `TerminalEvents` holds those eleven statements now,
-    unchanged, and its `stream_reply` still takes the two parameters:
+    fired at. The client's `TerminalEvents` held those eleven statements until
+    #187 removed it; "the CLI" below is that client:
 
       reply_started   -- before the first byte is asked for. The CLI builds its
                          renderer here and starts the bird.
@@ -6318,8 +6316,8 @@ class ReasoningBlocks:
     IT LIVES IN THE CORE BECAUSE BOTH SURFACES NEED IT. The terminal shows and
     hides a block, the window folds and unfolds one -- two presentations of one
     decision. Written in cli/crow_gui.py it would be the second truth this
-    whole split exists to prevent; written in cli/crow.py the window would have
-    to reach into a terminal to find out what a thought is.
+    whole split exists to prevent; written in the terminal client the window
+    would have had to reach into a terminal to find out what a thought is.
 
     IT ALSO COUNTS, and that is not a convenience. `format_timings` prints
     `thinking NN%` from `_reasoning_chars`/`_content_chars`. Counted beside the
@@ -6439,13 +6437,11 @@ class CodeFences:
     CODE IS HELD TO ITS LINE, PROSE IS NOT. Prose flows as it arrives, so the
     answer appears while it is generated; a code line is held until its newline,
     because a fence cannot be recognised from half a line. That is one line of
-    latency inside a block and none outside -- the same trade cli/crow.py's
-    Renderer makes, for the same reason.
+    latency inside a block and none outside -- the same trade the terminal
+    client's Renderer made, for the same reason.
 
-    ONLY THE WINDOW IS WIRED TO IT TODAY, and manifests/shared-core.json says so
-    with a reason rather than leaving it to be noticed: the terminal's Renderer
-    carries its own fence handling, moving it onto this is a rewrite of the
-    thing that draws every CLI answer, and that is not this stage.
+    ONLY THE WINDOW IS WIRED TO IT. The terminal client carried its own fence
+    handling until #187 removed it.
     """
 
     # A bare language tag: letters, digits and the punctuation that appears in
@@ -6839,16 +6835,14 @@ def stream_reply(
 
     NOTHING IN HERE WRITES TO A SCREEN. Until this seam existed the function
     took `out` and `prefix`, built a Renderer and a Raven and printed as it
-    read; those thirteen lines are four calls on `events` now, and cli/crow.py
-    hands over an events object that does character for character what the
-    thirteen lines did. `events=None` means silence, which is what a probe or
-    a test wants.
+    read; those thirteen lines are four calls on `events` now, and a client
+    hands over an events object that draws them its own way. `events=None`
+    means silence, which is what a probe or a test wants.
 
     THE TRANSPORT IS NOT A PARAMETER, deliberately. `_post_stream` is looked up
-    as a module global at call time, and cli/crow.py's module class writes a
-    rebind of `crow._post_stream` through to this module (see `_FROM_CORE`
-    there) -- so a test double set on either name reaches this loop. A second
-    way in would be a second truth about where the bytes come from.
+    as a module global at call time, so a test double set on
+    `crow_core._post_stream` reaches this loop. A second way in would be a
+    second truth about where the bytes come from.
     """
     if events is None:
         events = ReplyEvents()
@@ -17806,7 +17800,7 @@ def mcp_catalog(doc: dict | None = None) -> "tuple[list[dict], list[str]]":
 def mcp_apply(doc: dict | None = None) -> "list[str]":
     """Rebuild the three registries from the file. Returns what was wrong with it.
 
-    IN PLACE, NEVER REBOUND. `crow.py` does `from crow_core import TOOLS`, which
+    IN PLACE, NEVER REBOUND. `crow_gui.py` does `from crow_core import TOOLS`, which
     binds the VALUE -- the same trap `SESSION_FILE` carries a comment about. A
     fresh list here would leave every surface holding the old one, and both
     halves would work, on different state.
@@ -20302,8 +20296,7 @@ atexit.register(forget_mcp_servers)
 # `/context`, `/thoughts`, `/mode`, `/exit` and `/quit` did in the window until
 # now -- six of the seven.
 #
-# `crow.py` keeps the prose of `HELP` and is pinned against this tuple; the
-# window reads the tuple directly. Neither owns the other.
+# The window reads the tuple directly.
 # #143 E3 added /delegate and /subtasks: the USER starts a second session on
 # the remote subtask model, straight from the composer or the terminal line,
 # with no turn and no slot involved -- which is why both surfaces may answer
@@ -24151,8 +24144,8 @@ def _cache_key(name: str, arguments: str) -> tuple | None:
     """
     # EVERY MCP TOOL IS `run_command`'S CASE, and it is not in the set above
     # because the set cannot hold it: the names arrive from `mcp.json` at import,
-    # `NEVER_CACHED` is a frozenset, and rebinding it would leave `crow.py`
-    # holding the old one -- it imports the VALUE. A prefix test also holds for a
+    # `NEVER_CACHED` is a frozenset, and rebinding it would leave any module
+    # that imported the VALUE holding the old one. A prefix test also holds for a
     # server added after this line was written, which a list would not.
     #
     # The reason is the one `run_command` carries: the result is not a function
@@ -27227,8 +27220,8 @@ def font_installed() -> list[str]:
 
 # THE ONE BLOCK IN HERE THAT CAN PRINT, and it is named rather than hidden: the
 # `if verbose:` line below is the only print() call in this file. Nothing in
-# this repository passes verbose=True -- ensure_font() in cli/crow.py calls
-# install_font() bare, and the suite calls it bare -- so on every path that
+# this repository passes verbose=True -- the suite calls install_font() bare,
+# and the terminal client's ensure_font() did until #187 -- so on every path that
 # exists today it is unreachable. A second client that wants the message takes
 # it as a return code, not as stdout.
 #

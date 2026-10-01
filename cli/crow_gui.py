@@ -21,13 +21,12 @@ speaks through `TurnEvents`/`ReplyEvents`; each callback becomes one JSON messag
 handed to the page. tools/check_shared_core.py holds that split against
 manifests/shared-core.json.
 
-TOOL CALLS RUN, AS THEY DO IN THE TERMINAL. The window starts with
-`execute_tools=True` and carries the switch as the tools chip: one click, and it
-only shows them instead. It matches `cli/crow.py`, which runs them unless given
-`--no-run-tools`; a window that showed them instead would answer the same
-question differently from the terminal, and that difference is what #90 exists
-to exclude. Shown-only remains one click away, and the chip names the mode in
-both states, so the answer is never silent.
+TOOL CALLS RUN. The window starts with `execute_tools=True` and carries the
+switch as the tools chip: one click, and it only shows them instead. It matched
+the terminal client (removed with #187), which ran them unless given
+`--no-run-tools`; #90 existed to keep the two surfaces from answering the same
+question differently. Shown-only remains one click away, and the chip names the
+mode in both states, so the answer is never silent.
 
 The permission question is NOT answered here: #88 (`/mode manual, allowedit,
 auto`) is what binds intent to permission, and it binds both clients or neither.
@@ -151,8 +150,6 @@ from crow_core import (  # noqa: E402
     TurnEvents,
 )
 
-_VERSION_LITERAL = re.compile(r'^VERSION\s*=\s*"([^"]+)"', re.M)
-
 # The window ships a read timeout where the terminal runs without one. Measured
 # 2026-08-13: a recv that is ALREADY blocked is not woken by closing the socket
 # from another thread, so the only bound on it is the timeout it started with.
@@ -171,8 +168,8 @@ _VERSION_LITERAL = re.compile(r'^VERSION\s*=\s*"([^"]+)"', re.M)
 # the only place that disagreed, and no check reads this constant.
 READ_TIMEOUT_S = 600.0
 
-# WINDOW SETTINGS, AND THEY ARE THE WINDOW'S ALONE. The terminal client has no
-# theme to pick, so this does not belong in the core -- check_shared_core would
+# WINDOW SETTINGS, AND THEY ARE THE WINDOW'S ALONE. A theme is a pixel
+# decision, so this does not belong in the core -- check_shared_core would
 # be right to call a copy of it there a second decision. It sits beside
 # roots.json for the same reason roots.json sits there: it is remembered ACROSS
 # chats, so it cannot live in a chat file.
@@ -693,14 +690,9 @@ def code_width_setting() -> int:
     return int(value) if CODE_MIN <= value <= CODE_MAX else CODE_DEFAULT
 
 
-def client_version(path: str | None = None) -> str:
-    """The client version, read out of cli/crow.py. "" when unreadable."""
-    try:
-        with open(path or os.path.join(HERE, "crow.py"), encoding="utf-8") as fh:
-            found = _VERSION_LITERAL.search(fh.read())
-    except OSError:
-        return ""
-    return found.group(1) if found else ""
+def client_version() -> str:
+    """The client version: the literal in cli/crow_core.py (#187)."""
+    return crow_core.VERSION
 
 
 # -- #308 / #311: the images Crow makes, from the first progress line to the file
@@ -10998,7 +10990,7 @@ DEAD_WEBPROCESS_MARKS = ("Unsupported result type (601)",
 
 # pywebview's own "the window/GUI is gone" exception type, matched by NAME:
 # importing `webview.errors` at module top would make this file need pywebview
-# to be importable at all, and the terminal client must not.
+# to be importable at all, and the tests and checkers that import it must not.
 CLOSED_EXC_NAMES = ("WebViewException",)
 
 # ONE stderr line per failure class, and the transient class shares a cap:
@@ -13055,8 +13047,8 @@ class Api:
             self._late_session()
             return
         try:
-            # #121. The pin is read before the payload -- see the same two lines
-            # in `crow.py`. A file without one composes to what every release up
+            # #121. The pin is read before the payload. A file without one
+            # composes to what every release up
             # to here sent, so no existing cache is disturbed by this.
             restored = load_session(
                 spot["base_url"],
@@ -13167,10 +13159,8 @@ class Api:
     def tools_listing() -> str:
         """What the model can call, derived from TOOLS rather than written here.
 
-        THE SAME SOURCE THE TERMINAL USES. `crow.py`'s `format_tools` builds its
-        listing out of the same list; a second one typed by hand would drift the
-        first time a tool is added, and the window would name something the
-        model does not have.
+        A listing typed by hand would drift the first time a tool is added,
+        and the window would name something the model does not have.
         """
         lines = []
         for entry in TOOLS:
@@ -13197,9 +13187,7 @@ class Api:
     #      operations, and the answer asserted they were one.
     #
     # Running the command has neither failure mode: no prose to be wrong about,
-    # and no mapping to get wrong. What each one does here is what the same word
-    # does in `crow.py`'s `run_slash`, which is the only definition either
-    # surface gets to have.
+    # and no mapping to get wrong.
     WHAT_THEY_DO = {
         "/help": "this list.",
         "/tools": "what the model can call.",
@@ -13228,7 +13216,7 @@ class Api:
     }
 
     def help_listing(self) -> str:
-        """The window's own list. NOT crow.py's HELP, which promises a terminal.
+        """The window's own list of the slash commands.
 
         Built from `crow_core.SLASH_COMMANDS` rather than from this class's own
         keys, so a command added to the shared list and forgotten here shows up
@@ -18533,10 +18521,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--language", default=os.environ.get("CROW_LANGUAGE") or None)
     parser.add_argument("--no-session", dest="session", action="store_false",
                         default=True)
-    # ON BY DEFAULT SINCE 2026-08-13, and the reason is the other client.
-    # cli/crow.py runs tool calls unless told otherwise (--no-run-tools), so a
-    # window that shows them instead answers the same question differently --
-    # which is the failure mode #90 exists to exclude, not a safety margin. The
+    # ON BY DEFAULT SINCE 2026-08-13, and the reason was the other client.
+    # The terminal client (removed with #187) ran tool calls unless told
+    # otherwise (--no-run-tools), so a window that showed them instead answered
+    # the same question differently -- the failure mode #90 existed to exclude,
+    # not a safety margin. The
     # earlier default was off because behind a window nobody sees `run_command`
     # start a shell; driven live on 2026-08-13 that argument turned out to cut
     # the other way. A user who asks for a file gets a tool call and no answer,
@@ -18565,9 +18554,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not let the model save memories after a turn")
     parser.add_argument("--no-tools", dest="execute_tools", action="store_false",
                         help="show tool calls instead of running them")
-    # #88, the same flag the terminal client takes: the START level, with the
-    # dropdown beside `send` as the same switch during a session.
-    # DEFAULT None, NOT `auto`, and the terminal's parser says the same. It is
+    # #88: the START level, with the dropdown beside `send` as the same switch
+    # during a session.
+    # DEFAULT None, NOT `auto`. It is
     # the only place that can tell "the user typed auto" from "the user typed
     # nothing", and #92 needs the difference: a level remembered for a working
     # directory fills a silence and never overrules a flag. `ready()` resolves
@@ -18599,8 +18588,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         sys.stderr.write(
             "crow: this window needs pywebview.\n"
-            "      pip install pywebview\n"
-            "      The terminal client needs nothing: python cli/crow.py\n")
+            "      pip install pywebview\n")
         return 2
     daemon_bridge_threads()
 

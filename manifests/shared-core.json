@@ -11,14 +11,9 @@
  "core_module": "crow_core",
  "surfaces": [
   {
-   "path": "cli/crow.py",
-   "label": "cli",
-   "why": "The terminal client. It owns the screen, the slash commands, VERSION and nothing else; every behaviour a second client would need sits behind the import block at the top of it."
-  },
-  {
    "path": "cli/crow_gui.py",
    "label": "gui",
-   "why": "The window, and the reason this checker can say anything at all. Until it landed the core had ONE consumer, every predicate below held by construction, and a green result here was the tool measuring itself - which is why the honesty rule refuses to report on fewer than two surfaces. It owns widgets, the tick and the German surface language; it owns no decision. It lives in cli/ and not gui/ because tools/pack-release.ps1:431 copies cli/ as a whole and nothing else, so a gui/ would be absent from the package with nothing saying so."
+   "why": "The window, and since #187 the only client: the terminal client cli/crow.py was removed, so the window is the client. Until it landed the core had ONE consumer (the terminal) and a green result here was the tool measuring itself; since #187 it is one consumer again, and the honesty rule asks for at least one declared surface plus the helpers held to predicates (1)-(3). It owns widgets, the tick and the German surface language; it owns no decision. It lives in cli/ and not gui/ because tools/pack-release.ps1:431 copies cli/ as a whole and nothing else, so a gui/ would be absent from the package with nothing saying so."
   }
  ],
  "helpers": [
@@ -234,7 +229,7 @@
    ],
    "only": {
     "surface": "cli/crow_gui.py",
-    "because": "The terminal must NOT write it, and that is the entry rather than a comment: `--root` states where THAT run works, while `active` decides where the WINDOW opens next time. They were nearly one key -- `recent[0]` -- and `crow --root D:\\x` in a terminal would then have silently moved the window's next start. A call site appearing in cli/crow.py is that coupling coming back, and this line is what turns it red."
+    "because": "The terminal must NOT write it, and that is the entry rather than a comment: `--root` states where THAT run works, while `active` decides where the WINDOW opens next time. They were nearly one key -- `recent[0]` -- and `crow --root D:\\x` in a terminal would then have silently moved the window's next start. The terminal client went with #187; the line stays so a second surface that writes it goes red."
    },
    "why": "#92. Written only where a person chose: the picker, or 'no folder'. `remember_root` fills the menu and is a different fact -- both surfaces write that one."
   },
@@ -287,7 +282,7 @@
    ],
    "only": {
     "surface": "cli/crow_gui.py",
-    "because": "#90's capability 6 splits into two halves - WHERE a code block begins and ends, which is a decision, and how it is drawn with a copy button, which is a surface. This is the first half, and today only the window is wired to it. The terminal still carries its own fence handling inside cli/crow.py's Renderer, which also owns the spill file, the highlighter and the live line counter; moving that onto this class changes what every CLI answer prints and is not E12's stage. The 'only' line is here so that debt is a declaration somebody can act on rather than a duplication nobody noticed."
+    "because": "#90's capability 6 splits into two halves - WHERE a code block begins and ends, which is a decision, and how it is drawn with a copy button, which is a surface. This is the first half, and today only the window is wired to it. The terminal client carried its own fence handling in its Renderer until #187 removed it. The 'only' line stays so a second surface has to be wired to this class or declared here."
    },
    "why": "Two clients with two ideas of what a fence is means one frames what the other reads as prose. The rule this class carries and the Renderer does not: a fence is a WHOLE line, so 'call it with ```json' mid-sentence opens nothing, and what follows the backticks has to be a bare language tag."
   },
@@ -349,15 +344,7 @@
   {
    "name": "start_server",
    "kind": "def",
-   "user_entry": true,
-   "evidence": [
-    "start_server("
-   ],
-   "only": {
-    "surface": "cli/crow.py",
-    "because": "#114 gives the terminal the boot. The window reaches a server through `model_command` instead (#115), which is where the question this stage did not answer is answered -- what happens to the open conversation -- and it answers it in one sentence both surfaces print. A DIRECT call site in cli/crow_gui.py would be a second boot path with its own idea of that, and the failure it invites is the one nothing reports: two llama-servers overbook the card, and the driver moves what does not fit into host memory without printing a word."
-   },
-   "why": "The one place that turns a model key into a running server. Written twice it would be two command lines, and a fourth copy of the operating point is exactly what manifests/operating-point.json exists to prevent -- three copies already drifted once, on 2026-08-10."
+   "why": "The one place that turns a model key into a running server. Written twice it would be two command lines, and a fourth copy of the operating point is exactly what manifests/operating-point.json exists to prevent -- three copies already drifted once, on 2026-08-10. NO LONGER A USER ENTRY since #187: the terminal client that called it directly (#114) is gone, and the window reaches a server through `model_command` (#115) -- a DIRECT call site in cli/crow_gui.py would be a second boot path, and two llama-servers overbook the card without a word."
   },
   {
    "name": "model_command",

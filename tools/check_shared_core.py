@@ -2,13 +2,14 @@
 
 WHY THIS EXISTS. #90's third done criterion is "shared behaviour lives in exactly
 one place, and there is a check that says so". The extraction into cli/crow_core.py
-does NOT prove it: while cli/crow.py is the only caller, the core has exactly one
-consumer and any checker pointed at that arrangement is measuring itself. What
-this file measures is the arrangement AFTER a second surface lands - and it says
-so out loud until one does, rather than reporting green at a repository that
-cannot yet be wrong.
+did NOT prove it while the terminal client was the only caller; the window made
+it two. #187 removed the terminal client (cli/crow.py), so the window is the one
+surface again. What keeps this checker from measuring only itself now is the
+helpers (crow_platform, crow_voice, crow_remote), which are held to predicates
+(1)-(3) like a surface, and the undeclared-surface rule, which turns a second
+client red the day it lands without a manifest entry.
 
-RAW TEXT, NOT AN IMPORT. Importing cli/crow.py and asking whether it has a
+RAW TEXT, NOT AN IMPORT. Importing cli/crow_gui.py and asking whether it has a
 `tool_write_file` cannot tell `def tool_write_file` from
 `from crow_core import tool_write_file` - and that is precisely the distinction
 this checker exists to make. So both are read as text.
@@ -97,10 +98,14 @@ from check_operating_point import code_only, read  # noqa: E402
 # these and is NOT declared in the manifest is.
 SURFACE_DIRS = ("cli", "gui")
 
-# A repository with one surface cannot demonstrate single-sourcing: the core has
-# exactly one consumer, so every predicate below is satisfied by construction.
-# Reporting green there would be the checker measuring itself.
-MIN_SURFACES = 2
+# THE HONESTY RULE, LOWERED TO ONE WITH #187. It was 2: one surface alone cannot
+# demonstrate single-sourcing, the core has one consumer and predicate (4) holds
+# by construction. #187 removed the terminal client, so ONE surface is now the
+# product rather than an unfinished state, and a rule that is red forever is a
+# rule nobody reads. What it still refuses is a manifest with no surface at all.
+# Predicates (1)-(3) keep their teeth through the helpers, which are consumers
+# of the core too; (4) is the one that only means something with two surfaces.
+MIN_SURFACES = 1
 
 # The three shapes a declared name can take, and the two anchors each needs.
 # `binding` is here because TOOL_IMPL is a dict, not a def - hanging a def
@@ -239,9 +244,9 @@ def load_manifest(path):
 def import_statements(text, module):
     """Every `from <module> import ...` statement, as (start, end, body).
 
-    Parenthesised and continued forms both, because cli/crow.py's block is one
-    statement ninety names long. The span is returned so the caller can blank it:
-    a name that appears ONLY in the import list is imported, not used, and
+    Parenthesised and continued forms both, because a surface's block can be
+    one statement ninety names long (the terminal client's was, until #187).
+    The span is returned so the caller can blank it: a name that appears ONLY in the import list is imported, not used, and
     counting it as a use would make predicate (3) satisfy itself.
     """
     out = []
@@ -469,8 +474,8 @@ def main(argv):
     total += 1
     if len(surfaces) < MIN_SURFACES:
         failed += 1
-        print("  FAILED   %-34s %d declared (%s), not %d -- with one consumer the "
-              "core cannot be shown to be single-source, and this checker would be "
+        print("  FAILED   %-34s %d declared (%s), not %d -- with no surface there "
+              "is nothing to hold the core against, and this checker would be "
               "measuring itself"
               % ("surfaces", len(surfaces), ", ".join(s[0] for s in surfaces),
                  MIN_SURFACES))

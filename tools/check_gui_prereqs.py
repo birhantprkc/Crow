@@ -43,8 +43,9 @@ THE THREE POINTS, all of them free:
   (ii)  GLYPHS. Every character any surface writes is in the cmap of every face
         this repository ships, and the three ranges the existing comments record
         still measure what those comments say. This point went red on its first
-        run and the finding is real: cli/crow.py prints U+2692 as its tool-call
-        marker and neither shipped face has that glyph. See KNOWN_UNCOVERED.
+        run and the finding was real: cli/crow.py (the terminal client, removed
+        with #187) printed U+2692 as its tool-call marker and neither shipped
+        face has that glyph. See KNOWN_UNCOVERED.
   (iii) WINDOW RUNTIME. pywebview is importable AND a WebView2 runtime is
         registered. Both, because they fail separately: the import says the
         Python package is there, the registry says a window can actually open.
@@ -60,8 +61,8 @@ cmap of the shipped .ttf is the only place where "the user who installed our
 package has this glyph" is a fact rather than a hope.
 
 WHY STRING LITERALS COUNT AND COMMENTS DO NOT, and the distinction is not
-pedantry: cli/crow.py carries the braille cells (u+280B and friends) inside the
-COMMENT that records why the spinner avoids them. A scan that read comments
+pedantry: cli/crow.py carried the braille cells (u+280B and friends) inside the
+COMMENT that recorded why the spinner avoids them (until #187 removed it). A scan that read comments
 would be red at the very sentence explaining the rule, and a checker that is
 permanently red gets stopped rather than read. Docstrings ARE scanned - they
 reach the screen through --help and /help, so a character in one can be drawn.
@@ -153,8 +154,8 @@ CLIPBOARD_TOOLS = ("wl-paste", "xclip")
 NVIDIA_SYNC_ENV = "__NV_DISABLE_EXPLICIT_SYNC"
 
 # The three ranges the existing comments record, with the numbers those comments
-# state. cli/crow.py:233-234 says U+2580-259F is 32 of 32 and U+2500-257F is 128
-# of 128; cli/crow.py:318-319 and cli/crow_core.py:2177-2182 say braille
+# state. cli/crow_core.py beside FONT_FAMILY says U+2580-259F is 32 of 32 and
+# U+2500-257F is 128 of 128 and braille
 # U+2800-28FF is 0 of 256, measured 2026-08-07 against Cascadia Mono as a
 # control. Re-measured here per shipped face. A deviation does not mean the GUI
 # broke - it means one of those comments no longer describes the file beside it,
@@ -166,10 +167,11 @@ RECORDED_RANGES = (
 )
 
 # WHAT POINT (ii) FOUND ON ITS FIRST RUN, declared here rather than swallowed or
-# quietly fixed. cli/crow.py:875 and :903 print U+2692 as the tool-call marker,
+# quietly fixed. cli/crow.py:875 and :903 (the terminal client, removed with
+# #187) printed U+2692 as the tool-call marker,
 # and neither shipped face has that glyph: coverage stops at U+25D9 plus U+FFFD,
 # 674 codepoints in each file [measured 2026-08-13]. Windows answers a missing
-# glyph with a substitute face - the exact fallback cli/crow.py:317-321 keeps the
+# glyph with a substitute face - the exact fallback that client kept its
 # spinner away from braille to avoid. It is a CLI defect, it predates this stage,
 # and repairing it here would be the stage that was sent to MEASURE the client
 # editing what it prints. So it is declared: named, reasoned, and printed on
@@ -181,8 +183,8 @@ RECORDED_RANGES = (
 # carries the same symmetric rule against its manifest, for the same reason.
 # EMPTY SINCE 2026-08-14, and the entry that was here is why this tuple exists.
 # U+2692 was the CLI's tool-call marker and neither shipped face had the glyph:
-# Windows drew it from a substitute face, the exact fallback cli/crow.py keeps
-# its spinner away from braille to avoid. E9 measured it, declared it here
+# Windows drew it from a substitute face, the exact fallback cli/crow.py kept
+# its spinner away from braille to avoid (the file went with #187). E9 measured it, declared it here
 # rather than swallowing it, and left the fix to a later stage. The marker is
 # now U+25CF -- the same one the window already draws for a tool call, so both
 # surfaces mark a call the same way and the glyph is in both faces.
@@ -310,8 +312,8 @@ def literal_chars(text):
     self-test writes it exactly that way for this reason.
 
     Comments carry no AST node at all, which is the separation this rule needs
-    anyway: cli/crow.py keeps its braille sample inside the comment that records
-    why the spinner avoids braille, and a checker red at that sentence would be
+    anyway: a comment that records why a spinner avoids braille may quote the
+    cells (the terminal client's did), and a checker red at that sentence would be
     stopped rather than read. Docstrings DO carry one - they reach the screen
     through --help and /help, so a character in one can be drawn.
     """
@@ -338,8 +340,8 @@ def literal_chars(text):
 def surface_files(repo):
     """Every client source under the surface directories, sorted, as (rel, path).
 
-    Test files are left out on purpose: a suite is not a surface, and
-    cli/test_crow.py quotes the wordmark inside an assertion. A directory that
+    Test files are left out on purpose: a suite is not a surface, and a test
+    may quote a wordmark inside an assertion. A directory that
     does not exist yet (gui/) is not an error - it is where the second surface
     lands, and this tool picks it up the day it does.
     """
@@ -599,9 +601,9 @@ def check_glyphs(repo, faces):
             continue
         for ch, lines in found.items():
             wanted.setdefault(ch, [])
-            # Every site, not just the first in the file: U+2692 is written at
-            # cli/crow.py:875 AND :903, and a report that named one of them
-            # would send the reader to fix half a defect.
+            # Every site, not just the first in the file: U+2692 was written at
+            # cli/crow.py:875 AND :903 (removed with #187), and a report that
+            # named one of them would send the reader to fix half a defect.
             for line in lines:
                 wanted[ch].append((rel, line))
 
@@ -746,8 +748,9 @@ def main(argv):
                   % ("(i) family in fontconfig", wanted))
             print("             fc-list reports %d families, none of them %r"
                   % (len(listed), wanted))
-            print("             `python cli/crow.py` installs the shipped faces "
-                  "into %s on first start" % crow_platform.font_store())
+            print("             crow_core.install_font() copies the shipped "
+                  "faces into %s; since #187 no client calls it on start"
+                  % crow_platform.font_store())
             for near in neighbours(wanted, listed):
                 print("             fontconfig does list %s" % near)
         else:
@@ -861,8 +864,7 @@ def main(argv):
             failed += 1
             print("  FAILED   %-30s pywebview is not importable -- the window "
                   "cannot start" % "(iii) window runtime")
-            print("             the installer runs `pip install pywebview`; the "
-                  "terminal client does not need it")
+            print("             the installer runs `pip install pywebview`")
         elif runtime is None:
             failed += 1
             print("  FAILED   %-30s pywebview %s, but NO WebView2 runtime in any "

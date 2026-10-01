@@ -12,12 +12,12 @@ CASE 5 IS THE ONE THAT PAID FOR ITSELF. The fixture writes its braille cell as
 "\\u280b" - seven ASCII characters in the file. The first version of the tool
 scanned TOKEN TEXT and would have called that fixture clean; worse, Python 3.12
 splits f-strings into FSTRING_START/MIDDLE/END, so a token scan misses every
-character inside an f-string, which is where cli/crow.py:875 keeps the marker
-that turned out to be uncovered. The tool parses now. This case is what says so.
+character inside an f-string, which is where cli/crow.py:875 (the terminal
+client, removed with #187) kept the marker that turned out to be uncovered. The tool parses now. This case is what says so.
 
 CASE 6 IS ITS PAIR AND IS NOT OPTIONAL. The same braille cell inside a COMMENT
-must stay green: cli/crow.py:317-321 records the braille measurement WITH the
-sample cells in it, and a checker red at that sentence would be a checker
+must stay green: cli/crow.py:317-321 (removed with #187) recorded the braille
+measurement WITH the sample cells in it, and a checker red at that sentence would be a checker
 someone deletes.
 
 CASE 7 GUARDS THE ESCAPE HATCH. KNOWN_UNCOVERED lets a found-but-not-fixed

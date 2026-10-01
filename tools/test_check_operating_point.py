@@ -128,7 +128,7 @@ def manifest_sampling():
 
 
 def client_source(sampling, keys=None, body_keys=None, prose=False):
-    """A client that writes the sampling defaults the way cli/crow.py does.
+    """A client that writes the sampling defaults the way the core does.
 
     EVERY NUMBER COMES OUT OF THE MANIFEST the fixture just wrote, and that is
     not tidiness. Case 9 went quietly vacuous once because it carried a typed
@@ -190,7 +190,7 @@ def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None,
                  % (ver, install if install is not None else GOOD_LINE,
                     gap + QWEN_LINE + gap
                     + (install_flash if install_flash is not None else FLASH_LINE)))
-    with open(os.path.join(root, "cli", "crow.py"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(root, "cli", "crow_core.py"), "w", encoding="utf-8") as fh:
         fh.write('VERSION = "%s"\n' % ver)
         fh.write(client_source(src["sampling"]) if client is None else client)
     if gui is not None:
@@ -345,7 +345,7 @@ def main():
         #      core is supposed to hold.
         code, out = run(fixture(tmp, client="", gui=client_source(samp)))
         check("15 the one copy has to sit in the core",
-              code == 1 and "not in the core" in out and "cli/crow.py" in out,
+              code == 1 and "not in the core" in out and "cli/crow_core.py" in out,
               out.strip()[-300:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
