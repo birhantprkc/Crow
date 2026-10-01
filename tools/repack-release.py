@@ -17,8 +17,8 @@ this takes bin/ FROM THE PREVIOUS PACKAGE, verified against that package's own
 MANIFEST.json before a byte is reused, and stages everything else from the
 checkout exactly as pack-release.ps1 does: cli/ and kits/ without test_*.py,
 __pycache__ and runs/ logs (2.1.0 and 2.8.5 each shipped ten of them),
-templates/0731-chat-template.jinja, manifests/operating-point.json, the three
-root files. MANIFEST.json is written in the shape install.ps1 reads: a JSON
+templates/0731-chat-template.jinja, manifests/operating-point.json,
+manifests/stack.json (the boot menu's, #196 P1), the three root files. MANIFEST.json is written in the shape install.ps1 reads: a JSON
 array of {path, bytes, sha256}, backslash paths, upper-case hex.
 
 HOW IT IS CHECKED. --verify re-reads the finished zip the way install.ps1 does
@@ -71,7 +71,8 @@ REPO = os.path.dirname(HERE)
 # ---- what may ship (keep identical to the $SHIP_* / $EXCLUDE_* in pack-release.ps1)
 SHIP_ROOT_FILES = ("LICENSE", "NOTICE", "README.md")
 SHIP_TOP_DIRS = ("bin", "cli", "kits")
-SHIP_SINGLE_FILES = ("templates\\0731-chat-template.jinja", "manifests\\operating-point.json")
+SHIP_SINGLE_FILES = ("templates\\0731-chat-template.jinja", "manifests\\operating-point.json",
+                     "manifests\\stack.json")
 EXCLUDE_DIRS = ("runs", "__pycache__", ".crow", "digests", "sessions")
 EXCLUDE_FILES = ("*.log", "*.pyc", "*.pyo", "*.jsonl", "test_*.py", ".env*", "secrets.json",
                  "session*.json", "state*.json", "settings.json", "*_tokens.json")
@@ -353,6 +354,14 @@ def stage_from_checkout(repo: str = REPO) -> dict[str, bytes]:
     op = read_bytes(os.path.join(repo, "manifests", "operating-point.json"))
     json.loads(op.decode("utf-8-sig"))  # must survive as readable JSON
     files["manifests\\operating-point.json"] = op
+    # #196 P1: cli/crow_boot.py starts every operating point from this file and
+    # finds it at ..\manifests\stack.json beside cli\. Copied when the checkout
+    # has it (every checkout since #196 C4 does) and read back as JSON.
+    stack = os.path.join(repo, "manifests", "stack.json")
+    if os.path.isfile(stack):
+        data = read_bytes(stack)
+        json.loads(data.decode("utf-8-sig"))
+        files["manifests\\stack.json"] = data
     if "cli\\fonts\\OFL.txt" not in files:
         raise SystemExit("cli/fonts/OFL.txt missing -- the typeface may not ship without it")
     # The voxel kit (#298) ships in every package, beside cli\ -- pack-release.ps1 does the same.
