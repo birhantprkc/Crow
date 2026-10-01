@@ -92,7 +92,8 @@ import crow_platform
 # is None, is_newer() is False whenever either side does not parse, and
 # update_notice therefore says nothing at all. A client that forgot to hand its
 # version over stays quiet instead of announcing an update to everybody.
-CLIENT_VERSION = ""
+VERSION = "2.8.5"
+CLIENT_VERSION = VERSION
 
 
 # FLASH-NEXT'S PORT SINCE 2.0.0, and the default has moved twice for the same
