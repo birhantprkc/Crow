@@ -18,6 +18,19 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+# The boot menu, the operating-point window and CrowSetup are Windows-only so far:
+# manifests/stack.json names Windows binaries only (#196), so every start fails on
+# another OS before a fake is reached. Owner decision 2026-10-01: skip, not rewrite.
+# load_tests, not SkipTest at import: CI names the modules, and the loader only
+# turns an import-time SkipTest into a skip under discover.
+if sys.platform != "win32":
+    def load_tests(loader, tests, pattern):
+        @unittest.skip("stack.json names Windows binaries only (#196)")
+        class WindowsOnly(unittest.TestCase):
+            def test_this_suite_runs_on_windows(self):
+                pass
+        return unittest.TestSuite([WindowsOnly("test_this_suite_runs_on_windows")])
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
