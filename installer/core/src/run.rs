@@ -1,9 +1,1052 @@
 //! T4: the install run in order, emitting [`Event`]s; used by the window,
-//! `--headless` and the tests alike.
+//! `--headless`, `--selftest` and the tests alike.
+//!
+//! THE ORDER: preflight, (welcome-back replay), wait for Start or Resume, plan,
+//! the two packages, install Crow, install the engine, ensure Python, the model
+//! files (whisper included, in the plan's order), convert (when the plan
+//! carries derived files: the image stack), check every selected point,
+//! shortcuts, Done. Every module call goes through [`Steps`], so the order,
+//! resume and pause logic is tested with a fake and runs unchanged on
+//! [`RealSteps`].
+//!
+//! THE STATE FILE is `<launch root>\setup\state.json`, where the launch root is
+//! `--install-root` or `%LOCALAPPDATA%\Crow` ([`state_path`]). A normal start
+//! therefore always finds `%LOCALAPPDATA%\Crow\setup\state.json`, whatever
+//! install location was picked in the window (the saved [`Selection`] carries
+//! that location), and a test install with `--install-root` never touches the
+//! real one.
+//!
+//! RESUME: a file whose state says `verified` is not fetched again when its
+//! destination exists, or when the convert step is done (convert deletes the
+//! image stack's `text_encoder/`, which the state still lists as verified).
+//! Install steps are recorded in `steps_done`: `crow:<sha256>` and
+//! `engine:<sha256>` (a new package re-installs), `convert`, `shortcuts`,
+//! `done`. Python and the check step always run: both are idempotent and the
+//! check is the guarantee behind "Landed".
+//!
+//! COMMANDS: Pause and Quit set the cancel flag, so a download stops inside
+//! (the fetcher polls it) and the run stops between steps. Resume clears the
+//! pause and, before Start, continues the saved selection (the welcome-back
+//! "Continue"). Retry{id} re-runs a failed file (by its id) or a failed step
+//! (by its name). OpenBootMenu and a new shortcut folder are served after Done.
 
-use crate::api::{Command, Event, Selection, Source};
+use crate::api::{Command, Event, FileJob, FileKind, Packages, Plan, PreflightReport, Selection, Source, StepStatus};
+use crate::fetch::{FetchError, FetchOptions};
+use crate::python::PythonInfo;
+use crate::state::{FileState, StateStore};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Condvar, Mutex};
 
-pub fn run(_sel: Selection, _source: Source, _on: &mut dyn FnMut(Event), _commands: Receiver<Command>) {
-    unimplemented!("T4")
+/// One method per module call the run makes. [`RealSteps`] calls the modules;
+/// tests and `--selftest` use [`testing::FakeSteps`].
+pub trait Steps {
+    fn preflight(&mut self, install_root: &Path) -> PreflightReport;
+    fn plan(&mut self, sel: &Selection) -> Result<Plan, String>;
+    /// A missing file is an empty store with `path` set.
+    fn load_state(&mut self, path: &Path) -> std::io::Result<StateStore>;
+    fn save_state(&mut self, state: &StateStore) -> std::io::Result<()>;
+    /// Whether a fetched file is still on disk (its final `dest`).
+    fn present(&mut self, job: &FileJob) -> bool;
+    /// Free bytes on the drive that holds `dir` (or its nearest existing
+    /// ancestor); 0 when unknown.
+    fn disk_free(&mut self, dir: &Path) -> u64;
+    fn download(
+        &mut self,
+        job: &FileJob,
+        state: &mut StateStore,
+        on: &mut dyn FnMut(Event),
+        cancel: &AtomicBool,
+    ) -> Result<(), FetchError>;
+    /// Returns the installed version.
+    fn install_crow(&mut self, zip: &Path, install_root: &Path) -> Result<String, String>;
+    fn install_engine(&mut self, zip: &Path, install_root: &Path) -> Result<String, String>;
+    fn ensure_python(&mut self, install_root: &Path) -> Result<PythonInfo, String>;
+    fn convert(&mut self, py: &PythonInfo, install_root: &Path, models_root: &Path) -> Result<(), String>;
+    fn check_point(&mut self, py: &PythonInfo, install_root: &Path, models_root: &Path, point: &str)
+    -> Result<(), String>;
+    fn shortcuts(&mut self, py: &PythonInfo, install_root: &Path, dirs: &[PathBuf]) -> Result<(), String>;
+    fn open_boot_menu(&mut self, py: &PythonInfo, install_root: &Path) -> Result<(), String>;
+}
+
+/// What reaches the run from outside: the contract's [`Command`]s, plus the
+/// shortcut folder picked on the "Landed" screen (not in the contract yet).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Input {
+    Command(Command),
+    ShortcutDir(PathBuf),
+}
+
+impl From<Command> for Input {
+    fn from(c: Command) -> Input {
+        Input::Command(c)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    /// `--install-root` or `%LOCALAPPDATA%\Crow`; preflight measures it.
+    pub launch_root: PathBuf,
+    pub state_path: PathBuf,
+    /// The Start menu folder; the entry is always written when this is set.
+    pub start_menu_dir: Option<PathBuf>,
+}
+
+/// How a run ended; `--headless` maps it to the exit code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    Quit,
+    Fatal(String),
+}
+
+/// `%LOCALAPPDATA%\Crow`, the default install root.
+pub fn default_install_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Crow")
+}
+
+/// `<launch root>\setup\state.json` (see the module docs).
+pub fn state_path(launch_root: &Path) -> PathBuf {
+    launch_root.join("setup").join("state.json")
+}
+
+/// `${MODELS}`: `$CROW_MODELS` when set, else `<install>/models` (stack.json).
+pub fn models_root(install_root: &Path) -> PathBuf {
+    match std::env::var_os("CROW_MODELS") {
+        Some(m) if !m.is_empty() => PathBuf::from(m),
+        _ => install_root.join("models"),
+    }
+}
+
+/// Decimal GB with one digit, MB below 1 GB (the UI's sizes).
+pub fn gb(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{} MB", bytes.div_ceil(1_000_000))
+    }
+}
+
+/// The shortcut file `crow_boot.py --create-shortcut DIR` writes.
+pub fn shortcut_file(dir: &Path) -> PathBuf {
+    dir.join("Crow.lnk")
+}
+
+// ------------------------------------------------------------------ control
+
+#[derive(Default)]
+struct Ctl {
+    paused: bool,
+    quit: bool,
+    disconnected: bool,
+    queue: VecDeque<Input>,
+}
+
+/// Shared between the run and the thread that drains the input channel.
+struct Control {
+    cancel: AtomicBool,
+    ctl: Mutex<Ctl>,
+    cv: Condvar,
+}
+
+impl Control {
+    fn listen(self: &Arc<Self>, inputs: Receiver<Input>) {
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            for input in inputs {
+                let mut c = me.ctl.lock().unwrap();
+                match &input {
+                    Input::Command(Command::Pause) => {
+                        c.paused = true;
+                        me.cancel.store(true, Ordering::SeqCst);
+                    }
+                    Input::Command(Command::Quit) => {
+                        c.quit = true;
+                        me.cancel.store(true, Ordering::SeqCst);
+                    }
+                    Input::Command(Command::Resume) => {
+                        c.paused = false;
+                        c.queue.push_back(input.clone());
+                    }
+                    _ => c.queue.push_back(input.clone()),
+                }
+                drop(c);
+                me.cv.notify_all();
+            }
+            me.ctl.lock().unwrap().disconnected = true;
+            me.cv.notify_all();
+        });
+    }
+
+    fn quit(&self) -> bool {
+        self.ctl.lock().unwrap().quit
+    }
+
+    /// Blocks while paused. False when the run has to stop (Quit).
+    fn gate(&self) -> bool {
+        let mut c = self.ctl.lock().unwrap();
+        while c.paused && !c.quit && !c.disconnected {
+            c = self.cv.wait(c).unwrap();
+        }
+        if c.quit {
+            return false;
+        }
+        // Disconnected while paused: nobody can resume, so the pause ends.
+        c.paused = false;
+        self.cancel.store(false, Ordering::SeqCst);
+        true
+    }
+
+    /// The next queued input for which `want` returns Some; other inputs are
+    /// dropped. None on Quit, or when the channel is gone and the queue empty.
+    fn wait<T>(&self, mut want: impl FnMut(&Input) -> Option<T>) -> Option<T> {
+        let mut c = self.ctl.lock().unwrap();
+        loop {
+            if c.quit {
+                return None;
+            }
+            while let Some(input) = c.queue.pop_front() {
+                if let Some(t) = want(&input) {
+                    return Some(t);
+                }
+            }
+            if c.disconnected {
+                return None;
+            }
+            c = self.cv.wait(c).unwrap();
+        }
+    }
+}
+
+// ------------------------------------------------------------------- runner
+
+enum Stop {
+    Quit,
+    Fatal(String),
+}
+
+enum FileResult {
+    Ok,
+    Failed(String),
+}
+
+struct Runner<'a> {
+    steps: &'a mut dyn Steps,
+    on: &'a mut dyn FnMut(Event),
+    opts: &'a RunOptions,
+    ctl: Arc<Control>,
+    state: StateStore,
+}
+
+/// Run the whole install. Returns when Done was emitted and the input channel
+/// is gone (or Quit came), on Quit, or on a fatal error (emitted as `Fatal`).
+pub fn run(steps: &mut dyn Steps, opts: &RunOptions, on: &mut dyn FnMut(Event), inputs: Receiver<Input>) -> Outcome {
+    let ctl = Arc::new(Control { cancel: AtomicBool::new(false), ctl: Mutex::default(), cv: Condvar::new() });
+    ctl.listen(inputs);
+    let state = StateStore { path: opts.state_path.clone(), ..StateStore::default() };
+    let mut r = Runner { steps, on, opts, ctl, state };
+    match r.go() {
+        Ok(()) => Outcome::Done,
+        Err(Stop::Quit) => {
+            r.save();
+            Outcome::Quit
+        }
+        Err(Stop::Fatal(m)) => {
+            r.save();
+            (r.on)(Event::Fatal { message: m.clone() });
+            Outcome::Fatal(m)
+        }
+    }
+}
+
+impl Runner<'_> {
+    fn emit(&mut self, e: Event) {
+        (self.on)(e)
+    }
+
+    fn save(&mut self) {
+        // Nothing to remember before a selection: closing the window at the
+        // selection screen leaves no state file behind.
+        if self.state.selection.is_none() {
+            return;
+        }
+        // A failed checkpoint costs at most a re-hash on the next start.
+        let _ = self.steps.save_state(&self.state);
+    }
+
+    fn done(&self, step: &str) -> bool {
+        self.state.steps_done.iter().any(|s| s == step)
+    }
+
+    fn mark(&mut self, step: &str) {
+        if !self.done(step) {
+            self.state.steps_done.push(step.to_string());
+        }
+        self.save();
+    }
+
+    fn step_event(&mut self, name: &str, status: StepStatus, detail: impl Into<String>) {
+        self.emit(Event::Step { name: name.to_string(), status, detail: detail.into() });
+    }
+
+    fn go(&mut self) -> Result<(), Stop> {
+        let report = self.steps.preflight(&self.opts.launch_root);
+        self.emit(Event::Preflight(report.clone()));
+
+        self.state = match self.steps.load_state(&self.opts.state_path) {
+            Ok(s) => s,
+            Err(_) => StateStore { path: self.opts.state_path.clone(), ..StateStore::default() },
+        };
+        let saved = self.state.selection.clone().filter(|_| !self.done("done"));
+        let resumable = match &saved {
+            Some(sel) => match self.steps.plan(sel) {
+                Ok(plan) => {
+                    self.replay(&plan);
+                    true
+                }
+                Err(_) => false,
+            },
+            None => false,
+        };
+
+        let (sel, fresh) = self
+            .ctl
+            .wait(|i| match i {
+                Input::Command(Command::Start(sel)) => Some((sel.clone(), true)),
+                Input::Command(Command::Resume) if resumable => saved.clone().map(|s| (s, false)),
+                _ => None,
+            })
+            .ok_or(Stop::Quit)?;
+
+        if let Some(why) = &report.hard_block {
+            return Err(Stop::Fatal(why.clone()));
+        }
+        if let Some(b) = report.blocked.iter().find(|b| sel.points.contains(&b.point)) {
+            return Err(Stop::Fatal(format!("{}: {}", b.point, b.reason)));
+        }
+        if sel.points.is_empty() {
+            return Err(Stop::Fatal("Nothing selected.".into()));
+        }
+
+        if fresh {
+            self.state.steps_done.retain(|s| s != "shortcuts" && s != "done");
+        }
+        self.state.selection = Some(sel.clone());
+        self.save();
+
+        let plan = self.steps.plan(&sel).map_err(Stop::Fatal)?;
+        self.emit(Event::Planned(plan.clone()));
+        let root = sel.install_root.clone();
+        let models = models_root(&root);
+        self.disk_check(&plan, &root)?;
+
+        // The two packages, then Crow, then the engine.
+        let packages: Vec<&FileJob> =
+            plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::CrowPackage | FileKind::EnginePackage)).collect();
+        self.fetch_all(&packages)?;
+        for (kind, name) in [(FileKind::CrowPackage, "crow"), (FileKind::EnginePackage, "engine")] {
+            let Some(job) = plan.jobs.iter().find(|j| j.kind == kind) else {
+                return Err(Stop::Fatal(format!("The plan carries no {name} package.")));
+            };
+            let key = format!("{name}:{}", job.sha256);
+            if self.done(&key) {
+                self.step_event(name, StepStatus::Ok, "Installed.");
+                continue;
+            }
+            let zip = job.dest.clone();
+            let root2 = root.clone();
+            self.step(name, &mut |s| {
+                let v = if kind == FileKind::CrowPackage {
+                    s.install_crow(&zip, &root2)?
+                } else {
+                    s.install_engine(&zip, &root2)?
+                };
+                Ok(format!("Installed. Version {v}."))
+            })?;
+            self.mark(&key);
+        }
+
+        let mut py = None;
+        let root2 = root.clone();
+        self.step("python", &mut |s| {
+            let p = s.ensure_python(&root2)?;
+            let how = if p.bundled { "installed" } else { "found" };
+            let d = format!("Python {} {how}.", p.version);
+            py = Some(p);
+            Ok(d)
+        })?;
+        let py = py.expect("python step succeeded");
+
+        let models_jobs: Vec<&FileJob> =
+            plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::Model | FileKind::Whisper)).collect();
+        self.fetch_all(&models_jobs)?;
+
+        if !plan.derived.is_empty() {
+            if self.done("convert") {
+                self.step_event("convert", StepStatus::Ok, "Text encoder ready.");
+            } else {
+                let (r2, m2, p2) = (root.clone(), models.clone(), py.clone());
+                self.step("convert", &mut |s| {
+                    s.convert(&p2, &r2, &m2)?;
+                    Ok("Text encoder ready.".into())
+                })?;
+                self.mark("convert");
+            }
+        }
+
+        let (r2, m2, p2, pts) = (root.clone(), models.clone(), py.clone(), sel.points.clone());
+        self.step("check", &mut |s| {
+            for p in &pts {
+                s.check_point(&p2, &r2, &m2, p).map_err(|e| format!("{p}: {e}"))?;
+            }
+            Ok(format!("{} checked.", pts.join(", ")))
+        })?;
+
+        let mut dirs: Vec<PathBuf> = sel.shortcut_dir.iter().cloned().collect();
+        dirs.extend(self.opts.start_menu_dir.iter().cloned());
+        let mut shortcut = sel.shortcut_dir.as_deref().map(shortcut_file);
+        if !dirs.is_empty() && !self.done("shortcuts") {
+            self.step_event("shortcuts", StepStatus::Running, "");
+            match self.steps.shortcuts(&py, &root, &dirs) {
+                Ok(()) => {
+                    self.step_event("shortcuts", StepStatus::Ok, "Shortcuts written.");
+                    self.mark("shortcuts");
+                }
+                Err(e) => {
+                    // Not worth failing a finished install over: the boot menu
+                    // is in the install root either way.
+                    self.step_event("shortcuts", StepStatus::Warning, e);
+                    shortcut = None;
+                }
+            }
+        }
+
+        self.mark("done");
+        self.emit(Event::Done { installed: sel.points.clone(), shortcut: shortcut.clone() });
+        self.after_done(&py, &root, shortcut);
+        Ok(())
+    }
+
+    /// The PEAK need against the free space where the install goes: every
+    /// download plus the derived files, because the convert inputs
+    /// (`text_encoder/`) and its output exist side by side until convert
+    /// deletes the inputs. What is already on disk counts as had.
+    fn disk_check(&mut self, plan: &Plan, root: &Path) -> Result<(), Stop> {
+        let peak = plan.download_bytes + plan.derived.iter().map(|d| d.bytes).sum::<u64>();
+        let converted = self.done("convert");
+        let mut had: u64 = if converted { plan.derived.iter().map(|d| d.bytes).sum() } else { 0 };
+        for job in &plan.jobs {
+            let fs = self.state.files.get(&job.id).cloned().unwrap_or_default();
+            had += if fs.verified && (converted || self.steps.present(job)) { job.bytes } else { fs.bytes_done };
+        }
+        let need = peak.saturating_sub(had);
+        let free = self.steps.disk_free(root);
+        // 0 is "could not read": preflight already says so, do not block on it.
+        if free > 0 && need > free {
+            return Err(Stop::Fatal(format!(
+                "Needs {} free disk at {}. This drive has {} free.",
+                gb(need),
+                root.display(),
+                gb(free)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Before Start, a saved unfinished selection: tell the UI what is on disk.
+    fn replay(&mut self, plan: &Plan) {
+        self.emit(Event::Planned(plan.clone()));
+        for job in &plan.jobs {
+            let fs = self.state.files.get(&job.id).cloned().unwrap_or_default();
+            if fs.verified {
+                self.emit(Event::FileVerified { id: job.id.clone() });
+            } else if fs.bytes_done > 0 {
+                self.emit(Event::FileProgress { id: job.id.clone(), done: fs.bytes_done, total: job.bytes });
+            }
+        }
+        let done: Vec<String> = self.state.steps_done.clone();
+        for s in done {
+            let name = s.split(':').next().unwrap_or(&s).to_string();
+            self.step_event(&name, StepStatus::Ok, "Done before.");
+        }
+    }
+
+    /// Run one install step; on failure wait for Retry{name} or Quit.
+    fn step(&mut self, name: &str, f: &mut dyn FnMut(&mut dyn Steps) -> Result<String, String>) -> Result<(), Stop> {
+        loop {
+            if !self.ctl.gate() {
+                return Err(Stop::Quit);
+            }
+            self.step_event(name, StepStatus::Running, "");
+            match f(self.steps) {
+                Ok(detail) => {
+                    self.step_event(name, StepStatus::Ok, detail);
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.step_event(name, StepStatus::Failed, e.clone());
+                    let again = self.ctl.wait(|i| match i {
+                        Input::Command(Command::Retry { id }) if id == name => Some(()),
+                        _ => None,
+                    });
+                    if again.is_none() {
+                        return Err(if self.ctl.quit() { Stop::Quit } else { Stop::Fatal(e) });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fetch every job; failures wait for Retry{id} after the rest is done.
+    fn fetch_all(&mut self, jobs: &[&FileJob]) -> Result<(), Stop> {
+        let mut failed: Vec<(&FileJob, String)> = Vec::new();
+        for job in jobs {
+            if let FileResult::Failed(m) = self.fetch_one(job)? {
+                failed.push((job, m));
+            }
+        }
+        while !failed.is_empty() {
+            let ids: Vec<String> = failed.iter().map(|(j, _)| j.id.clone()).collect();
+            let Some(id) = self.ctl.wait(|i| match i {
+                Input::Command(Command::Retry { id }) if ids.contains(id) => Some(id.clone()),
+                _ => None,
+            }) else {
+                if self.ctl.quit() {
+                    return Err(Stop::Quit);
+                }
+                let list: Vec<String> = failed.iter().map(|(j, m)| format!("{}: {m}", j.id)).collect();
+                return Err(Stop::Fatal(list.join("; ")));
+            };
+            let pos = failed.iter().position(|(j, _)| j.id == id).expect("id is in the failed list");
+            let job = failed[pos].0;
+            match self.fetch_one(job)? {
+                FileResult::Ok => {
+                    failed.remove(pos);
+                }
+                FileResult::Failed(m) => failed[pos].1 = m,
+            }
+        }
+        Ok(())
+    }
+
+    fn fetch_one(&mut self, job: &FileJob) -> Result<FileResult, Stop> {
+        let known = self.state.files.get(&job.id).cloned().unwrap_or_default();
+        if known.verified && (self.steps.present(job) || self.done("convert")) {
+            self.emit(Event::FileVerified { id: job.id.clone() });
+            return Ok(FileResult::Ok);
+        }
+        loop {
+            if !self.ctl.gate() {
+                return Err(Stop::Quit);
+            }
+            let ctl = Arc::clone(&self.ctl);
+            let res = self.steps.download(job, &mut self.state, self.on, &ctl.cancel);
+            match res {
+                Ok(()) => {
+                    let fs = self.state.files.entry(job.id.clone()).or_default();
+                    fs.verified = true;
+                    fs.bytes_done = job.bytes;
+                    self.save();
+                    return Ok(FileResult::Ok);
+                }
+                Err(FetchError::Cancelled) => {
+                    self.save();
+                    if self.ctl.quit() {
+                        return Err(Stop::Quit);
+                    }
+                    // Paused: the gate waits for Resume, then the part continues.
+                }
+                Err(e) => {
+                    // The fetcher retries the network itself and refetches a sha
+                    // mismatch once; what reaches here does not heal by looping
+                    // (retryable: false), the UI offers Retry. A local I/O error
+                    // (disk full, file locked) may.
+                    let retryable = matches!(e, FetchError::Io(_));
+                    let message = e.to_string();
+                    self.save();
+                    self.emit(Event::FileError { id: job.id.clone(), message: message.clone(), retryable });
+                    return Ok(FileResult::Failed(message));
+                }
+            }
+        }
+    }
+
+    /// After Done: open the boot menu, move the shortcut, until Quit or the
+    /// channel is gone.
+    fn after_done(&mut self, py: &PythonInfo, root: &Path, mut shortcut: Option<PathBuf>) {
+        while let Some(input) = self.ctl.wait(|i| match i {
+            Input::Command(Command::OpenBootMenu) | Input::ShortcutDir(_) => Some(i.clone()),
+            _ => None,
+        }) {
+            match input {
+                Input::Command(Command::OpenBootMenu) => match self.steps.open_boot_menu(py, root) {
+                    Ok(()) => self.step_event("boot_menu", StepStatus::Ok, "Boot menu opened."),
+                    Err(e) => self.step_event("boot_menu", StepStatus::Failed, e),
+                },
+                Input::ShortcutDir(dir) => match self.steps.shortcuts(py, root, std::slice::from_ref(&dir)) {
+                    Ok(()) => {
+                        let new = shortcut_file(&dir);
+                        if let Some(old) = shortcut.take().filter(|o| *o != new) {
+                            let _ = std::fs::remove_file(old);
+                        }
+                        shortcut = Some(new);
+                        if let Some(sel) = self.state.selection.as_mut() {
+                            sel.shortcut_dir = Some(dir.clone());
+                        }
+                        self.save();
+                        self.step_event("shortcuts", StepStatus::Ok, dir.display().to_string());
+                    }
+                    Err(e) => self.step_event("shortcuts", StepStatus::Warning, e),
+                },
+                _ => {}
+            }
+        }
+    }
+}
+
+// --------------------------------------------------------------- real steps
+
+/// The steps on the real modules (T1-T3).
+pub struct RealSteps {
+    pub source: Source,
+    pub packages: Packages,
+    pub python_zip: Option<&'static [u8]>,
+    pub get_pip: Option<&'static [u8]>,
+    stack: Option<crate::stack::Stack>,
+}
+
+impl RealSteps {
+    pub fn new(
+        source: Source,
+        packages: Packages,
+        python_zip: Option<&'static [u8]>,
+        get_pip: Option<&'static [u8]>,
+    ) -> RealSteps {
+        RealSteps { source, packages, python_zip, get_pip, stack: None }
+    }
+
+    fn stack(&mut self) -> &crate::stack::Stack {
+        self.stack.get_or_insert_with(crate::stack::Stack::embedded)
+    }
+
+    fn fetch_options(&self) -> FetchOptions {
+        FetchOptions {
+            source: self.source.clone(),
+            stall_secs: 30,
+            checkpoint_bytes: 64 * 1024 * 1024,
+            max_backoff_secs: 30,
+        }
+    }
+}
+
+impl Steps for RealSteps {
+    fn preflight(&mut self, install_root: &Path) -> PreflightReport {
+        let stack = self.stack().clone();
+        crate::preflight::run(&stack, install_root)
+    }
+    fn plan(&mut self, sel: &Selection) -> Result<Plan, String> {
+        let packages = self.packages.clone();
+        let models = models_root(&sel.install_root);
+        crate::plan::plan(self.stack(), sel, &models, &packages)
+    }
+    fn load_state(&mut self, path: &Path) -> std::io::Result<StateStore> {
+        if path.exists() {
+            StateStore::load(path)
+        } else {
+            Ok(StateStore { path: path.to_path_buf(), ..StateStore::default() })
+        }
+    }
+    fn save_state(&mut self, state: &StateStore) -> std::io::Result<()> {
+        state.save()
+    }
+    fn present(&mut self, job: &FileJob) -> bool {
+        job.dest.is_file()
+    }
+    fn disk_free(&mut self, dir: &Path) -> u64 {
+        crate::preflight::probe(dir).disk_free_bytes
+    }
+    fn download(
+        &mut self,
+        job: &FileJob,
+        state: &mut StateStore,
+        on: &mut dyn FnMut(Event),
+        cancel: &AtomicBool,
+    ) -> Result<(), FetchError> {
+        crate::fetch::download(job, state, &self.fetch_options(), on, cancel)
+    }
+    fn install_crow(&mut self, zip: &Path, install_root: &Path) -> Result<String, String> {
+        crate::layout::install_crow_package(zip, install_root)
+    }
+    fn install_engine(&mut self, zip: &Path, install_root: &Path) -> Result<String, String> {
+        crate::layout::install_engine_package(zip, install_root)
+    }
+    fn ensure_python(&mut self, install_root: &Path) -> Result<PythonInfo, String> {
+        crate::python::ensure(install_root, self.python_zip, self.get_pip)
+    }
+    fn convert(&mut self, py: &PythonInfo, install_root: &Path, models_root: &Path) -> Result<(), String> {
+        crate::convert::image_text_encoder(py, install_root, models_root)
+    }
+    fn check_point(
+        &mut self,
+        py: &PythonInfo,
+        install_root: &Path,
+        models_root: &Path,
+        point: &str,
+    ) -> Result<(), String> {
+        crate::check::check_point(py, install_root, models_root, point)
+    }
+    fn shortcuts(&mut self, py: &PythonInfo, install_root: &Path, dirs: &[PathBuf]) -> Result<(), String> {
+        crate::finish::shortcuts(py, install_root, dirs)
+    }
+    fn open_boot_menu(&mut self, py: &PythonInfo, install_root: &Path) -> Result<(), String> {
+        crate::finish::open_boot_menu(py, install_root)
+    }
+}
+
+// ------------------------------------------------------------------ testing
+
+/// A [`Steps`] without network, disk writes or Python, for the tests and
+/// `--selftest`. Every call is logged; failures and a blocking download are
+/// configured per file id or step name.
+pub mod testing {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    /// What `save_state` last wrote (StateStore itself is not Clone).
+    #[derive(Debug, Default, Clone)]
+    pub struct Saved {
+        pub selection: Option<Selection>,
+        pub files: BTreeMap<String, FileState>,
+        pub steps_done: Vec<String>,
+    }
+
+    #[derive(Default)]
+    pub struct Shared {
+        pub log: Vec<String>,
+        /// The state as last saved; `load_state` returns it.
+        pub saved: Option<Saved>,
+        /// file id -> how many more downloads fail with a permanent error.
+        pub fail_permanent: BTreeMap<String, u32>,
+        /// file id -> how many more downloads end in a sha mismatch.
+        pub mismatch: BTreeMap<String, u32>,
+        /// step name -> how many more calls fail.
+        pub fail_step: BTreeMap<String, u32>,
+        /// A download of this id runs in chunks until cancelled or released.
+        pub block_on: Option<String>,
+        pub release: bool,
+        pub report: Option<PreflightReport>,
+        /// Ids of fetched files that are "on disk"; a test removes one to
+        /// play a deleted file.
+        pub present: std::collections::BTreeSet<String>,
+        /// Free disk bytes; None is 1 TiB.
+        pub disk_free: Option<u64>,
+    }
+
+    #[derive(Clone, Default)]
+    pub struct FakeSteps {
+        pub shared: Arc<Mutex<Shared>>,
+    }
+
+    /// A machine that can run everything.
+    pub fn report() -> PreflightReport {
+        PreflightReport {
+            os_64bit: true,
+            gpu_name: Some("NVIDIA GeForce RTX 5090".into()),
+            vram_mib: Some(32607),
+            compute_cap: Some("12.0".into()),
+            ram_bytes: 64 << 30,
+            disk_free_bytes: 500 << 30,
+            webview2: true,
+            hard_block: None,
+            blocked: vec![],
+        }
+    }
+
+    fn job(id: &str, kind: FileKind, bytes: u64, points: &[&str], root: &Path) -> FileJob {
+        FileJob {
+            id: id.into(),
+            kind,
+            url: format!("https://example.invalid/{id}"),
+            local_rel: id.into(),
+            dest: root.join("fake").join(id),
+            bytes,
+            sha256: format!("{bytes:064x}"),
+            points: points.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    /// The fake plan, shaped like `plan::plan`: two packages and whisper with
+    /// empty `points`, one container per point; the image stack shares the 27B
+    /// container and carries a derived file.
+    pub fn plan(sel: &Selection) -> Plan {
+        let root = &sel.install_root;
+        let mut jobs = vec![
+            job("crow-package", FileKind::CrowPackage, 600, &[], root),
+            job("engine-package", FileKind::EnginePackage, 49, &[], root),
+            job("whisper", FileKind::Whisper, 150, &[], root),
+        ];
+        let has = |p: &str| sel.points.iter().any(|x| x == p);
+        if has("27b") || has("image-stack") {
+            let pts: Vec<&str> = ["27b", "image-stack"].into_iter().filter(|p| has(p)).collect();
+            jobs.push(job("27b-cnq", FileKind::Model, 1880, &pts, root));
+        }
+        if has("image-stack") {
+            jobs.push(job("qi-transformer", FileKind::Model, 1400, &["image-stack"], root));
+        }
+        if has("flash-next") {
+            jobs.push(job("fn-cnq", FileKind::Model, 10560, &["flash-next"], root));
+        }
+        let derived = if has("image-stack") {
+            vec![crate::api::DerivedJob {
+                id: "qi-text-encoder-sdcli".into(),
+                dest: root.join("fake").join("sdcli"),
+                bytes: 1750,
+                points: vec!["image-stack".into()],
+            }]
+        } else {
+            vec![]
+        };
+        let download_bytes = jobs.iter().map(|j| j.bytes).sum();
+        Plan { download_bytes, disk_bytes: download_bytes, jobs, derived }
+    }
+
+    pub fn python() -> PythonInfo {
+        PythonInfo { exe: PathBuf::from("python.exe"), version: "3.13.7".into(), bundled: false }
+    }
+
+    impl FakeSteps {
+        pub fn log(&self) -> Vec<String> {
+            self.shared.lock().unwrap().log.clone()
+        }
+        fn push(&self, s: String) {
+            self.shared.lock().unwrap().log.push(s);
+        }
+        /// Consume one configured failure of `name`.
+        fn fails(&self, name: &str) -> Result<(), String> {
+            let mut sh = self.shared.lock().unwrap();
+            match sh.fail_step.get_mut(name) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    Err(format!("{name} failed (fake)"))
+                }
+                _ => Ok(()),
+            }
+        }
+        fn step(&self, log: &str, name: &str) -> Result<(), String> {
+            self.push(log.to_string());
+            self.fails(name)
+        }
+    }
+
+    impl Steps for FakeSteps {
+        fn preflight(&mut self, _root: &Path) -> PreflightReport {
+            self.push("preflight".into());
+            self.shared.lock().unwrap().report.clone().unwrap_or_else(report)
+        }
+        fn plan(&mut self, sel: &Selection) -> Result<Plan, String> {
+            self.push("plan".into());
+            Ok(plan(sel))
+        }
+        fn load_state(&mut self, path: &Path) -> std::io::Result<StateStore> {
+            let saved = self.shared.lock().unwrap().saved.clone().unwrap_or_default();
+            Ok(StateStore {
+                path: path.to_path_buf(),
+                selection: saved.selection,
+                files: saved.files,
+                steps_done: saved.steps_done,
+            })
+        }
+        fn save_state(&mut self, state: &StateStore) -> std::io::Result<()> {
+            self.shared.lock().unwrap().saved = Some(Saved {
+                selection: state.selection.clone(),
+                files: state.files.clone(),
+                steps_done: state.steps_done.clone(),
+            });
+            Ok(())
+        }
+        fn present(&mut self, job: &FileJob) -> bool {
+            self.shared.lock().unwrap().present.contains(&job.id)
+        }
+        fn disk_free(&mut self, _dir: &Path) -> u64 {
+            self.shared.lock().unwrap().disk_free.unwrap_or(1 << 40)
+        }
+        fn download(
+            &mut self,
+            job: &FileJob,
+            state: &mut StateStore,
+            on: &mut dyn FnMut(Event),
+            cancel: &AtomicBool,
+        ) -> Result<(), FetchError> {
+            let from = state.files.get(&job.id).map(|f| f.bytes_done).unwrap_or(0);
+            self.push(format!("download {} from {from}", job.id));
+            {
+                let mut sh = self.shared.lock().unwrap();
+                if let Some(n) = sh.fail_permanent.get_mut(&job.id).filter(|n| **n > 0) {
+                    *n -= 1;
+                    return Err(FetchError::Permanent(format!("404 Not Found: {}", job.url)));
+                }
+                if let Some(n) = sh.mismatch.get_mut(&job.id).filter(|n| **n > 0) {
+                    *n -= 1;
+                    return Err(FetchError::Mismatch {
+                        id: job.id.clone(),
+                        expected: job.sha256.clone(),
+                        got: "0".repeat(64),
+                    });
+                }
+            }
+            on(Event::FileStarted { id: job.id.clone(), from_byte: from, total: job.bytes });
+            let blocking = self.shared.lock().unwrap().block_on.as_deref() == Some(job.id.as_str());
+            let mut done = from;
+            if blocking {
+                loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        state.files.entry(job.id.clone()).or_default().bytes_done = done;
+                        self.push(format!("cancelled {} at {done}", job.id));
+                        return Err(FetchError::Cancelled);
+                    }
+                    if self.shared.lock().unwrap().release {
+                        break;
+                    }
+                    done = (done + 10).min(job.bytes - 1);
+                    state.files.entry(job.id.clone()).or_default().bytes_done = done;
+                    on(Event::FileProgress { id: job.id.clone(), done, total: job.bytes });
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            on(Event::FileProgress { id: job.id.clone(), done: job.bytes, total: job.bytes });
+            let fs = state.files.entry(job.id.clone()).or_default();
+            fs.bytes_done = job.bytes;
+            fs.verified = true;
+            self.shared.lock().unwrap().present.insert(job.id.clone());
+            on(Event::FileVerified { id: job.id.clone() });
+            Ok(())
+        }
+        fn install_crow(&mut self, _zip: &Path, _root: &Path) -> Result<String, String> {
+            self.step("install crow", "crow").map(|_| "3.0.0".into())
+        }
+        fn install_engine(&mut self, _zip: &Path, _root: &Path) -> Result<String, String> {
+            self.step("install engine", "engine").map(|_| "0.9.0".into())
+        }
+        fn ensure_python(&mut self, _root: &Path) -> Result<PythonInfo, String> {
+            self.step("python", "python").map(|_| python())
+        }
+        fn convert(&mut self, _py: &PythonInfo, _root: &Path, _models: &Path) -> Result<(), String> {
+            self.step("convert", "convert")
+        }
+        fn check_point(&mut self, _py: &PythonInfo, _root: &Path, _models: &Path, point: &str) -> Result<(), String> {
+            self.step(&format!("check {point}"), "check")
+        }
+        fn shortcuts(&mut self, _py: &PythonInfo, _root: &Path, dirs: &[PathBuf]) -> Result<(), String> {
+            self.step(&format!("shortcuts {}", dirs.len()), "shortcuts")
+        }
+        fn open_boot_menu(&mut self, _py: &PythonInfo, _root: &Path) -> Result<(), String> {
+            self.step("boot menu", "boot_menu")
+        }
+    }
+
+    /// A selection under `root`, with a shortcut folder.
+    pub fn selection(points: &[&str], root: &Path) -> Selection {
+        Selection {
+            points: points.iter().map(|p| p.to_string()).collect(),
+            install_root: root.to_path_buf(),
+            shortcut_dir: Some(root.join("Desktop")),
+        }
+    }
+
+    pub fn options(root: &Path) -> RunOptions {
+        RunOptions {
+            launch_root: root.to_path_buf(),
+            state_path: state_path(root),
+            start_menu_dir: Some(root.join("Start Menu")),
+        }
+    }
+
+    /// The calls a full fresh run logs, in order, for `points`.
+    pub fn expected_order(points: &[&str]) -> Vec<String> {
+        let sel = selection(points, Path::new("x"));
+        let plan = plan(&sel);
+        let mut v = vec!["preflight".to_string(), "plan".to_string()];
+        for j in plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::CrowPackage | FileKind::EnginePackage)) {
+            v.push(format!("download {} from 0", j.id));
+        }
+        v.push("install crow".into());
+        v.push("install engine".into());
+        v.push("python".into());
+        for j in plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::Model | FileKind::Whisper)) {
+            v.push(format!("download {} from 0", j.id));
+        }
+        if !plan.derived.is_empty() {
+            v.push("convert".into());
+        }
+        for p in points {
+            v.push(format!("check {p}"));
+        }
+        v.push("shortcuts 2".into());
+        v
+    }
+
+    /// Run to the end on a channel that carries Start(sel) and then closes.
+    pub fn run_once(steps: &mut FakeSteps, sel: &Selection) -> (Outcome, Vec<Event>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Input::Command(Command::Start(sel.clone()))).unwrap();
+        drop(tx);
+        let mut events = Vec::new();
+        let out = run(steps, &options(&sel.install_root), &mut |e| events.push(e), rx);
+        (out, events)
+    }
+
+    /// The `--selftest` scenarios: (name, Ok or what went wrong).
+    pub fn scenarios() -> Vec<(&'static str, Result<(), String>)> {
+        let root = std::env::temp_dir().join("crowsetup-selftest");
+        let order = |points: &[&str]| -> Result<(), String> {
+            let mut f = FakeSteps::default();
+            let (o, _) = run_once(&mut f, &selection(points, &root));
+            if o != Outcome::Done {
+                return Err(format!("outcome {o:?}"));
+            }
+            let (want, got) = (expected_order(points), f.log());
+            if got != want {
+                return Err(format!("order {got:?}, expected {want:?}"));
+            }
+            Ok(())
+        };
+        let resume = || -> Result<(), String> {
+            let mut f = FakeSteps::default();
+            let sel = selection(&["27b"], &root);
+            run_once(&mut f, &sel);
+            {
+                let mut sh = f.shared.lock().unwrap();
+                sh.log.clear();
+                // Closed before Done: the state has everything but the finish.
+                if let Some(s) = sh.saved.as_mut() {
+                    s.steps_done.retain(|x| x != "done" && x != "shortcuts");
+                }
+            }
+            let (o, _) = run_once(&mut f, &sel);
+            let log = f.log();
+            if o != Outcome::Done || log.iter().any(|l| l.starts_with("download") || l.starts_with("install")) {
+                return Err(format!("{o:?} {log:?}"));
+            }
+            Ok(())
+        };
+        let permanent = || -> Result<(), String> {
+            let mut f = FakeSteps::default();
+            f.shared.lock().unwrap().fail_permanent.insert("27b-cnq".into(), 1);
+            let (o, ev) = run_once(&mut f, &selection(&["27b"], &root));
+            let err = ev.iter().any(|e| matches!(e, Event::FileError { retryable: false, .. }));
+            if !matches!(o, Outcome::Fatal(_)) || !err {
+                return Err(format!("{o:?}"));
+            }
+            Ok(())
+        };
+        vec![
+            ("run order, 27b", order(&["27b"])),
+            ("run order, image stack converts", order(&["27b", "image-stack"])),
+            ("resume skips what is done", resume()),
+            ("permanent failure without a retry ends fatal", permanent()),
+        ]
+    }
 }

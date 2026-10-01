@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Crow Setup</title>
+<!--
+  CrowSetup's window (#196 phase 2), direction B "like Crow's start screen":
+  Crow's own tokens (cli/crow_gui.py), the spaced CROW wordmark, the crow from
+  cli/mark-on-dark.svg, rows with toggles. The exe embeds this file and inlines
+  the logo; in a browser, ?mock=selection|blocked|hardblock|installing|error|
+  welcome|done loads mock.js instead of the exe's bridge (serve the repo root).
+-->
+<style>
+:root{
+  --bg:#181818; --rail:#141414; --raised:#2a2a2b; --hover:#2a2a2b;
+  --line:#2e2e30; --line-soft:#242426;
+  --text:#f2f2f3; --soft:#c9c9cc; --dim:#a3a3a6; --dimmer:#6f6f73;
+  --acc:#5b8def; --acc-line:#3d63b8; --composer:#1c1c1d;
+  --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a; --close-bg:#c0362b;
+  --tg-off:#3a3a3d; --knob-off:#8b8b90; --tg-on:#3e5f9c; --knob-on:#cfe0ff;
+  --tg-lock:#2f4a78; --knob-lock:#9fb8e6;
+  --ui:system-ui,"Segoe UI",-apple-system,Roboto,"Helvetica Neue",Arial,sans-serif;
+  --col:540px; --bar:620px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);font:13px/1.45 var(--ui);overflow:hidden;
+  user-select:none;-webkit-user-select:none;cursor:default}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;text-align:inherit}
+button:disabled{cursor:default}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+
+.app{height:100vh;display:flex;flex-direction:column;border:1px solid #2b2b2e}
+.top{height:32px;flex:none;display:flex;align-items:stretch;background:var(--rail)}
+.drag{flex:1;display:flex;align-items:center;gap:14px;padding-left:14px;app-region:drag;-webkit-app-region:drag}
+.wm{font-weight:800;letter-spacing:.22em;font-size:11px}
+.menu{color:var(--dim);font-size:11px}
+.ctl{display:flex}
+.ctl button{width:46px;display:grid;place-items:center;color:var(--dimmer);border-radius:0}
+.ctl button:hover{background:var(--hover);color:var(--text)}
+.ctl button.x:hover{background:var(--close-bg);color:#fff}
+.ctl svg{width:10px;height:10px;stroke:currentColor;stroke-width:1;fill:none;shape-rendering:crispEdges}
+
+.center{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;padding:18px 32px 16px}
+.scroll{flex:1;min-height:0;width:100%;display:flex;flex-direction:column;align-items:center;overflow-y:auto;scrollbar-gutter:stable both-edges}
+.scroll::-webkit-scrollbar{width:8px}
+.scroll::-webkit-scrollbar-button{display:none}
+.scroll::-webkit-scrollbar-track{background:transparent}
+.scroll::-webkit-scrollbar-thumb{background:var(--tg-off);border-radius:4px}
+.mark{position:relative;width:104px;height:104px;flex:none}
+.mark img{position:absolute;inset:0;width:100%;height:100%;-webkit-user-drag:none}
+.mark .ghost{opacity:.10}
+.say{color:var(--soft);font-size:16px;margin:6px 0 12px;text-align:center}
+.list{width:100%;max-width:var(--col)}
+.row{display:flex;align-items:center;gap:14px;padding:8px 0;border-top:1px solid var(--line-soft)}
+.row .tx{flex:1;min-width:0}
+.row b{font-weight:600}
+.row .d{color:var(--dim)}
+.row .lic{color:var(--dimmer);font-size:11.5px}
+.d.ok{color:var(--ok)} .d.warn{color:var(--warn)} .d.bad{color:var(--bad)}
+.row.off b,.row.off .d{color:var(--dimmer)}
+.row.na b{color:var(--dimmer)} .row.na .d{color:var(--warn)}
+.row.err b{color:var(--soft)}
+.sz{color:var(--soft);font-variant-numeric:tabular-nums;white-space:nowrap}
+.row.off .sz,.row.na .sz{color:var(--dimmer)}
+.tg{width:30px;height:16px;border-radius:999px;background:var(--tg-off);position:relative;flex:none}
+.tg::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--knob-off);transition:left .12s}
+.tg.on{background:var(--tg-on)} .tg.on::after{left:16px;background:var(--knob-on)}
+.tg.lock{background:var(--tg-lock)} .tg.lock::after{left:16px;background:var(--knob-lock)}
+.tg.dis{opacity:.35}
+.sec{width:100%;max-width:var(--col);color:var(--dimmer);font-size:11.5px;padding:10px 0 3px}
+button.sec:hover{color:var(--soft)}
+.opt{width:100%;max-width:var(--col);color:var(--dim);padding:2px 0 6px}
+.opt p{margin:2px 0 6px}
+.opt .row{padding:6px 0}
+.opt .row b{color:var(--soft);font-weight:500}
+.opt .row .d{font-size:12px;overflow-wrap:anywhere}
+.block{max-width:var(--col);color:var(--warn);text-align:center;font-size:13.5px;margin-top:4px}
+.note{width:100%;max-width:var(--bar);color:var(--warn);font-size:12px;text-align:center;margin-top:8px}
+
+.bar{width:100%;max-width:var(--bar);flex:none;margin-top:12px;border:1px solid var(--acc-line);border-radius:10px;
+  padding:8px 10px 8px 14px;display:flex;align-items:center;gap:10px;background:var(--composer)}
+.path{flex:1;min-width:0;color:var(--dim);font-size:12.5px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.chip{border:1px solid var(--line);border-radius:6px;padding:2px 9px;color:var(--soft);font-size:12px;flex:none}
+.chip:hover{border-color:#4a4a4e;color:var(--text)}
+.chip:disabled{opacity:.4;border-color:var(--line);color:var(--soft)}
+.btn{background:var(--acc);color:#fff;font-weight:600;border-radius:6px;padding:6px 18px;flex:none}
+.btn:hover{filter:brightness(1.08)}
+.btn:disabled{opacity:.4;filter:none}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div class="drag" id="drag"><span class="wm">CROW</span><span class="menu">Setup</span></div>
+    <div class="ctl">
+      <button data-act="min" aria-label="Minimise" title="Minimise"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+      <button data-act="close" class="x" aria-label="Close" title="Close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+    </div>
+  </div>
+  <div class="center" id="center"></div>
+</div>
+<script>
+(function () {
+  'use strict';
+  var LOGO = '../../cli/mark-on-dark.svg';
+  var DESC = {
+    'flash-next': '200k context. Needs 64 GB RAM.',
+    '27b': '128k context. Great speed.',
+    'image-stack': '27B with Qwen-Image 2.1.'
+  };
+
+  var S = {
+    init: null, info: null, report: null, phase: 'selection',
+    sel: { 'flash-next': true, '27b': true, 'image-stack': false },
+    root: '', rootLabel: '%LOCALAPPDATA%\\Crow', free: null, optOpen: false,
+    plan: null, jobs: {}, files: {}, steps: {}, started: false, paused: false,
+    done: null, fatal: null, shortcutDir: null, shortcutLabel: 'Desktop'
+  };
+
+  function send(o) { try { window.ipc.postMessage(JSON.stringify(o)); } catch (e) { /* no bridge */ } }
+  window.addEventListener('error', function (e) { send({ type: 'log', msg: String(e.message) + ' @' + e.lineno + ':' + e.colno }); });
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function size(b) { return b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.ceil(b / 1e6)) + ' MB'; }
+  function of(done, total) {
+    if (total >= 1e9) return (done / 1e9).toFixed(1) + ' of ' + (total / 1e9).toFixed(1) + ' GB';
+    return Math.ceil(done / 1e6) + ' of ' + Math.ceil(total / 1e6) + ' MB';
+  }
+  function sum(a) { return a.reduce(function (x, y) { return x + y; }, 0); }
+
+  // ------------------------------------------------------------ manifests
+  function deriveInfo(init) {
+    var st = init.stack || {}, bytes = {}, lic = st.licenses || {};
+    (st.files || []).concat(st.crow_files || []).forEach(function (f) { bytes[f.id] = f.bytes; });
+    var fileLic = {};
+    (st.files || []).forEach(function (f) { fileLic[f.id] = f.license; });
+    var points = (st.points || []).map(function (p) {
+      var shown = [];
+      p.files.forEach(function (id) {
+        var l = lic[fileLic[id]];
+        if (l && l.show_at_install && shown.indexOf(l) < 0) shown.push(l);
+      });
+      return {
+        id: p.id, title: p.menu.title, files: p.files, derived: p.bytes.derived, disk: p.bytes.disk,
+        licence: shown.map(function (l) {
+          return 'Qwen-Image weights: ' + l.name + (l.non_commercial ? ', non-commercial use only.' : '.');
+        }).join(' ')
+      };
+    });
+    var servers = (init.op && init.op.servers) || {}, entries = (init.op && init.op.models && init.op.models.entries) || {};
+    var llama = Object.keys(servers).filter(function (k) { return k[0] !== '_' && entries[k]; }).map(function (k) {
+      var path = entries[k].path, base = path.split('/').pop();
+      return {
+        label: base.replace(/\.gguf$/i, '').replace(/-\d{5}-of-\d{5}$/, ''),
+        path: 'models\\' + path.split('/').join('\\')
+      };
+    });
+    var crowFiles = sum((st.crow_files || []).map(function (f) { return f.bytes; }));
+    return { bytes: bytes, points: points, llama: llama, crowFiles: crowFiles };
+  }
+  function point(id) { return S.info.points.filter(function (p) { return p.id === id; })[0]; }
+  function title(id) { var p = S.info && point(id); return p ? p.title : id; }
+  function selected() { return S.info.points.filter(function (p) { return S.sel[p.id] && !blocked(p.id); }); }
+  function blocked(id) {
+    var r = S.report;
+    return r ? (r.blocked || []).filter(function (b) { return b.point === id; })[0] : null;
+  }
+  // A point's size next to the points above it that are on: the image stack
+  // reads "+50.6 GB" while the 27B (which it contains) is on.
+  function marginal(p) {
+    var before = S.info.points.slice(0, S.info.points.indexOf(p)).filter(function (q) { return S.sel[q.id] && !blocked(q.id); });
+    var shared = {};
+    before.forEach(function (q) { q.files.forEach(function (f) { shared[f] = 1; }); });
+    var cut = sum(p.files.filter(function (f) { return shared[f]; }).map(function (f) { return S.info.bytes[f] || 0; }));
+    return cut > 0 ? '+' + size(p.disk - cut) : size(p.disk);
+  }
+  // The peak need: everything downloaded plus the derived files (the convert
+  // inputs and output exist side by side until convert deletes the inputs).
+  function peak() {
+    var ids = {}, derived = 0;
+    selected().forEach(function (p) { p.files.forEach(function (f) { ids[f] = 1; }); derived += p.derived; });
+    var pk = S.init.packages || {};
+    return (pk.crow || 0) + (pk.engine || 0) + S.info.crowFiles + derived +
+      sum(Object.keys(ids).map(function (f) { return S.info.bytes[f] || 0; }));
+  }
+
+  // ------------------------------------------------------------ progress
+  function file(id) { return S.files[id] || (S.files[id] = { done: 0, total: 0 }); }
+  function jobDone(j) { var f = S.files[j.id]; return f ? (f.verified ? j.bytes : Math.min(f.done, j.bytes)) : 0; }
+  function percent() {
+    if (S.phase === 'done') return 100;
+    if (!S.plan || !S.plan.download_bytes) return 0;
+    return Math.floor(sum(S.plan.jobs.map(jobDone)) * 100 / S.plan.download_bytes);
+  }
+  function jobsWhere(f) { return S.plan ? S.plan.jobs.filter(f) : []; }
+  function step(n) { return S.steps[n] || {}; }
+
+  // ------------------------------------------------------------ markup
+  function mark(pct) {
+    if (pct == null) return '<div class="mark"><img src="' + LOGO + '" alt="Crow"></div>';
+    return '<div class="mark"><img class="ghost" src="' + LOGO + '" alt="">' +
+      '<img src="' + LOGO + '" alt="Crow" style="clip-path:inset(0 ' + (100 - pct) + '% 0 0)"></div>';
+  }
+  function row(o) {
+    return '<div class="row' + (o.cls ? ' ' + o.cls : '') + '"><div class="tx"><b>' + esc(o.title) + '</b>' +
+      '<div class="d' + (o.dcls ? ' ' + o.dcls : '') + '">' + esc(o.desc) + '</div>' +
+      (o.lic ? '<div class="lic">' + esc(o.lic) + '</div>' : '') + '</div>' + (o.tail || '') + '</div>';
+  }
+  function sz(t) { return '<span class="sz">' + esc(t) + '</span>'; }
+  function toggle(id, on, kind) {
+    if (kind === 'lock') return '<span class="tg lock" role="switch" aria-checked="true" aria-disabled="true" title="Required"></span>';
+    if (kind === 'dis') return '<span class="tg dis" role="switch" aria-checked="false" aria-disabled="true"></span>';
+    if (kind === 'static') return '<span class="tg on" role="switch" aria-checked="true" aria-disabled="true"></span>';
+    return '<button class="tg' + (on ? ' on' : '') + '" role="switch" aria-checked="' + on + '" aria-label="' + esc(title(id)) +
+      '" data-act="toggle" data-id="' + esc(id) + '"></button>';
+  }
+  function retry(id) { return '<button class="chip" data-act="retry" data-id="' + esc(id) + '">Retry</button>'; }
+  function bar(path, tail) { return '<div class="bar"><span class="path" title="' + esc(path) + '">' + esc(path) + '</span>' + tail + '</div>'; }
+
+  function viewSelection() {
+    var r = S.report, pk = S.init.packages || {};
+    var h = mark(null) + '<div class="say">What should this machine run?</div>';
+    if (r && r.hard_block) {
+      h += '<p class="block">' + esc(r.hard_block) + '</p>';
+      return '<div class="scroll">' + h + '</div>' +
+        bar(S.rootLabel, '<button class="chip" disabled>change</button><button class="btn" disabled>Install</button>');
+    }
+    h += '<div class="list">' + row({ title: 'Crow', desc: 'Required. The window, the boot menu, Python if missing.',
+      tail: sz(size((pk.crow || 0) + S.info.crowFiles)) + toggle('crow', true, 'lock') }) + '</div>';
+    h += '<div class="sec">Models</div><div class="list">';
+    h += row({ title: 'crow-nest engine', desc: 'Required. Every model below runs on it.',
+      tail: sz(size(pk.engine || 0)) + toggle('engine', true, 'lock') });
+    S.info.points.forEach(function (p) {
+      var b = blocked(p.id), on = S.sel[p.id] && !b;
+      h += row({
+        title: p.title, desc: b ? b.reason : (DESC[p.id] || ''), lic: b ? '' : p.licence,
+        cls: b ? 'na' : (on ? '' : 'off'),
+        tail: sz(marginal(p)) + toggle(p.id, on, b ? 'dis' : '')
+      });
+    });
+    h += '</div>';
+    h += '<button class="sec" data-act="opt" aria-expanded="' + S.optOpen + '">' + (S.optOpen ? '▾' : '▸') +
+      ' Optional (llama.cpp): use GGUFs you already have</button>';
+    if (S.optOpen) {
+      h += '<div class="opt"><p>Crow also runs these llama.cpp models. Setup downloads nothing for them: put the GGUF ' +
+        'at the path below, inside the install folder, and llama-server.exe into bin. The boot menu then lists them.</p>' +
+        S.info.llama.map(function (l) { return row({ title: l.label, desc: l.path }); }).join('') + '</div>';
+    }
+    var free = S.free != null ? S.free : (r ? r.disk_free_bytes : null), need = peak(), none = selected().length === 0;
+    var note = '';
+    if (free && need > free) note = '<p class="note">Needs ' + size(need) + ' free here. This drive has ' + size(free) + ' free.</p>';
+    return '<div class="scroll">' + h + '</div>' + note +
+      bar(S.rootLabel, '<button class="chip" data-act="root">change</button><button class="btn" data-act="install"' +
+        (none ? ' disabled' : '') + '>Install</button>');
+  }
+
+  // One row per component while installing.
+  function pointRow(id) {
+    var js = jobsWhere(function (j) { return j.points.indexOf(id) >= 0; });
+    var err = js.map(function (j) { return S.files[j.id] && S.files[j.id].error ? j : null; }).filter(Boolean)[0];
+    if (err) return row({ title: title(id), desc: S.files[err.id].error, dcls: 'bad', cls: 'err', tail: retry(err.id) });
+    if (id === 'image-stack' && step('convert').status === 'failed')
+      return row({ title: title(id), desc: step('convert').detail, dcls: 'bad', cls: 'err', tail: retry('convert') });
+    var total = sum(js.map(function (j) { return j.bytes; })), done = sum(js.map(jobDone));
+    var all = js.length > 0 && js.every(function (j) { return S.files[j.id] && S.files[j.id].verified; });
+    if (all && id === 'image-stack' && step('convert').status !== 'ok') {
+      return row({ title: title(id), desc: step('convert').status === 'running'
+        ? 'Preparing the text encoder.' : 'Downloaded. The text encoder comes next.' });
+    }
+    if (all) return row({ title: title(id), desc: 'Ready. All files verified.', dcls: 'ok' });
+    var fs = js.map(function (j) { return S.files[j.id]; }).filter(Boolean);
+    if (fs.some(function (f) { return f.checking; })) return row({ title: title(id), desc: 'Checking what is already here.' });
+    var rc = fs.filter(function (f) { return f.reconnecting; })[0];
+    if (rc) return row({ title: title(id), desc: of(done, total) + '. Reconnecting, attempt ' + rc.reconnecting + '.' });
+    if (!fs.some(function (f) { return f.started || f.done > 0 || f.verified; }))
+      return row({ title: title(id), desc: 'Waiting.', cls: 'off' });
+    var tail = fs.some(function (f) { return f.dropped; }) ? ' Resumed after a dropped connection.'
+      : fs.some(function (f) { return f.from > 0; }) ? ' Resumed from what was on disk.' : '';
+    return row({ title: title(id), desc: of(done, total) + '.' + tail });
+  }
+  function kindRow(t, kinds, stepName, okText) {
+    var js = jobsWhere(function (j) { return kinds.indexOf(j.kind) >= 0; });
+    var err = js.filter(function (j) { return S.files[j.id] && S.files[j.id].error; })[0];
+    if (err) return row({ title: t, desc: S.files[err.id].error, dcls: 'bad', cls: 'err', tail: retry(err.id) });
+    var st = step(stepName);
+    if (st.status === 'failed') return row({ title: t, desc: st.detail, dcls: 'bad', cls: 'err', tail: retry(stepName) });
+    if (stepName === 'crow' && step('python').status === 'failed')
+      return row({ title: t, desc: step('python').detail, dcls: 'bad', cls: 'err', tail: retry('python') });
+    if (st.status === 'ok') return row({ title: t, desc: okText(), dcls: 'ok' });
+    if (st.status === 'running') return row({ title: t, desc: 'Installing.' });
+    var pkg = js[0], f = pkg && S.files[pkg.id];
+    if (f && f.verified) return row({ title: t, desc: 'Downloaded. Installs next.' });
+    if (f && f.reconnecting) return row({ title: t, desc: of(f.done, pkg.bytes) + '. Reconnecting, attempt ' + f.reconnecting + '.' });
+    if (f && (f.started || f.done)) return row({ title: t, desc: of(f.done, pkg.bytes) + '.' });
+    return row({ title: t, desc: 'Waiting.', cls: 'off' });
+  }
+  function crowOk() {
+    var py = step('python');
+    var voice = jobsWhere(function (j) { return j.kind === 'Whisper'; });
+    var vt = sum(voice.map(function (j) { return j.bytes; })), vd = sum(voice.map(jobDone));
+    var s = 'Installed.' + (py.status === 'ok' ? ' ' + py.detail.replace(/(\d+\.\d+)\.\d+/, '$1') : '');
+    if (vt && vd < vt && vd > 0) s += ' Voice model ' + of(vd, vt) + '.';
+    return s;
+  }
+  function configsRow() {
+    var t = 'Configs and boot menu', ck = step('check'), sc = step('shortcuts');
+    if (ck.status === 'failed') return row({ title: t, desc: ck.detail, dcls: 'bad', cls: 'err', tail: retry('check') });
+    if (ck.status === 'running') return row({ title: t, desc: 'Checking every selected model.' });
+    if (ck.status === 'ok' && sc.status === 'warning') return row({ title: t, desc: 'Checked. Shortcut not written: ' + sc.detail, dcls: 'warn' });
+    if (ck.status === 'ok') return row({ title: t, desc: 'Checked. Writing the shortcuts.', dcls: 'ok' });
+    return row({ title: t, desc: 'After the downloads.', cls: 'off' });
+  }
+  function planPoints() {
+    var seen = [];
+    S.info.points.forEach(function (p) {
+      if (jobsWhere(function (j) { return j.points.indexOf(p.id) >= 0; }).length) seen.push(p.id);
+    });
+    return seen;
+  }
+
+  function viewInstalling() {
+    var pct = percent();
+    var h = mark(pct) + '<div class="say">' + (S.paused ? 'Paused. ' + pct + ' %' : 'Flying to the nest. ' + pct + ' %') + '</div>';
+    h += '<div class="list">' +
+      kindRow('Crow', ['CrowPackage'], 'crow', crowOk) +
+      kindRow('crow-nest engine', ['EnginePackage'], 'engine', function () { return 'Installed. All files verified.'; }) +
+      planPoints().map(pointRow).join('') + configsRow() + '</div>';
+    var voiceErr = jobsWhere(function (j) { return j.kind === 'Whisper' && S.files[j.id] && S.files[j.id].error; })[0];
+    if (voiceErr) h += '<div class="list">' + row({ title: 'Voice model', desc: S.files[voiceErr.id].error, dcls: 'bad', cls: 'err', tail: retry(voiceErr.id) }) + '</div>';
+    return '<div class="scroll">' + h + '</div>' +
+      bar('You can close this window. The next start picks up where it stopped.',
+        '<button class="chip" data-act="pause">' + (S.paused ? 'Resume' : 'Pause') + '</button>');
+  }
+
+  function viewWelcome() {
+    var pct = percent();
+    var h = mark(pct) + '<div class="say">' + (pct > 0 ? 'Welcome back. ' + pct + ' % is already here.' : 'Welcome back.') + '</div><div class="list">';
+    h += planPoints().map(function (id) {
+      var js = jobsWhere(function (j) { return j.points.indexOf(id) >= 0; });
+      var total = sum(js.map(function (j) { return j.bytes; })), done = sum(js.map(jobDone));
+      if (done >= total) return row({ title: title(id), desc: 'Ready. All files verified.', dcls: 'ok' });
+      if (done > 0) return row({ title: title(id), desc: of(done, total) + ' on disk. Continues from there.' });
+      return row({ title: title(id), desc: 'Not started yet.', cls: 'off' });
+    }).join('') + '</div>';
+    return '<div class="scroll">' + h + '</div>' +
+      bar('Nothing is downloaded twice.', '<button class="btn" data-act="continue">Continue</button>');
+  }
+
+  function viewDone() {
+    var d = S.done || {}, bm = step('boot_menu');
+    var h = mark(null) + '<div class="say">Landed. Crow is ready.</div><div class="list">';
+    h += row({ title: 'Boot menu shortcut', desc: S.shortcutDir ? S.shortcutLabel : 'Not written.', dcls: S.shortcutDir ? '' : 'warn',
+      tail: '<button class="chip" data-act="shortcut">change</button>' + toggle('', true, 'static') });
+    h += row({ title: 'Start menu entry', desc: 'Crow', tail: toggle('', true, 'static') });
+    h += row({ title: 'Installed', desc: (d.installed || []).map(title).join(', ') });
+    h += '</div>';
+    var note = bm.status === 'failed' ? '<p class="note">' + esc(bm.detail) + '</p>' : '';
+    return '<div class="scroll">' + h + '</div>' + note +
+      bar('The boot menu starts a model, then Crow.', '<button class="btn" data-act="boot">Open boot menu</button>');
+  }
+
+  function viewFatal() {
+    var h = mark(0) + '<div class="say">Setup stopped.</div><p class="block">' + esc(S.fatal) + '</p>';
+    return '<div class="scroll">' + h + '</div>' +
+      bar('Nothing is lost. The next start picks up where it stopped.', '<button class="btn" data-act="close">Close</button>');
+  }
+
+  var VIEWS = { selection: viewSelection, installing: viewInstalling, welcome: viewWelcome, done: viewDone, fatal: viewFatal };
+  var queued = false;
+  function render() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(function () {
+      queued = false;
+      if (!S.init) return;
+      var c = document.getElementById('center'), sc = c.querySelector('.scroll'), top = sc ? sc.scrollTop : 0;
+      c.innerHTML = VIEWS[S.phase]();
+      sc = c.querySelector('.scroll');
+      if (sc) sc.scrollTop = top;
+    });
+  }
+
+  // ------------------------------------------------------------ actions
+  function shortcutLabel(dir) {
+    if (!dir) return '';
+    if (S.init.desktop && dir === S.init.desktop) return S.init.desktop_label || 'Desktop';
+    return dir;
+  }
+  function act(a, el) {
+    switch (a) {
+      case 'min': send({ type: 'minimize' }); break;
+      case 'close': send({ type: 'close' }); break;
+      case 'toggle': S.sel[el.dataset.id] = !S.sel[el.dataset.id]; render(); break;
+      case 'opt': S.optOpen = !S.optOpen; render(); break;
+      case 'root': send({ type: 'pick_folder', for: 'install', current: S.root }); break;
+      case 'shortcut': send({ type: 'pick_folder', for: 'shortcut', current: S.shortcutDir || S.init.desktop }); break;
+      case 'install':
+        S.started = true; S.phase = 'installing';
+        S.shortcutDir = S.init.desktop || null; S.shortcutLabel = shortcutLabel(S.shortcutDir);
+        send({ type: 'start', points: selected().map(function (p) { return p.id; }), install_root: S.root, shortcut_dir: S.shortcutDir });
+        render(); break;
+      case 'continue': S.started = true; S.phase = 'installing'; send({ type: 'resume' }); render(); break;
+      case 'pause': S.paused = !S.paused; send({ type: S.paused ? 'pause' : 'resume' }); render(); break;
+      case 'retry': {
+        var id = el.dataset.id;
+        if (S.files[id]) S.files[id].error = null;
+        if (S.steps[id]) S.steps[id] = { status: 'running', detail: '' };
+        send({ type: 'retry', id: id }); render(); break;
+      }
+      case 'boot': send({ type: 'open_boot_menu' }); break;
+    }
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]');
+    if (t && !t.disabled) act(t.dataset.act, t);
+  });
+  document.getElementById('drag').addEventListener('mousedown', function (e) {
+    if (e.button === 0) send({ type: 'drag' });
+  });
+
+  // ------------------------------------------------------------ bridge
+  function onEvent(e) {
+    if (!e) return;
+    var f;
+    switch (e.type) {
+      case 'preflight':
+        S.report = e;
+        send({ type: 'log', msg: 'preflight: ' + (e.gpu_name || 'no GPU') + (e.hard_block ? ', hard block' : '') + ', ' + (e.blocked || []).length + ' blocked' });
+        break;
+      case 'planned':
+        S.plan = e; S.jobs = {};
+        e.jobs.forEach(function (j) { S.jobs[j.id] = j; });
+        if (!S.started) S.phase = 'welcome';
+        break;
+      case 'checking': file(e.id).checking = true; break;
+      case 'file_started':
+        f = file(e.id); f.started = true; f.checking = false; f.done = e.from_byte; f.total = e.total;
+        if (!f.dropped && !f.reconnecting) f.from = e.from_byte;
+        f.reconnecting = 0; f.error = null; break;
+      case 'file_progress': f = file(e.id); f.done = e.done; f.total = e.total; f.reconnecting = 0; break;
+      case 'file_retry': f = file(e.id); f.reconnecting = e.attempt; f.dropped = true; break;
+      case 'file_verified':
+        f = file(e.id); f.verified = true; f.checking = false; f.reconnecting = 0; f.error = null;
+        if (S.jobs[e.id]) f.done = f.total = S.jobs[e.id].bytes;
+        break;
+      case 'file_error': f = file(e.id); f.error = e.message; f.reconnecting = 0; break;
+      case 'step':
+        S.steps[e.name] = { status: e.status, detail: e.detail };
+        if (e.name === 'shortcuts' && e.status === 'ok' && S.phase === 'done' && /[\\/]/.test(e.detail)) {
+          S.shortcutDir = e.detail; S.shortcutLabel = shortcutLabel(e.detail);
+        }
+        break;
+      case 'done':
+        S.done = e; S.phase = 'done';
+        if (e.shortcut) { S.shortcutDir = e.shortcut.replace(/[\\/][^\\/]*$/, ''); S.shortcutLabel = shortcutLabel(S.shortcutDir); }
+        else S.shortcutDir = null;
+        break;
+      case 'fatal': S.fatal = e.message; S.phase = 'fatal'; break;
+    }
+    render();
+  }
+
+  // Calls from the exe arrive through evaluate_script, where a throw may not
+  // reach window.onerror: report it over the bridge (the exe logs to stderr).
+  function guard(f) {
+    return function (x) {
+      try { return f(x); } catch (e) { send({ type: 'log', msg: 'error: ' + e.message + ' ' + (e.stack || '') }); }
+    };
+  }
+  window.crow = {
+    init: guard(function (init) {
+      S.init = init; S.info = deriveInfo(init);
+      S.root = init.root || ''; S.rootLabel = init.root_label || S.root;
+      send({ type: 'log', msg: 'init: ' + S.info.points.length + ' points, ' + S.info.llama.length + ' llama.cpp lines' });
+      render();
+    }),
+    event: guard(onEvent),
+    picked: guard(function (p) {
+      if (p.for === 'install') { S.root = p.path; S.rootLabel = p.label || p.path; S.free = p.disk_free; }
+      else { S.shortcutDir = p.path; S.shortcutLabel = shortcutLabel(p.path); }
+      render();
+    }),
+    state: S
+  };
+
+  if (/[?&]mock=/.test(location.search)) {
+    var s = document.createElement('script');
+    s.src = 'mock.js';
+    document.body.appendChild(s);
+  } else {
+    send({ type: 'ready' });
+  }
+})();
+</script>
+</body>
+</html>

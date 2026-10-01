@@ -3,9 +3,21 @@ name = "crowsetup"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Embeds installer/vendor/{python-3.13-embed-amd64.zip, get-pip.py, packages.json}
+# (fetched by the build script); without it --packages is required.
+bundle = []
+
 [dependencies]
 crowsetup-core = { version = "0.1.0", path = "../core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tao = "0.37.1"
 wry = "0.57.0"
+# The folder dialog for "change": the native Common Item Dialog on Windows.
+rfd = { version = "0.17.2", default-features = false }
+# The window icon: cli/crow.ico carries PNG entries.
+png = "0.18.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Console"] }
