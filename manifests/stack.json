@@ -474,6 +474,57 @@
    "bytes": 17534419188
   }
  ],
+ "_crow_files": "Files every Crow install gets, whatever points are chosen: the dictation model (faster-whisper small, CTranslate2). dest is under ${INSTALL}, not ${MODELS}: cli/crow_voice.py model_dir loads <crow>/models/whisper-small beside the client and only when model.bin is there. status upstream, revision pinned; licence mit is the repo card's (the repo carries no licence file, so it is not under licenses). Same file fields as files, without source.",
+ "crow_files": [
+  {
+   "id": "whisper-config",
+   "repo": "Systran/faster-whisper-small",
+   "path": "config.json",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 2370,
+   "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828",
+   "dest": "${INSTALL}/models/whisper-small/config.json",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  },
+  {
+   "id": "whisper-vocabulary",
+   "repo": "Systran/faster-whisper-small",
+   "path": "vocabulary.txt",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 459861,
+   "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+   "dest": "${INSTALL}/models/whisper-small/vocabulary.txt",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  },
+  {
+   "id": "whisper-tokenizer",
+   "repo": "Systran/faster-whisper-small",
+   "path": "tokenizer.json",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 2203239,
+   "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+   "dest": "${INSTALL}/models/whisper-small/tokenizer.json",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  },
+  {
+   "id": "whisper-model",
+   "repo": "Systran/faster-whisper-small",
+   "path": "model.bin",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 483546902,
+   "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
+   "dest": "${INSTALL}/models/whisper-small/model.bin",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  }
+ ],
  "points": [
   {
    "id": "flash-next",
