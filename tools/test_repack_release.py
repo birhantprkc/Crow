@@ -384,5 +384,34 @@ class TheBootMenuManifestShipsTest(unittest.TestCase):
         self.assertEqual(rr.scan_private(files, pats + ["\\Users\\", "/Users/", "/home/"]), [])
 
 
+class TheTextEncoderConverterShipsTest(unittest.TestCase):
+    """#196 P2: CrowSetup runs <install>/tools/te_rename.py to build the Image
+    Stack's text_encoder_sdcli/, so the package carries it -- and nothing else
+    of tools/."""
+
+    def test_the_staged_package_contains_it_byte_for_byte(self):
+        files = rr.stage_from_checkout(rr.REPO)
+        self.assertIn("tools\\te_rename.py", files)
+        with open(os.path.join(rr.REPO, "tools", "te_rename.py"), "rb") as fh:
+            self.assertEqual(files["tools\\te_rename.py"], fh.read())
+        self.assertEqual([n for n in files if n.lower().startswith("tools\\")], ["tools\\te_rename.py"])
+
+    def test_it_is_in_the_shipped_set_and_no_other_tool_is(self):
+        self.assertEqual(rr.shipped_set_violations(["tools\\te_rename.py", "tools/te_rename.py"]), [])
+        bad = ["tools\\repack-release.py", "tools\\check_stack.py", "tools\\sub\\te_rename.py"]
+        self.assertEqual({p for p, _ in rr.shipped_set_violations(bad)}, set(bad))
+
+    def test_it_passes_the_privacy_gate(self):
+        with open(os.path.join(rr.REPO, "tools", "te_rename.py"), "rb") as fh:
+            files = {"tools\\te_rename.py": fh.read()}
+        pats, _ = rr.private_patterns(profile=FAKE_PROFILE, user="fakebuilder", host=FAKE_HOST)
+        self.assertEqual(rr.scan_private(files, pats + ["\\Users\\", "/Users/", "/home/"]), [])
+
+    def test_pack_release_ps1_stages_it_in_the_packing_path(self):
+        with open(PS1, encoding="utf-8") as fh:
+            ps = fh.read()
+        self.assertRegex(ps, r"(?m)^Copy-ToolFiles -Repo \$repo -Stage \$stage")
+
+
 if __name__ == "__main__":
     unittest.main()
