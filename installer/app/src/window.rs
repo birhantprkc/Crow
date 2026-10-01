@@ -26,7 +26,7 @@ use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::{Icon, Window, WindowBuilder};
-use wry::{WebView, WebViewBuilder, http::Request};
+use wry::{WebContext, WebView, WebViewBuilder, http::Request};
 
 const PAGE: &str = include_str!("../../ui/index.html");
 const LOGO: &str = include_str!("../../../cli/mark-on-dark.svg");
@@ -102,6 +102,13 @@ pub fn message_box(text: &str) {
         .set_description(text)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
+}
+
+/// The WebView2 user data folder: `<launch root>\setup\webview2`, where the
+/// launch root is `--install-root` or %LOCALAPPDATA%\Crow. WebView2's default
+/// is `<exe>.WebView2\` beside the exe, which put a folder into Downloads.
+pub fn webview_data_dir(launch_root: &Path) -> PathBuf {
+    launch_root.join("setup").join("webview2")
 }
 
 /// What the page needs before the first event.
@@ -310,7 +317,10 @@ pub fn main(s: Setup) -> ! {
     };
 
     let ipc_proxy = proxy.clone();
-    let webview = WebViewBuilder::new()
+    // wry hands this to CreateCoreWebView2EnvironmentWithOptions as the user
+    // data folder; the run never returns, so the context outlives the view.
+    let mut web_context = WebContext::new(Some(webview_data_dir(&s.opts.launch_root)));
+    let webview = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_html(page())
         .with_background_color(BG)
         .with_devtools(cfg!(debug_assertions))
@@ -382,6 +392,16 @@ mod tests {
             &block[..block.len().min(120)]
         );
         assert!(!block.contains("window.crow"), "the forwarder must stand before the page's script");
+    }
+
+    /// #196 P2-E2E: the WebView2 profile goes under the launch root's setup
+    /// folder (`--install-root` or %LOCALAPPDATA%\Crow), never beside the exe.
+    #[test]
+    fn the_webview_profile_lives_in_the_setup_folder() {
+        let root = Path::new(r"D:\Test\Crow");
+        assert_eq!(webview_data_dir(root), PathBuf::from(r"D:\Test\Crow\setup\webview2"));
+        let default = crowsetup_core::run::default_install_root();
+        assert_eq!(webview_data_dir(&default), default.join("setup").join("webview2"));
     }
 
     #[test]
