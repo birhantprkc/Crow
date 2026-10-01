@@ -7,6 +7,14 @@ The reasoning is in the commit and on the issue.
 
 ### Added
 
+- **`CrowSetup.exe` installs Crow, the crow-nest engine and the chosen operating points** (#196, 2026-10-01). One Rust exe whose window (WebView2) uses Crow's own look: the crow fills as the progress, "Flying to the nest", "Landed. Crow is ready.".
+  - **Selection:** Crow and the engine are required; Flash-Next, 27B and Image Stack are chosen per row; a point the machine cannot run (no RTX 50 card, under 64 GB RAM for Flash-Next, not enough disk) stays visible with its reason.
+  - **Downloads resume:** each file goes to `.part` with `setup\state.json` (fsync every 64 MiB), Range + If-Range, unbounded retries with a stall timeout, sha256 before the rename, a fallback to IPv4 after resets. Closing with X and starting again shows "Welcome back" and continues. Measured 2026-10-01: a 927,607,488 B file from Hugging Face killed at 30.4 % resumed from byte 268,447,949 and verified; Pause resumed at the exact byte; a `--source` install killed at 6.0 GB continued from the last checkpoint.
+  - **Configuration** comes from `manifests/stack.json` and the boot menu; nothing is written to the user environment. Models always go to `<install>\models`; the shortcut passes `--models`. The Image Stack's `text_encoder_sdcli/` is derived on the machine and the upstream `text_encoder/` deleted.
+  - **Python:** a found Python 3.10+ is used, else the bundled embeddable 3.13.16.
+  - **Flags:** `--headless`, `--selftest`, `--source <dir>`, `--package-source <dir>`, `--install-root <dir>`, `--shortcut-dir <dir>`, `--no-shortcuts`. `installer/build.ps1` builds it remapped, with a static C runtime, and refuses on the privacy gate (18,488,320 B on 2026-10-01).
+- **The operating-point window** (#196, 2026-10-01). `python cli\crow_boot.py --gui`, and the shortcut the installer writes: the three crow-nest points and the optional llama.cpp lines with Start, the crow filling while a point starts, "Landed." with the running point and Stop on top, "One model at a time." when a second start is refused, and "Open Crow window" for the chat. The terminal menu stays (`--terminal` writes its shortcut). Measured 2026-10-01: the 27B landed in 15.3 s through the window; Stop took 4.4 s with every port free afterwards.
+
 - **A boot menu starts an operating point, then Crow** (#196, 2026-10-01). It is started with `python cli\crow_boot.py`, or from a shortcut via `--create-shortcut <folder>`, which uses Windows Terminal when present.
   - **Entries:** Start Crow, the three crow-nest points (Flash-Next, 27B, Image Stack, the baseline), and below them under "Optional (llama.cpp)" Crow's llama.cpp lines, dimmed. Only lines whose files are on disk are shown. The last entries are Stop and Quit.
   - **Starting a point:** an animated "flying to the nest" line replaces the server log. "Landed" shows for 5 s, then the menu comes back.
