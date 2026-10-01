@@ -1018,10 +1018,6 @@ def terminate_tree(proc, grace: float = 5.0) -> None:
 
 # --------------------------------------------------------------- the shell ---
 
-def shell_name() -> str:
-    """What `run_command` runs a command line through, as the model reads it."""
-    return "cmd.exe" if IS_WINDOWS else "bash"
-
 
 def shell_executable() -> "str | None":
     """The shell binary for `subprocess.run(..., shell=True)`, or None.

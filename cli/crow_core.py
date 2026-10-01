@@ -854,19 +854,6 @@ def reasoning_group_of(level: str | None,
     return None
 
 
-def reasoning_row_name(group: tuple[str, ...]) -> str:
-    """What one group is CALLED: its first member that is not `off`.
-
-    `off` never names a row. It is the absence of a setting, and a menu that offers it beside the
-    step it is identical to is the defect #117 was cut for -- on Qwen the chip read `reasoning off`
-    while the model reasoned at xhigh, the dearest setting there is.
-    """
-    for name in group:
-        if name != "off":
-            return name
-    return "off"
-
-
 def reasoning_change_rerenders(current: str | None, wanted: str | None,
                                groups: tuple[tuple[str, ...], ...]) -> bool:
     """Whether moving from `current` to `wanted` actually changes the prompt.
@@ -5571,17 +5558,10 @@ def subtask_max_tokens() -> int:
     return _SUBTASK_MAX or REMOTE_MAX_TOKENS
 ANTHROPIC_MAX_TOKENS = REMOTE_MAX_TOKENS
 
-# NOT SENT ON THIS TRANSPORT: temperature, top_p, top_k. They are REMOVED on the
-# current Claude models -- a request carrying them comes back 400 -- while the
-# local server needs all three. The sampling triple is llama-server's, the same
-# way the slot and the prefix cache are.
-_ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
-                    "presence_penalty", "chat_template_kwargs", "reasoning_effort",
-                    "reasoning_budget_tokens", "reasoning_budget_message",
-                    "timings_per_token", "stream_options")
 
-# NOT SENT AWAY FROM HOME, and the list is SHORTER than the one above: a remote
-# OpenAI-shaped endpoint takes the sampling pair that Anthropic refuses. What
+# NOT SENT AWAY FROM HOME: a remote OpenAI-shaped endpoint takes the sampling
+# pair that Anthropic refuses (anthropic_body builds its own body from a
+# whitelist). What
 # goes is only what llama-server alone can act on. `timings_per_token` and
 # `chat_template_kwargs` are its extensions, and `min_p` is a sampler measured
 # against it.
@@ -7967,22 +7947,6 @@ def projects() -> list[str]:
     return out
 
 
-def is_project(root: str | None) -> bool:
-    """Is this exact directory one of the projects?
-
-    EXACT, NOT AN ANCESTOR WALK, and that is a decision rather than a shortcut.
-    `find_root` deliberately takes the NEAREST marker and not the highest, so a
-    sub-directory that declares itself is its own root; treating it as part of
-    the project above it would contradict the rule the rest of the file is built
-    on. A chat bound to `Crow/cli` belongs to `Crow/cli`, and if that is not a
-    project, the chat has no project.
-    """
-    if not root:
-        return False
-    key = os.path.normcase(_resolve(root))
-    return any(os.path.normcase(p) == key for p in projects())
-
-
 def add_project(root: str) -> bool:
     """Declare `root` a root if it is not one yet, and list it as a project.
 
@@ -8153,9 +8117,6 @@ USER_PATH = os.path.join(crow_platform.config_dir(), "USER.md")
 # opening the file by hand sees the boundary without needing a legend.
 MEMORY_SEP = "§"
 
-# Above this share the header tells the model to consolidate before it adds.
-# ADVICE, NOT A SECOND GATE -- the gate is the limit itself, below.
-MEMORY_FULL_AT = 0.8
 
 MEMORY_TARGETS = ("memory", "user")
 
@@ -10566,7 +10527,6 @@ def take_image_ride() -> "list[dict] | None":
 # kommt aus der Distribution, aus flatpak oder aus einem Tarball --, also wird
 # ueber PATH gesucht statt ueber Pfade. Die Liste selbst und die Suche stehen in
 # crow_platform.browser_candidates; hier bleibt, was damit geschieht.
-BROWSERS = crow_platform.browser_candidates()
 
 
 def find_browser() -> "str | None":
@@ -11084,27 +11044,14 @@ def _page_target(path: str) -> "tuple[str | None, str]":
                                                       safe=_PAGE_SUFFIX_SAFE)
 
 
-# #293. THE STRUCTURED SIDE OF A RENDER. The last render's record (the
-# contract in _render_page's docstring), for code that must not parse
-# the text. Replaced by every call that gets past its argument checks.
-_RENDER_LAST: dict = {}
-
-
-def last_render() -> dict:
-    """#293: a copy of the last render_page record, {} before the first."""
-    return json.loads(json.dumps(_RENDER_LAST)) if _RENDER_LAST else {}
-
-
 def _render_record(mode: str, renderer: "str | None", frames: "list[str]",
                    sheet: "str | None", precheck: "dict | None",
                    **extra) -> dict:
-    """#293: one record, kept as last_render() and returned."""
+    """#293: one record -- the contract in _render_page's docstring."""
     record = {"render_mode": mode, "renderer": renderer,
               "frames": list(frames), "contact_sheet": sheet,
               "precheck": precheck}
     record.update(extra)
-    _RENDER_LAST.clear()
-    _RENDER_LAST.update(record)
     return record
 
 
@@ -11410,8 +11357,7 @@ def _render_page(path: str, wait_ms: int | None = None,
     """Render one page in a browser Crow owns, and hand back what it saw.
 
     THE CONTRACT (#293). Every capture result and every ENVIRONMENT error
-    carries one line `render: <json>`, and `last_render()` returns the same
-    dict for code (goal mode, the judge):
+    carries one line `render: <json>`:
 
       render_mode    "gpu" | "unavailable". "unavailable" comes with an
                      `error: ENVIRONMENT -- ...` result and NO image: the VRAM
@@ -17622,18 +17568,6 @@ def mcp_apply(doc: dict | None = None) -> "list[str]":
     return problems
 
 
-def mcp_prompt_cost() -> int:
-    """How many characters the configured servers add to the hashed head.
-
-    MEASURED, NOT PREDICTED. What a server costs is per server -- Cloudflare's
-    reports around 3,300 tools at `?codemode=false`, Crow's own twelve are about
-    6,200 characters -- and it is not a property of Crow. But the schema is in
-    hand once it is on disk, so this counts it instead of guessing.
-    """
-    return (len(json.dumps(TOOLS, sort_keys=True))
-            - len(json.dumps(list(BUILTIN_TOOLS), sort_keys=True)))
-
-
 # ---------------------------------------------------------------- E3 ------
 # THE CONNECTION HAPPENS WHEN A TOOL IS CALLED, AND NEVER BEFORE.
 #
@@ -22214,9 +22148,8 @@ def goal_last_answer(messages: "list | None") -> "dict | None":
     Zurueckgegeben wird eine KOPIE der letzten Antwort, deren `tool_calls`
     alle Aufrufe des Zuges tragen -- ab der Zeile, die ihn eroeffnet hat;
     Crows eigene Protokollzeilen im Zug (Budget, Denk-Stups) eroeffnen keinen.
-    Damit sagen `goal_answer_empty` und `goal_answer_mark` ueber den ZUG aus:
-    wer gearbeitet hat, ist nicht leer, und zwei Zuege sind nur dann gleich,
-    wenn sie dieselben Aufrufe mit denselben Argumenten gemacht haben.
+    Damit sagt `goal_answer_empty` ueber den ZUG aus: wer gearbeitet hat,
+    ist nicht leer.
     """
     last = None
     calls: list = []
@@ -22236,27 +22169,6 @@ def goal_last_answer(messages: "list | None") -> "dict | None":
     if calls:
         answer["tool_calls"] = calls
     return answer
-
-
-def goal_answer_mark(message: "dict | None") -> "str | None":
-    """Der Fingerabdruck einer Antwort. None, wenn es keine gibt.
-
-    TEXT UND WERKZEUGE, MIT ARGUMENTEN: zwei Zuege, die denselben Satz sagen und
-    dabei verschiedene Dateien schreiben, sind nicht derselbe Zug -- und zwei,
-    die denselben Aufruf mit denselben Argumenten wiederholen, sind es, auch
-    wenn der Text daneben sich unterscheidet. Der Name allein waere zu grob:
-    `read_file` auf zwanzig Dateien ist Arbeit, `read_file` zwanzigmal auf
-    dieselbe ist ein Kreis.
-    """
-    if message is None:
-        return None
-    import hashlib
-
-    calls = [[(call.get("function") or {}).get("name") or "",
-              (call.get("function") or {}).get("arguments") or ""]
-             for call in message.get("tool_calls") or []]
-    material = json.dumps([goal_message_text(message).strip(), calls], sort_keys=True)
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
 def goal_answer_empty(message: "dict | None") -> bool:
@@ -22282,7 +22194,7 @@ def goal_turn_mark(messages: "list | None") -> "str | None":
     """#259: the fingerprint of the LAST TURN, not of its last
     message. None when there is no answer yet.
 
-    `goal_answer_mark` of the last message alone made every turn that ended on
+    A fingerprint of the last message alone made every turn that ended on
     an empty forced answer the SAME answer -- sha of ("", no calls) -- however
     different the 24 calls before it were. The last answer's text plus every
     call of the turn, with arguments: the same text over the same calls is
@@ -27165,28 +27077,6 @@ def delegate_favorites_set(models: "list | None") -> "str | None":
     return provider_write(doc)
 
 
-def delegate_target_set(provider: "str | None", model: str = "") -> "str | None":
-    """Pin or clear the delegate spot. The reason it failed, or None.
-
-    CLEARING RESTORES THE FREE DEFAULT rather than switching delegation off:
-    off is not a state the mechanism has -- a spot that cannot be resolved
-    already answers every `delegate` with its sentence.
-    """
-    doc = provider_doc()
-    if not provider:
-        doc.pop("delegate", None)
-        return provider_write(doc)
-    if provider == LOCAL_PROVIDER:
-        return ("the local slot is never a delegation target -- "
-                "parallelism is bought at a provider, not from the card")
-    if provider not in PROVIDERS:
-        return "no provider named %r" % provider
-    if not model:
-        return "the delegate spot needs a model"
-    doc["delegate"] = {"provider": provider, "model": model}
-    return provider_write(doc)
-
-
 class Subtask:
     """One delegated task: what was asked, who ran it, what came back.
 
@@ -27605,11 +27495,6 @@ def _spot_verdict(detail: str, model: str = "") -> "tuple[str, str]":
     if code in _TRANSIENT_CODES or any(m in low for m in _RETRYABLE):
         return "transient", ("HTTP %d" % code) if code else "no answer"
     return "global", ("HTTP %d" % code) if code else "refused"
-
-
-def _spot_retryable(detail: str) -> bool:
-    """Whether another spot is worth asking -- both non-global verdicts."""
-    return _spot_verdict(detail)[0] != "global"
 
 
 def delegate_fallbacks(spot: dict, doc: "dict | None" = None) -> "list[dict]":
@@ -28235,47 +28120,6 @@ def _judge_key(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
 
 
-def judge_parse(text: str, criteria: "list[str]") -> "tuple[dict | None, str | None]":
-    """The judge's JSON as `{scores, min, weakest, verdict, missing}`, or an
-    error. Fences and prose around the object are tolerated; scores are
-    matched to the rubric by normalised name and clamped to 1..10. More than
-    half the rubric unscored is no verdict."""
-    raw = str(text or "")
-    start, end = raw.find("{"), raw.rfind("}")
-    if start < 0 or end <= start:
-        return None, "the judge answered without JSON: %r" % raw[:160]
-    try:
-        doc = json.loads(raw[start:end + 1])
-    except ValueError as exc:
-        return None, "the judge's JSON does not parse (%s): %r" % (exc, raw[:160])
-    given = doc.get("scores") if isinstance(doc, dict) else None
-    if not isinstance(given, dict):
-        return None, "the judge's JSON has no scores object"
-    by_key = {_judge_key(k): v for k, v in given.items()}
-    scores, missing = {}, []
-    for name in criteria:
-        key = _judge_key(name)
-        value = by_key.get(key)
-        if value is None:
-            value = next((v for k, v in by_key.items()
-                          if k and (k.startswith(key) or key.startswith(k))), None)
-        try:
-            scores[name] = max(1, min(10, int(round(float(value)))))
-        except (TypeError, ValueError):
-            missing.append(name)
-    if not scores or len(missing) * 2 > len(criteria):
-        return None, "the judge scored %d of %d criteria" % (len(scores),
-                                                            len(criteria))
-    weakest = doc.get("weakest")
-    weakest = [str(w)[:240] for w in weakest if str(w).strip()][:3] \
-        if isinstance(weakest, list) else []
-    if not weakest:
-        weakest = [k for k, _v in sorted(scores.items(), key=lambda kv: kv[1])][:3]
-    return ({"scores": scores, "min": min(scores.values()), "weakest": weakest,
-             "verdict": str(doc.get("verdict") or "")[:400],
-             "missing": missing}, None)
-
-
 def _judge_step(goal: "dict | None", step) -> "int | None":
     """The 0-based step a verdict belongs to: the one named, else the
     running one, else the first open one."""
@@ -28804,8 +28648,6 @@ GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED = ("open", "running",
 # lighting), `goal_next_open` handed it back as the next step on every turn,
 # and the run sat on it for ~2 h 20 min until robin edited goal.json by hand.
 GOAL_SKIPPED = "skipped"
-GOAL_STEP_STATES = (GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED,
-                    GOAL_SKIPPED)
 # #289: THE GOAL'S OWN STATE when every step is done or skipped and at least
 # one is skipped -- "complete with N skipped", never `done`: a skipped step
 # is work that did not happen, and `done` would say it did.
@@ -28942,10 +28784,6 @@ def goal_delegated_seen(tokens: int) -> None:
         goal_write(goal)
 
 
-def goal_context_tokens() -> int:
-    return GOAL_TOKENS_NOW
-
-
 def goal_spent(goal: "dict | None" = None) -> int:
     """Was dieses Ziel gekostet hat, ueber jeden Kontext hinweg, in dem es lebte.
 
@@ -29011,8 +28849,7 @@ def goal_load() -> "dict | None":
     TOLERANT WIE JEDE BEQUEMLICHKEITSDATEI, mit einer Ausnahme: eine Datei, die
     da ist und nicht gelesen werden kann, ist NICHT dasselbe wie kein Ziel. Sie
     wird trotzdem als None beantwortet -- ein Fenster, das wegen eines kaputten
-    JSON nicht startet, waere der schlechtere Tausch --, und `goal_broken` sagt
-    dem Aufrufer, dass er nicht "kein Ziel" gelesen hat, sondern "unlesbar".
+    JSON nicht startet, waere der schlechtere Tausch.
     """
     try:
         with open(goal_path(), encoding="utf-8-sig") as fh:
@@ -29045,15 +28882,6 @@ def _goal_repair_skips(goal: dict) -> None:
     if (goal.get("status") == GOAL_DONE and GOAL_SKIPPED in states
             and all(x in (GOAL_DONE, GOAL_SKIPPED) for x in states)):
         goal["status"] = GOAL_PARTIAL
-
-
-def goal_broken() -> bool:
-    """Die Datei existiert und ist kein lesbares Ziel. Fuer den einen Fall, in
-    dem "kein Ziel" und "kaputtes Ziel" verschieden beantwortet werden muessen:
-    ein Ziel stillschweigend zu verlieren ist schlimmer als es zu melden."""
-    if not os.path.isfile(goal_path()):
-        return False
-    return goal_load() is None
 
 
 def goal_write(goal: "dict | None") -> None:

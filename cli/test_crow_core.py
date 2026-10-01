@@ -53,6 +53,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import crow_core      # noqa: E402
+
+
+def _retryable(detail: str) -> bool:
+    """#187 follow-up: another spot is worth asking for both non-global
+    verdicts of `_spot_verdict` (the wrapper that said so is gone)."""
+    return crow_core._spot_verdict(detail)[0] != "global"
 import crow_platform  # noqa: E402
 
 # THE SUITE MAY NOT DEPEND ON WHAT THIS MACHINE HAS CONFIGURED (#130).
@@ -2784,16 +2790,16 @@ class SpotFallbackTests(unittest.TestCase):
         sind Krankheiten DIESES Spots -- der naechste antwortet. Ein nackter
         404 bleibt nicht-retryable: eine Adresse, die ueberall 404 ist, ist
         keine Spot-Frage."""
-        self.assertTrue(crow_core._spot_retryable(
+        self.assertTrue(_retryable(
             'HTTP 404 from https://openrouter.ai/api/v1/chat/completions: '
             '{"error":{"message":"Provider returned error","code":404,'
             '"metadata":{"raw":"","provider_name":"Nvidia"}}}'))
-        self.assertTrue(crow_core._spot_retryable(
+        self.assertTrue(_retryable(
             'HTTP 404: {"error":{"message":"No endpoints found that can '
             'handle the requested parameters."}}'))
-        self.assertFalse(crow_core._spot_retryable(
+        self.assertFalse(_retryable(
             "HTTP 404 from https://x/v1/chat/completions: Not Found"))
-        self.assertFalse(crow_core._spot_retryable("the schema refused it"))
+        self.assertFalse(_retryable("the schema refused it"))
 
     GATED = ('HTTP 403 from https://openrouter.ai/api/v1/chat/completions: '
              '{"error":{"message":"thinkingmachines/inkling-small:free is only '
@@ -6286,16 +6292,6 @@ class AProjectIsAWorkingDirectoryTests(unittest.TestCase):
         crow_core.set_active_root(other)
         self.assertEqual(len(crow_core.projects()), 1)
 
-    def test_a_subdirectory_of_a_project_is_not_in_it(self):
-        """`find_root` takes the NEAREST marker and not the highest, so a
-        sub-directory that declares itself is its own root. Folding it into the
-        project above would contradict the rule the boundary is built on."""
-        top = self._dir("Crow")
-        crow_core.add_project(top)
-        inner = self._dir(os.path.join("Crow", "cli"))
-        self.assertTrue(crow_core.is_project(top))
-        self.assertFalse(crow_core.is_project(inner))
-
     def test_dropping_one_leaves_the_marker_and_the_directory(self):
         """A boundary that disappeared because a list was tidied is the failure
         the root mechanism exists to prevent. The row goes; nothing else does."""
@@ -6305,15 +6301,12 @@ class AProjectIsAWorkingDirectoryTests(unittest.TestCase):
         self.assertEqual(crow_core.projects(), [])
         self.assertTrue(os.path.isdir(path))
         self.assertTrue(os.path.isfile(crow_core.root_file(path)))
-        self.assertFalse(crow_core.is_project(path))
 
     def test_nothing_is_a_project_before_anybody_says_so(self):
-        """NEGATIVE PROBE for `is_project`: a directory that merely HAS a marker
-        -- and `.crow/` appears wherever crow runs -- is not a project."""
+        """NEGATIVE PROBE: a directory that merely HAS a marker -- and `.crow/`
+        appears wherever crow runs -- is not a project."""
         path = self._dir("zufall")
         crow_core.write_root_mode(path, crow_core.DEFAULT_MODE)
-        self.assertFalse(crow_core.is_project(path))
-        self.assertFalse(crow_core.is_project(None))
         self.assertEqual(crow_core.projects(), [])
 
 
@@ -8025,17 +8018,6 @@ class TheMcpConfigurationTests(unittest.TestCase):
         crow_core.SEARXNG_URL = "http://127.0.0.1:8888"
         crow_core.mcp_apply()
         self.assertEqual(crow_core.prefix_fingerprint("sys", "crow"), before)
-
-    def test_the_cost_is_measured_from_the_schema_not_guessed(self):
-        """What a server costs in the head is per server and nobody's estimate.
-        Crow has the schema in hand, so it counts rather than predicting."""
-        self.assertEqual(crow_core.mcp_prompt_cost(), 0)
-        self._write(self._server())
-        self.assertEqual(
-            crow_core.mcp_prompt_cost(),
-            len(json.dumps(crow_core.TOOLS, sort_keys=True))
-            - len(json.dumps(list(crow_core.BUILTIN_TOOLS), sort_keys=True)))
-        self.assertGreater(crow_core.mcp_prompt_cost(), 0)
 
     def test_the_cost_note_says_the_next_start_is_cold(self):
         """Same shape as MEMORY_COST_NOTE and said the same way round: before
@@ -10610,7 +10592,6 @@ class TheChecklistTests(unittest.TestCase):
         crow_core.mcp_add_server("fake", self._block())
         cost = crow_core.mcp_view()["servers"][0]["cost"]
         self.assertGreater(cost, 0)
-        self.assertEqual(cost, crow_core.mcp_prompt_cost())
 
     def test_removing_a_server_takes_its_tools_with_it(self):
         crow_core.mcp_add_server("fake", self._block())
@@ -13745,17 +13726,6 @@ class TheDelegateSpotTests(unittest.TestCase):
         self.assertIsNone(spot)
         self.assertIn("no key", problem)
 
-    def test_the_setting_is_written_read_back_and_clearable(self):
-        self.assertIsNone(crow_core.delegate_target_set("openrouter",
-                                                        "big/model:free"))
-        self.assertEqual(crow_core.provider_doc().get("delegate"),
-                         {"provider": "openrouter", "model": "big/model:free"})
-        self.assertIsNone(crow_core.delegate_target_set(None))
-        self.assertNotIn("delegate", crow_core.provider_doc())
-        self.assertIn("local slot", crow_core.delegate_target_set("local", "x"))
-        self.assertIn("needs a model", crow_core.delegate_target_set("openrouter"))
-        self.assertIn("no provider", crow_core.delegate_target_set("nowhere", "x"))
-
 
 class TheRolloverCarriesADigestTests(unittest.TestCase):
     """#154: vor dem Schnitt ist der volle Praefix noch warm im Server-Cache
@@ -14351,7 +14321,7 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
     def test_the_browser_is_looked_up_and_never_hard_coded(self):
         """Eine Maschine ohne Chrome hat Edge, und ein Pfad im Quelltext ist der
         Pfad EINER Maschine. Alle Kandidaten gehen ueber Umgebungsvariablen."""
-        for raw in crow_core.BROWSERS:
+        for raw in crow_platform.browser_candidates():
             if sys.platform == "win32":
                 self.assertTrue(raw.startswith("%"), raw)
             else:
@@ -16777,25 +16747,6 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
 
     # -- the answer ----------------------------------------------------------
 
-    def test_a_fenced_answer_is_parsed_matched_and_clamped(self):
-        text = _judge_reply({"Detail density": 12, "lighting-mood": "3",
-                             "composition": 2.4})["choices"][0]["message"]["content"]
-        verdict, bad = crow_core.judge_parse(
-            text, ["detail density", "lighting mood", "composition"])
-        self.assertIsNone(bad)
-        self.assertEqual(verdict["scores"], {"detail density": 10,
-                                             "lighting mood": 3,
-                                             "composition": 2})
-        self.assertEqual(verdict["min"], 2)
-        self.assertEqual(verdict["weakest"], ["tiny", "black", "flat"])
-
-    def test_an_answer_that_scores_too_little_is_no_verdict(self):
-        verdict, bad = crow_core.judge_parse(
-            '{"scores": {"a": 9}}', ["a", "b", "c"])
-        self.assertIsNone(verdict)
-        self.assertIn("1 of 3", bad)
-        self.assertIsNone(crow_core.judge_parse("looks great!", ["a"])[0])
-
     # -- who judges ----------------------------------------------------------
 
     def spot(self, model, provider="openrouter"):
@@ -17372,12 +17323,10 @@ class TheGoalOutlivesEverythingTests(unittest.TestCase):
     def test_an_unreadable_file_reads_as_no_goal_but_says_it_is_broken(self):
         """Ein Ziel stillschweigend zu verlieren ist schlimmer, als es zu melden
         -- deshalb zwei Antworten. Mit der Gegenprobe: nichts da ist nicht kaputt."""
-        self.assertFalse(crow_core.goal_broken())
         self.a_goal()
         with open(crow_core.goal_path(), "w", encoding="utf-8") as fh:
             fh.write("{not json")
         self.assertIsNone(crow_core.goal_load())
-        self.assertTrue(crow_core.goal_broken())
 
     # -- was ein Schritt gekostet hat (#169, #174, #168) ---------------------
 
@@ -20138,26 +20087,9 @@ class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
                 for n, (name, args) in enumerate(calls)]
         return message
 
-    def test_the_same_text_and_the_same_call_are_the_same_answer(self):
-        """POSITIV: der Fingerabdruck ist Text UND Aufruf mit Argumenten."""
-        one = self.answer("looking", [("read_file", '{"path": "a.py"}')])
-        two = self.answer("looking", [("read_file", '{"path": "a.py"}')])
-        self.assertEqual(crow_core.goal_answer_mark(one),
-                         crow_core.goal_answer_mark(two))
-
-    def test_the_same_tool_on_another_file_is_another_answer(self):
-        """GEGENPROBE, und sie ist der Grund fuer die Argumente im Abdruck:
-        `read_file` auf zwanzig Dateien ist Arbeit, zwanzigmal auf dieselbe ist
-        ein Kreis. Ein Abdruck ueber den Namen allein haelte das erste an."""
-        one = self.answer("looking", [("read_file", '{"path": "a.py"}')])
-        two = self.answer("looking", [("read_file", '{"path": "b.py"}')])
-        self.assertNotEqual(crow_core.goal_answer_mark(one),
-                            crow_core.goal_answer_mark(two))
-
     def test_no_answer_has_no_fingerprint(self):
         """None ist nicht der leere Abdruck: ein Gespraech ohne Antwort hat
         nichts wiederholt."""
-        self.assertIsNone(crow_core.goal_answer_mark(None))
         self.assertIsNone(crow_core.goal_last_answer([{"role": "user", "content": "hi"}]))
 
     def test_a_single_token_without_a_tool_call_is_empty(self):
@@ -20272,16 +20204,6 @@ class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
         self.assertEqual(len(answer["tool_calls"]), 3)
         # the stored message itself is untouched: the view is a copy
         self.assertNotIn("tool_calls", messages[-1])
-
-    def test_two_budget_turns_on_different_files_are_different_answers(self):
-        """GEGENPROBE on the echo half: three budget-spending turns all end on
-        `""` with no calls, so their last messages hashed alike -- the brake's
-        second way to call real work a loop."""
-        one = self.budget_turn("[Goal mode, step 7 still open. Continue.]", ["a.js"])
-        two = self.budget_turn("[Goal mode, step 7 still open. Continue.]", ["b.js"])
-        self.assertNotEqual(
-            crow_core.goal_answer_mark(crow_core.goal_last_answer(one)),
-            crow_core.goal_answer_mark(crow_core.goal_last_answer(two)))
 
     def test_a_turn_starts_at_its_nudge_not_at_the_one_before(self):
         """GEGENPROBE: the calls of the PREVIOUS turn do not rescue an empty
@@ -21193,7 +21115,6 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         said = [t["function"]["description"] for t in crow_core.TOOLS
                 if t["function"]["name"] == "run_command"][0]
         self.assertIn(crow_core.SHELL_HINT, said)
-        self.assertIn(crow_platform.shell_name(), crow_core.SHELL_HINT)
         if crow_platform.IS_WINDOWS:
             self.assertIn("dir and findstr", said)
             self.assertIsNone(crow_platform.shell_executable())
@@ -21776,8 +21697,6 @@ class TheCnqReasoningLadderTests(unittest.TestCase):
         usage.prompt_tokens AND 48 identical greedy tokens per pair."""
         groups = crow_core.reasoning_groups_for(self.CNQ)
         self.assertEqual(len(groups), 4)
-        self.assertEqual([crow_core.reasoning_row_name(g) for g in groups],
-                         ["none", "low", "medium", "high"])
         # every level the menu offers lands in exactly one group
         for level in crow_core.reasoning_levels_for(self.CNQ):
             self.assertEqual(
@@ -23378,7 +23297,6 @@ class TheRenderToolIsGpuOnlyTests(unittest.TestCase):
         self.assertEqual((rec["frames"], rec["contact_sheet"], rec["precheck"]),
                          ([], None, None))
         self.assertEqual(rec["free_mib"], 104)
-        self.assertEqual(crow_core.last_render(), rec)
         self.assertIsNone(crow_core.take_render_ride())
         # Not a render_page "timeout" for #202's classes: a refusal that
         # names what it is.
@@ -23412,7 +23330,6 @@ class TheRenderToolIsGpuOnlyTests(unittest.TestCase):
         self.assertIsNone(rec["contact_sheet"])
         self.assertEqual(rec["precheck"]["identical_frames"], None)
         self.assertGreater(rec["precheck"]["distinct_colours"], 16)
-        self.assertEqual(crow_core.last_render(), rec)
         # #268's scan still finds the file line.
         sig = crow_core.render_signature(said, "index.html")
         self.assertEqual(sig["path"], rec["frames"][0])
@@ -27426,7 +27343,6 @@ class TheShippedManifestOffersOnlyMeasuredLevelsTests(unittest.TestCase):
         groups = crow_core.reasoning_groups_for(self.FLASH_NEXT)
         group = crow_core.reasoning_group_of("off", groups)
         self.assertEqual(group, ("off", "high"))
-        self.assertEqual(crow_core.reasoning_row_name(group), "high")
 
     def test_moving_between_flash_next_groups_is_told_apart(self):
         """The grouping has to be able to say BOTH things. off -> high moves no byte

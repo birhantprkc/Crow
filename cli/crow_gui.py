@@ -7519,7 +7519,7 @@ const crow = {
   // EXACT, NOT AN ANCESTOR WALK. `find_root` takes the NEAREST marker and not the
   // highest on purpose, so a sub-directory that declares itself is its own root;
   // folding it into the project above would contradict the rule the boundary is
-  // built on. The core says the same in `is_project`.
+  // built on.
   sameDir(a,b){ if(!a||!b) return false;
     return a.replace(/[\\\/]+$/,"").toLowerCase()
         === b.replace(/[\\\/]+$/,"").toLowerCase(); },
