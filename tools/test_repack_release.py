@@ -45,6 +45,7 @@ def make_repo(root):
     put(root, "cli/fonts/OFL.txt", b"OFL")
     put(root, "manifests/0731-chat-template.jinja", b"{{ x }}")
     put(root, "manifests/operating-point.json", b"{}")
+    put(root, "manifests/stack.json", b"{}")
     put(root, "manifests/shared-core.json", b"{}")
     put(root, "kits/pathtracer/crow-pathtracer.js", bundle)
     put(root, "kits/pathtracer/kit.json", kit.encode())
@@ -367,6 +368,14 @@ class TheBootMenuManifestShipsTest(unittest.TestCase):
             put(d, "manifests/stack.json", b'{"points": []}')
             files = rr.stage_from_checkout(d)
         self.assertEqual(files["manifests\\stack.json"], b'{"points": []}')
+
+    def test_a_checkout_without_one_is_refused(self):
+        # pack-release.ps1 requires it too; a package without it boots nothing
+        with tempfile.TemporaryDirectory() as d:
+            make_repo(d)
+            os.remove(os.path.join(d, "manifests", "stack.json"))
+            with self.assertRaises(SystemExit):
+                rr.stage_from_checkout(d)
 
     def test_it_names_no_builder_and_no_profile_path(self):
         with open(os.path.join(rr.REPO, "manifests", "stack.json"), "rb") as fh:
