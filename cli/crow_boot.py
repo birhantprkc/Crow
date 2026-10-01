@@ -59,23 +59,41 @@ THE DECISIONS, and why each is this way:
   (`crow_core.read_active_point`), then the process scan
   (`crow_core.running_servers(include_image=True)`; a serve is named by
   `crow_core.point_for_server`), then port 8099 itself in case the process list
-  was unreadable. The refusal names what runs and how to stop it: the menu
-  entry, `--stop`, or the pid with `taskkill /PID <pid> /F` (`kill <pid>`).
-* STOP ends every serve and sd-server the process scan sees, waits until they
-  are no longer listed (an ended process stays listed while Windows tears it
-  down; up to 30 s) and removes the contract file. A pid that only the contract file
-  names is not killed (a pid outlives its process and may belong to another
-  program by now); it is reported with the command. A llama-server is NOT an operating point and is never killed
-  by name (#158); it is reported with its pid and the command that ends it.
+  was unreadable. It holds in both directions: a llama-server blocks a
+  baseline start and a baseline point blocks an optional one. The refusal
+  names what runs and how to stop it: the menu entry, `--stop`, or the pid
+  with `taskkill /PID <pid> /F` (`kill <pid>`).
+* OPTIONAL llama.cpp LINES (the owner, 2026-10-01: the crow-nest points are
+  the baseline). Crow's llama.cpp lines from manifests/operating-point.json
+  (8081/8082/8083) are listed below the three points under "Optional
+  (llama.cpp)", tagged "(optional)" and dimmed (the plain fallback keeps the
+  tag). A line is listed only when `crow_core.server_command` resolves its
+  binary and GGUF (`$CROW_MODELS`, `CROW_LLAMA_SERVER_<KEY>`); one that does
+  not is left out, not shown as "not installed". Starting one uses
+  crow_core.start_server's argv, env overlay, scope prefix, slot folder and
+  `llama-server-<port>.out/.err.log`, with this menu's spawn, animation and
+  wait (`/props` answers 200, 600 s). No contract file is written for it: its
+  `point` is one of the three baseline ids. `--models` is handed on as
+  `CROW_MODELS` so both kinds resolve under one root.
+* STOP ends every model server the process scan sees (crow_core.stop_servers'
+  set: serve, sd-server, llama-server), waits until each is torn down
+  (`process_exists`: the process handle, not the exit code -- Windows tears
+  a 13 GB server down for ~1.6 s after it has one) and no longer listed, up to
+  30 s, and removes the contract file. A pid that only the contract file names is not
+  killed (a pid outlives its process and may belong to another program by
+  now); it is reported with the command.
 * START CROW opens `crow_gui.py --base-url <the point's URL>` detached
   (pythonw.exe on Windows when it sits beside the interpreter), with the
   point's `crow_env` (the Image Stack's CROW_IMAGE_MODEL_DIR) in its
-  environment. With no point running it says so and starts nothing.
+  environment; with a llama-server running, on `http://127.0.0.1:<its
+  --port>/v1`, naming the server. Only when no model server with an address
+  runs (nothing, or an sd-server alone) it says so and starts nothing.
 * THE TERMINAL: stdout is forced to UTF-8; on Windows VT processing is
   switched on (SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING). If that
   fails, or stdout is not a terminal, the output is plain: ASCII markers, no
   colour, no animation. NO_COLOR drops only the colour.
-* ONE MENU, NOT TWO: Start Crow, the three points, Stop, Quit. "Landed" shows
+* ONE MENU, NOT TWO: Start Crow, the three points, the optional lines, Stop,
+  Quit. "Landed" shows
   for 5 seconds and returns to this menu by itself; errors and refusals wait
   for Enter so they can be read.
 * THE SHORTCUT (`--create-shortcut DIR`, Windows): `DIR\Crow.lnk`, written by
@@ -115,6 +133,7 @@ PLATFORM_KEY = "windows" if crow_platform.IS_WINDOWS else "linux"
 BOOT_TIMEOUT_S = {"flash-next": 600.0}
 DEFAULT_BOOT_TIMEOUT_S = 300.0
 IMAGE_TIMEOUT_S = 300.0
+LLAMA_TIMEOUT_S = 600.0             # crow_core.start_server's own wait_s
 LANDED_S = 5
 OPENED_S = 3
 POLL_S = 1.0
@@ -135,6 +154,7 @@ ICONS = {
     "flash-next": ("\U0001F9E0", "-"),
     "27b": ("⚡", "-"),
     "image-stack": ("\U0001F3A8", "-"),
+    "optional": ("\U0001F999", "-"),
     "stop": ("\U0001F6D1", "x"),
     "quit": ("\U0001F44B", "q"),
     "on": ("\U0001F7E2", "[on]"),
@@ -381,6 +401,37 @@ def log_tail(path: str, lines: int = LOG_TAIL_LINES) -> list:
     return [r for r in rows if r.strip()][-lines:]
 
 
+def process_exists(pid) -> bool:
+    """True until the process is really gone, teardown included.
+
+    NOT crow_platform.pid_alive, WHICH ANSWERS "HAS NO EXIT CODE YET". Measured
+    2026-10-01 on a 27B llama-server (13 GB) after taskkill /F: pid_alive and the
+    Get-CimInstance scan said gone after 0.08 s, the process handle was signalled
+    and tasklist dropped it only after 1.61 s -- the time Windows needed to tear
+    down its memory. A next point started in between shares the card with it.
+    Windows: a SYNCHRONIZE handle, signalled once the process object is done.
+    Elsewhere: pid_alive.
+    """
+    if not crow_platform.IS_WINDOWS:
+        return crow_platform.pid_alive(pid)
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    handle = kernel32.OpenProcess(0x00100000, False, number)          # SYNCHRONIZE
+    if not handle:
+        return ctypes.get_last_error() == 5                           # ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == 0x102       # WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _detached_kwargs(breakaway: bool) -> dict:
     kw = dict(crow_platform.spawn_kwargs(detached=True))
     if crow_platform.IS_WINDOWS and breakaway:
@@ -390,6 +441,56 @@ def _detached_kwargs(breakaway: bool) -> dict:
 
 def _quote(arg: str) -> str:
     return '"%s"' % arg if (not arg or " " in arg or "\t" in arg) else arg
+
+
+class LlamaLines:
+    """Crow's optional llama.cpp operating points, as crow_core knows them.
+
+    The lines are manifests/operating-point.json's `servers` (8081/8082/8083);
+    every answer is crow_core's: `bootable_models`, `server_command` (the GGUF
+    under `$CROW_MODELS` or `<install>/models`, the binary from
+    `CROW_LLAMA_SERVER_<KEY>` or the line's own or `<install>/bin`),
+    `server_port`, `model_label`, `server_env`. A test hands in its own.
+    """
+
+    def __init__(self, install: str):
+        self.install = install
+
+    def keys(self) -> tuple:
+        return crow_core.bootable_models()
+
+    def command(self, key: str) -> list:
+        """The argv; raises crow_core.ServerBootError when it does not resolve."""
+        return crow_core.server_command(key, None, self.install)
+
+    def port(self, key: str):
+        return crow_core.server_port(key)
+
+    def label(self, key: str) -> str:
+        return crow_core.model_label(key)
+
+    def env(self, key: str) -> dict:
+        return crow_core.server_env(key)
+
+    def installed(self) -> list:
+        """[{key, title, port, argv}] for every line whose files resolve on disk.
+
+        A line that does not resolve is left out of the menu, not shown as
+        "not installed": the three baseline points are the product, and a list
+        of models nobody downloaded is noise.
+        """
+        out = []
+        for key in self.keys():
+            try:
+                argv = self.command(key)
+            except Exception:              # noqa: BLE001 - not on disk is "not listed"
+                continue
+            port = self.port(key)
+            if not port:
+                continue
+            out.append({"key": key, "title": self.label(key) or key,
+                        "port": int(port), "argv": argv})
+        return out
 
 
 # ---------------------------------------------------------------- the boot ---
@@ -402,7 +503,7 @@ class Boot:
                  sleep=None, clock=None, read=None, scan=None, active=None,
                  point_for=None, model_path=None, write_active=None,
                  terminate=None, kill=None, alive=None, log_dir=None,
-                 forwarded_args=()):
+                 forwarded_args=(), llama=None):
         self.stack, self.install, self.models = stack, install, models
         self.out = out or sys.stdout
         self.style = style or Style()
@@ -418,10 +519,12 @@ class Boot:
         self.write_active = write_active or crow_core.write_active_point
         self.terminate = terminate or crow_platform.terminate_tree
         self.kill = kill or crow_platform.kill_pid
-        self.alive = alive or crow_platform.pid_alive
+        self.alive = alive or process_exists
         self._log_dir = log_dir
         self._note = ""
         self.forwarded_args = list(forwarded_args)
+        self.llama = llama or LlamaLines(install)
+        self._llama_cache = None
         self.titles = {p.get("id"): (p.get("menu") or {}).get("title") or p.get("id")
                        for p in stack["points"]}
 
@@ -456,6 +559,12 @@ class Boot:
             self.read(self.style.dim("   Press Enter to return to the menu. "))
         except (EOFError, KeyboardInterrupt):
             pass
+
+    def optional_lines(self) -> list:
+        """The installed llama.cpp lines, resolved once per run."""
+        if self._llama_cache is None:
+            self._llama_cache = self.llama.installed()
+        return self._llama_cache
 
     def label(self, point_id: "str | None") -> str:
         if not point_id:
@@ -501,9 +610,10 @@ class Boot:
                     "base_url": url}
         if llamas:
             pid, line = llamas[0]
+            port = crow_platform.server_port(line)
             return {"kind": crow_platform.KIND_LLAMA, "point": None, "source": "scan",
-                    "pids": {"serve": pid, "image": image_pid},
-                    "port": crow_platform.server_port(line),
+                    "pids": {"serve": pid, "image": image_pid}, "port": port,
+                    "base_url": base_url_for(port) if port else None,
                     "model": crow_core.served_model(line)}
         if images:
             return {"kind": crow_platform.KIND_IMAGE, "point": None, "source": "scan",
@@ -540,10 +650,6 @@ class Boot:
         lines = ["%s Another model server is already running: %s."
                  % (self.style.icon("warn"), self.describe(running)),
                  "   Only one operating point can run at a time."]
-        if running["kind"] == crow_platform.KIND_LLAMA:
-            lines.append("   It is not one of Crow's operating points, so this menu does not stop it.")
-            lines.append("   To stop it: %s" % kill_hint(pids.get("serve")))
-            return "\n".join(lines)
         lines.append('   To stop it: choose "Stop the running point" in this menu, or run')
         lines.append("     python %s --stop" % os.path.join("cli", "crow_boot.py"))
         hand = [kill_hint(p) for p in (pids.get("serve"), pids.get("image")) if p]
@@ -603,7 +709,25 @@ class Boot:
             frame += 1
             self.sleep(FRAME_S)
 
+    def _fail(self, title: str, why: str, started, logs) -> int:
+        """End what this run started, say why, show the logs' last lines."""
+        for _name, proc in reversed(started):
+            self.terminate(proc)
+        self.say("%s %s did not land: %s." % (self.style.icon("fail"), title, why))
+        if started:
+            self.say("   What this run started was stopped.")
+        for log in logs:
+            tail = log_tail(log)
+            if tail:
+                self.say("   Last lines of %s:" % log)
+                for row in tail:
+                    self.say("     " + row)
+        return EXIT_FAILED
+
     def start(self, point_id: str, interactive: bool = False) -> int:
+        line = next((o for o in self.optional_lines() if o["key"] == point_id), None)
+        if line is not None:
+            return self.start_llama(line, interactive)
         try:
             plan = plan_point(self.stack, point_id, self.install, self.models)
         except SetupError as exc:
@@ -673,18 +797,7 @@ class Boot:
         except OSError as exc:
             why = "could not be started: %s" % exc
         if why is not None:
-            for _name, proc in reversed(started):
-                self.terminate(proc)
-            self.say("%s %s did not land: %s." % (self.style.icon("fail"), plan["title"], why))
-            if started:
-                self.say("   What this run started was stopped.")
-            for log in logs:
-                tail = log_tail(log)
-                if tail:
-                    self.say("   Last lines of %s:" % log)
-                    for row in tail:
-                        self.say("     " + row)
-            return EXIT_FAILED
+            return self._fail(plan["title"], why, started, logs)
 
         seconds = self.clock() - began
         pids = {"serve": serve.pid, "image": image.pid if image is not None else None}
@@ -697,6 +810,63 @@ class Boot:
         self.landed(plan, seconds, model, pids, where, interactive)
         return EXIT_OK
 
+    def start_llama(self, line: dict, interactive: bool = False) -> int:
+        """Start one optional llama.cpp line the way crow_core.start_server does.
+
+        The argv, the env overlay, the scope prefix, the slot folder and the
+        two logs (`llama-server-<port>.out.log` / `.err.log`) are
+        crow_core.start_server's; the spawn, the animation and the wait are this menu's
+        (detached like serve, ready when `/props` answers 200). NO CONTRACT FILE:
+        its `point` is one of the three baseline ids, and the window keeps
+        today's behaviour for a llama.cpp server.
+        """
+        title = "%s (optional)" % line["title"]
+        running = self.detect()
+        if running:
+            self.say(self.refusal(running))
+            return EXIT_REFUSED
+        try:
+            argv = self.llama.command(line["key"])
+        except Exception as exc:          # noqa: BLE001 - ServerBootError names what is missing
+            self.say("%s %s cannot start: %s" % (self.style.icon("fail"), title, exc))
+            return EXIT_SETUP
+        if "--slot-save-path" in argv:
+            try:
+                os.makedirs(argv[argv.index("--slot-save-path") + 1], exist_ok=True)
+            except (OSError, IndexError):
+                pass                      # the server refuses it in its own words
+        port = line["port"]
+        env = dict(os.environ)
+        env.update(self.llama.env(line["key"]) or {})
+        self.say("%s Starting %s -- llama.cpp on port %d"
+                 % (self.style.icon("start"), self.style.bold(title), port))
+        logs, started = [], []
+        began = self.clock()
+        try:
+            out_log, out_sink = self._open_log("llama-server-%d.out.log" % port)
+            err_log, err_sink = self._open_log("llama-server-%d.err.log" % port)
+            logs += [err_log, out_log]
+            try:
+                proc = self._spawn(crow_platform.server_scope_prefix() + argv, env=env,
+                                   stdin=subprocess.DEVNULL, stdout=out_sink, stderr=err_sink)
+            finally:
+                out_sink.close()
+                err_sink.close()
+            started.append(("llama-server", proc))
+            why = self._wait([("llama-server", proc)], port, {"path": "/props", "status": 200},
+                             LLAMA_TIMEOUT_S, False, "Please wait while flying to the nest...")
+        except KeyboardInterrupt:
+            why = "cancelled"
+        except OSError as exc:
+            why = "could not be started: %s" % exc
+        if why is not None:
+            return self._fail(title, why, started, logs[:1])
+        url = base_url_for(port)
+        plan = {"title": title, "base_url": url, "identity": {}, "process": "llama-server"}
+        self.landed(plan, self.clock() - began, self.model_path(url) or "",
+                    {"serve": proc.pid, "image": None}, None, interactive)
+        return EXIT_OK
+
     def landed(self, plan, seconds, model, pids, where, interactive) -> None:
         self.say("%s %s %s is ready at %s after %.0f s."
                  % (self.style.icon("landed"), self.style.paint("Landed!", "1;32"),
@@ -706,7 +876,7 @@ class Boot:
             self.say("   model: %s" % model)
             if want and not model.replace("\\", "/").lower().endswith(want.lower()):
                 self.say("   %s expected a model ending in %s" % (self.style.icon("warn"), want))
-        bits = ["serve pid %s" % pids["serve"]]
+        bits = ["%s pid %s" % (plan.get("process", "serve"), pids["serve"])]
         if pids.get("image"):
             bits.append("sd-server pid %s" % pids["image"])
         self.say("   %s" % ", ".join(bits))
@@ -718,20 +888,21 @@ class Boot:
 
     # -- stop --------------------------------------------------------------
     def stop(self) -> int:
-        """End serve and sd-server, wait until they are gone, remove the file.
+        """End every model server, wait until they are gone, remove the file.
 
-        ONLY WHAT THE SCAN SEES AS serve OR sd-server IS KILLED. The contract
-        file's pids name the point, but a pid outlives its process: after a
-        crash Windows may hand it to any program, and killing it by the file
-        alone would end that program.
+        crow_core.stop_servers' set -- serve, sd-server and llama-server -- and
+        ONLY WHAT THE SCAN SEES. The contract file's pids name the point, but a
+        pid outlives its process: after a crash Windows may hand it to any
+        program, and killing it by the file alone would end that program.
         """
         doc = self.active() or {}
         point = doc.get("point")
-        targets, llamas = [], []
+        targets, llama_names = [], []
         for pid, line in self.scan() or []:
             kind = crow_platform.server_kind(line)
             if kind == crow_platform.KIND_LLAMA:
-                llamas.append((pid, line))
+                targets.append(("llama", str(pid)))
+                llama_names.append(os.path.basename(crow_core.served_model(line)) or "llama.cpp")
                 continue
             role = "image" if kind == crow_platform.KIND_IMAGE else "serve"
             targets.append((role, str(pid)))
@@ -748,8 +919,11 @@ class Boot:
                      % (self.style.icon("off"),
                         " (a stale contract file was removed)" if removed else ""))
             self._mention_strays(strays)
-            self._mention_llamas(llamas)
             return EXIT_OK
+        if not point and llama_names:
+            point_text = "the llama.cpp server (%s)" % ", ".join(llama_names)
+        else:
+            point_text = self.label(point) if point else "the running point"
         for _role, pid in targets:
             self.kill(pid)
         began = self.clock()
@@ -758,33 +932,32 @@ class Boot:
         while left and self.clock() < deadline:
             left = [p for p in left if self.alive(p)]
             if not left:
-                # GONE IS "NO LONGER LISTED", NOT "HAS AN EXIT CODE". Measured
-                # 2026-10-01: right after taskkill the 27B serve had its exit
-                # code and was still in the process list with 4 GB while
-                # Windows tore it down. The next point must not start beside it.
+                # GONE IS "TORN DOWN AND NO LONGER LISTED", NOT "HAS AN EXIT
+                # CODE": self.alive is process_exists (the handle, measured
+                # 1.61 s after the exit code on a 13 GB llama-server), and the
+                # scan is asked once more. The next point must not start beside
+                # a process that still holds the card.
                 listed = {str(pid) for pid, _line in self.scan() or []}
                 left = [p for _r, p in targets if p in listed]
             if left:
                 self.sleep(0.25)
         took = self.clock() - began
         self._remove(path)
-        names = {"serve": "serve", "image": "sd-server"}
+        names = {"serve": "serve", "image": "sd-server", "llama": "llama-server"}
         done = ", ".join("%s pid %s" % (names[r], p) for r, p in targets)
         if left:
             self.say("%s Asked %s to stop (%s), but pid %s is still there. End it by hand: %s"
-                     % (self.style.icon("warn"), self.label(point) if point else "the point",
+                     % (self.style.icon("warn"), point_text,
                         done, ", ".join(left), " and ".join(kill_hint(p) for p in left)))
             return EXIT_FAILED
         self.say("%s Stopped %s (%s) in %.0f s."
-                 % (self.style.icon("stop"), self.label(point) if point else "the running point",
-                    done, took))
+                 % (self.style.icon("stop"), point_text, done, took))
         self._mention_strays(strays)
-        self._mention_llamas(llamas)
         return EXIT_OK
 
     def _mention_strays(self, strays) -> None:
         for pid in strays:
-            self.say("   pid %s from the contract file is alive but is not a serve or sd-server "
+            self.say("   pid %s from the contract file is alive but is not a model server "
                      "process the scan can see, so it was left alone. If it is one: %s"
                      % (pid, kill_hint(pid)))
 
@@ -794,11 +967,6 @@ class Boot:
             return True
         except OSError:
             return False
-
-    def _mention_llamas(self, llamas) -> None:
-        for pid, _line in llamas:
-            self.say("   A llama.cpp server (pid %s) is still running; it is not an operating "
-                     "point. To stop it: %s" % (pid, kill_hint(pid)))
 
     # -- start crow --------------------------------------------------------
     def gui_command(self, base_url: str) -> list:
@@ -816,18 +984,30 @@ class Boot:
         width = max(len(t) for t in titles)
         for title, p in zip(titles, self.stack["points"]):
             lines.append("     - %s  %s" % (title.ljust(width), (p.get("menu") or {}).get("line") or ""))
+        if self.optional_lines():
+            lines.append("   or one of the optional llama.cpp lines in the menu.")
         if running:
             lines.append("   (Running now: %s.)" % self.describe(running))
         return "\n".join(lines)
 
     def start_crow(self) -> int:
+        """Open the window on what runs: a baseline point, or a llama-server.
+
+        The hint only when no model server with an address runs at all (an
+        sd-server alone, or a llama-server whose port cannot be read, has none).
+        """
         running = self.detect()
-        if not running or running["kind"] != crow_platform.KIND_CROW_NEST:
+        if not running or not running.get("base_url") or running["kind"] not in (
+                crow_platform.KIND_CROW_NEST, crow_platform.KIND_LLAMA):
             self.say(self.no_point_hint(running))
             return EXIT_FAILED
-        url = running.get("base_url") or base_url_for(crow_core.CROW_NEST_PORT)
+        url = running["base_url"]
         env = dict(os.environ)
-        if running.get("point"):
+        if running["kind"] == crow_platform.KIND_LLAMA:
+            what = self.describe(running)
+        else:
+            what = self.label(running.get("point"))
+        if running["kind"] == crow_platform.KIND_CROW_NEST and running.get("point"):
             try:
                 plan = plan_point(self.stack, running["point"], self.install, self.models)
                 env.update(plan["crow_env"])
@@ -841,7 +1021,7 @@ class Boot:
             self.say("%s The window could not be started: %s" % (self.style.icon("fail"), exc))
             return EXIT_FAILED
         self.say("%s Crow is opening (pid %s), connected to %s at %s."
-                 % (self.style.icon("crow"), proc.pid, self.label(running.get("point")), url))
+                 % (self.style.icon("crow"), proc.pid, what, url))
         return EXIT_OK
 
     # -- status ------------------------------------------------------------
@@ -869,15 +1049,29 @@ class Boot:
 
     # -- the menu ----------------------------------------------------------
     def entries(self) -> list:
-        """(key, icon, title, line, action) in menu order."""
-        rows = [("1", "start", "Start Crow", "open the window on the running point", ("crow", None))]
-        for n, p in enumerate(self.stack["points"], start=2):
+        """(key, icon, title, line, action, optional) in menu order.
+
+        The three baseline points from stack.json first; below them, under a
+        heading row (key "", action None), the installed optional llama.cpp
+        lines, each tagged "(optional)" and drawn dimmed.
+        """
+        rows = [("1", "start", "Start Crow", "open the window on the running point",
+                 ("crow", None), False)]
+        for p in self.stack["points"]:
             menu = p.get("menu") or {}
             icon = p.get("id") if p.get("id") in ICONS else "start"
-            rows.append((str(n), icon, menu.get("title") or p.get("id"),
-                         menu.get("line") or "", ("point", p.get("id"))))
-        rows.append((str(len(rows) + 1), "stop", "Stop the running point", "", ("stop", None)))
-        rows.append(("0", "quit", "Quit", "", ("quit", None)))
+            rows.append((str(len(rows) + 1), icon, menu.get("title") or p.get("id"),
+                         menu.get("line") or "", ("point", p.get("id")), False))
+        n = len(rows)
+        optional = self.optional_lines()
+        if optional:
+            rows.append(("", None, "Optional (llama.cpp)", "", None, True))
+        for line in optional:
+            n += 1
+            rows.append((str(n), "optional", "%s (optional)" % line["title"],
+                         "llama.cpp, port %d" % line["port"], ("point", line["key"]), True))
+        rows.append((str(n + 1), "stop", "Stop the running point", "", ("stop", None), False))
+        rows.append(("0", "quit", "Quit", "", ("quit", None), False))
         return rows
 
     def draw(self) -> None:
@@ -890,10 +1084,21 @@ class Boot:
         self.say("  " + self.status_line())
         self.say()
         rows = self.entries()
-        width = max(len(r[2]) for r in rows)
-        for key, icon, title, line, _action in rows:
-            self.say(("   %s  %s %s  %s" % (s.bold(key), s.icon(icon), title.ljust(width),
-                                           s.dim(line))).rstrip())
+        width = max(len(r[2]) for r in rows if r[0])
+        after_optional = False
+        for key, icon, title, line, action, optional in rows:
+            if action is None:                      # the "Optional (llama.cpp)" heading
+                self.say()
+                self.say("  " + s.dim(title))
+            elif optional:
+                self.say(("   %s  %s %s" % (s.dim(key), s.icon(icon),
+                                            s.dim("%s  %s" % (title.ljust(width), line)))).rstrip())
+            else:
+                if after_optional:
+                    self.say()
+                self.say(("   %s  %s %s  %s" % (s.bold(key), s.icon(icon), title.ljust(width),
+                                               s.dim(line))).rstrip())
+            after_optional = optional
         self.say()
         if self._note:
             self.say("  " + s.paint(self._note, "33"))
@@ -903,11 +1108,12 @@ class Boot:
         while True:
             self.draw()
             try:
-                choice = self.read("  Choose: ").strip().lower()
+                # lstrip the BOM: PowerShell prefixes one to text it pipes in.
+                choice = self.read("  Choose: ").strip().lstrip("﻿").lower()
             except (EOFError, KeyboardInterrupt):
                 self.say()
                 return EXIT_OK
-            action = next((r[4] for r in self.entries() if r[0] == choice), None)
+            action = next((r[4] for r in self.entries() if r[0] and r[0] == choice), None)
             if choice in ("q", "quit", "exit"):
                 action = ("quit", None)
             if action is None:
@@ -998,6 +1204,10 @@ def main(argv=None) -> int:
     style = Style.detect(sys.stdout)
     install = os.path.abspath(args.install_root) if args.install_root else crow_platform.install_dir()
     models = os.path.abspath(args.models) if args.models else crow_platform.models_dir(install)
+    if args.models:
+        # One models root for everything this run starts: the optional llama.cpp
+        # lines resolve through crow_platform.models_dir, which reads it here.
+        os.environ["CROW_MODELS"] = models
     forwarded = []
     for flag, value in (("--install-root", args.install_root and install),
                         ("--models", args.models and models),

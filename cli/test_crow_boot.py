@@ -79,6 +79,27 @@ class FakePopen:
         return proc
 
 
+LLAMA_27B = {"key": "qwen35-q4-k-xl", "title": "Qwen3.8-27B-UD-Q4_K_XL", "port": 8082,
+             "argv": ["llama-server.exe", "-m", "Qwen3.8-27B-UD-Q4_K_XL.gguf", "--port", "8082"]}
+
+
+class FakeLlama:
+    """The optional llama.cpp lines, as crow_boot.LlamaLines answers them."""
+
+    def __init__(self, lines=(), env=None):
+        self.lines = [dict(line) for line in lines]
+        self._env = env or {}
+
+    def installed(self):
+        return [dict(line) for line in self.lines]
+
+    def command(self, key):
+        return list(next(line["argv"] for line in self.lines if line["key"] == key))
+
+    def env(self, key):
+        return dict(self._env)
+
+
 class BootCase(unittest.TestCase):
     """A temporary install, models root, config and state folder."""
 
@@ -116,6 +137,7 @@ class BootCase(unittest.TestCase):
         defaults = dict(out=self.out, style=crow_boot.Style(), popen=FakePopen(),
                         get=lambda url, timeout: NOTHING, sleep=self.clock.sleep,
                         clock=self.clock, read=lambda prompt="": "0", scan=lambda: [],
+                        llama=FakeLlama(),
                         point_for=lambda url, timeout=3.0: None,
                         model_path=lambda url, timeout=3.0: None,
                         terminate=self.terminated.append, log_dir=self.logs)
@@ -205,15 +227,26 @@ class OnlyOnePointRunsAtATimeTests(BootCase):
         self.assertIn(crow_boot.kill_hint("7002"), text)
         self.assertEqual(popen.calls, [])
 
-    def test_a_llama_server_is_named_and_left_to_the_user(self):
+    def test_a_llama_server_blocks_a_baseline_start_and_the_menu_can_stop_it(self):
         scan = lambda: [("6001", "llama-server.exe -m D:/m/model.gguf --port 8081")]  # noqa: E731
         popen = FakePopen()
         code = self.boot(popen=popen, scan=scan).start("27b")
         text = self.out.getvalue()
         self.assertEqual(code, crow_boot.EXIT_REFUSED)
         self.assertIn("a llama.cpp server (model.gguf) on port 8081, pid 6001", text)
-        self.assertIn("this menu does not stop it", text)
+        self.assertIn('"Stop the running point"', text)
         self.assertIn(crow_boot.kill_hint("6001"), text)
+        self.assertEqual(popen.calls, [])
+
+    def test_a_baseline_point_blocks_an_optional_llama_start(self):
+        crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",
+                                     {"serve": 5151, "image": None})
+        popen = FakePopen()
+        code = self.boot(popen=popen, llama=FakeLlama([LLAMA_27B])).start("qwen35-q4-k-xl")
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_REFUSED)
+        self.assertIn("Qwen3.8-27B (27b)", text)
+        self.assertIn(crow_boot.kill_hint(5151), text)
         self.assertEqual(popen.calls, [])
 
 
@@ -347,6 +380,106 @@ class StartCrowTests(BootCase):
         self.assertEqual(kw["env"]["CROW_IMAGE_MODEL_DIR"],
                          os.path.join(self.models, "qwen-image-2.1"))
 
+    def test_with_a_llama_server_it_opens_the_window_on_its_port_and_names_it(self):
+        scan = lambda: [("6001", "llama-server.exe -m D:/m/Qwen3.8-27B-UD-Q4_K_XL.gguf --port 8082")]  # noqa: E731
+        popen = FakePopen()
+        code = self.boot(popen=popen, scan=scan).start_crow()
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_OK, text)
+        argv, _kw = popen.calls[0]
+        self.assertEqual(argv[2:], ["--base-url", "http://127.0.0.1:8082/v1"])
+        self.assertIn("a llama.cpp server (Qwen3.8-27B-UD-Q4_K_XL.gguf) on port 8082", text)
+        self.assertNotIn("No operating point is running", text)
+
+    def test_an_image_server_alone_still_gets_the_hint(self):
+        scan = lambda: [("7002", r"C:\x\bin\sd-server.exe --listen-port 8097")]  # noqa: E731
+        popen = FakePopen()
+        code = self.boot(popen=popen, scan=scan).start_crow()
+        self.assertEqual(code, crow_boot.EXIT_FAILED)
+        self.assertIn("No operating point is running.", self.out.getvalue())
+        self.assertEqual(popen.calls, [])
+
+
+class TheOptionalLlamaLinesTests(BootCase):
+    """The owner, 2026-10-01: the crow-nest points are the baseline; Crow's
+    llama.cpp lines are optional, listed below them, tagged and dimmed."""
+
+    def test_they_are_listed_below_the_baseline_tagged_and_dimmed(self):
+        out = io.StringIO()
+        self.boot(out=out, style=crow_boot.Style(fancy=True, colour=True),
+                  llama=FakeLlama([LLAMA_27B])).draw()
+        text = out.getvalue()
+        self.assertIn("Optional (llama.cpp)", text)
+        self.assertLess(text.index("Image Stack"), text.index("Optional (llama.cpp)"))
+        self.assertIn("\x1b[2mQwen3.8-27B-UD-Q4_K_XL (optional)", text, "dimmed")
+        self.assertIn("llama.cpp, port 8082", text)
+        self.assertNotIn("\x1b[2mQwen3.8-27B ", text, "a baseline point is not dimmed")
+
+    def test_the_plain_fallback_keeps_only_the_tag(self):
+        out = io.StringIO()
+        self.boot(out=out, llama=FakeLlama([LLAMA_27B])).draw()
+        text = out.getvalue()
+        self.assertIn("Qwen3.8-27B-UD-Q4_K_XL (optional)", text)
+        self.assertNotIn("\x1b", text)
+
+    def test_a_line_whose_files_are_missing_is_left_out(self):
+        key = "qwen35-q4-k-xl"
+        lines = crow_boot.LlamaLines(self.install)
+        with mock.patch.dict(os.environ, {"CROW_MODELS": self.models}):
+            self.assertNotIn(key, [x["key"] for x in lines.installed()], "nothing on disk yet")
+            binary = os.path.join(self.install, "bin", crow_platform.server_binary_name())
+            gguf = crow_core.model_candidates(key, None, self.install)[0]
+            for path in (binary, gguf):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "wb").close()
+            found = {x["key"]: x for x in lines.installed()}
+        self.assertIn(key, found)
+        self.assertEqual(found[key]["port"], 8082)
+        self.assertEqual(found[key]["argv"][:3], [binary, "-m", gguf])
+        self.assertNotIn("operating-point", found, "its GGUF is not on disk")
+        self.assertNotIn("flash-next-q2-k-xl", found, "its GGUF is not on disk")
+
+    def test_starting_one_uses_the_llama_path_and_writes_no_contract(self):
+        popen = FakePopen()
+        probes = []
+
+        def get(url, timeout):
+            probes.append(url)
+            return (200, b"{}") if len(probes) > 2 else (503, b"loading")
+        code = self.boot(popen=popen, get=get, llama=FakeLlama([LLAMA_27B], {"CUDA_CACHE_DISABLE": "1"}),
+                         model_path=lambda url, timeout=3.0: "D:/m/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+                         ).start("qwen35-q4-k-xl")
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_OK, text)
+        argv, kw = popen.calls[0]
+        self.assertEqual(argv[-len(LLAMA_27B["argv"]):], LLAMA_27B["argv"])
+        self.assertEqual(kw["env"]["CUDA_CACHE_DISABLE"], "1", "the line's own env overlay")
+        self.assertIsNot(kw["stdout"], kw["stderr"], "out and err logs, as start_server writes them")
+        self.assertEqual(set(probes), {"http://127.0.0.1:8082/props"})
+        self.assertIn("Landed!", text)
+        self.assertIn("llama-server pid %d" % popen.procs[0].pid, text)
+        self.assertIsNone(self.contract(), "the contract file is the baseline points' only")
+        self.assertTrue(os.path.isfile(os.path.join(self.logs, "llama-server-8082.err.log")))
+
+    def test_a_failed_optional_start_stops_it_and_shows_its_err_log(self):
+        popen = FakePopen(exit_code=1)
+        code = self.boot(popen=popen, llama=FakeLlama([LLAMA_27B])).start("qwen35-q4-k-xl")
+        self.assertEqual(code, crow_boot.EXIT_FAILED)
+        self.assertIn("llama-server exited with code 1", self.out.getvalue())
+        self.assertEqual(self.terminated, [popen.procs[0]])
+        self.assertIsNone(self.contract())
+
+    def test_the_menu_numbers_them_after_the_baseline_and_starts_them(self):
+        answers = iter(["5", "0"])
+        popen = FakePopen()
+        code = self.boot(read=lambda prompt="": next(answers), popen=popen,
+                         get=lambda url, timeout: (200, b"{}"),
+                         llama=FakeLlama([LLAMA_27B])).menu()
+        self.assertEqual(code, crow_boot.EXIT_OK)
+        self.assertEqual(popen.calls[0][0][-1], "8082")
+        rows = self.boot(llama=FakeLlama([LLAMA_27B])).entries()
+        self.assertEqual([r[0] for r in rows if r[4] and r[4][0] == "stop"], ["6"])
+
 
 class TheLandedScreenReturnsToTheMenuTests(BootCase):
     def test_landed_shows_five_seconds_then_the_menu_comes_back_without_a_key(self):
@@ -374,8 +507,7 @@ class StoppingTests(BootCase):
                                      {"serve": 7001, "image": 7002})
         killed = []
         listed = [("7001", r"C:\x\bin\serve.exe --port 8099"),
-                  ("7002", r"C:\x\bin\sd-server.exe --listen-port 8097"),
-                  ("6001", "llama-server.exe -m D:/m/a.gguf --port 8081")]
+                  ("7002", r"C:\x\bin\sd-server.exe --listen-port 8097")]
         scans = []
 
         def scan():
@@ -388,11 +520,21 @@ class StoppingTests(BootCase):
         code = boot.stop()
         text = self.out.getvalue()
         self.assertEqual(code, crow_boot.EXIT_OK, text)
-        self.assertEqual(sorted(killed), ["7001", "7002"], "a llama-server is never killed")
+        self.assertEqual(sorted(killed), ["7001", "7002"])
         self.assertIsNone(self.contract())
         self.assertIn("Stopped Image Stack (image-stack)", text)
-        self.assertIn(crow_boot.kill_hint("6001"), text)
         self.assertGreaterEqual(len(scans), 3, "it waits until the scan no longer lists them")
+
+    def test_stop_also_ends_a_llama_server_the_scan_sees(self):
+        killed = []
+        listed = [("6001", "llama-server.exe -m D:/m/Qwen3.8-27B-UD-Q4_K_XL.gguf --port 8082")]
+        code = self.boot(scan=lambda: [r for r in listed if r[0] not in killed],
+                         kill=killed.append, alive=lambda pid: str(pid) not in killed).stop()
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_OK, text)
+        self.assertEqual(killed, ["6001"])
+        self.assertIn("Stopped the llama.cpp server (Qwen3.8-27B-UD-Q4_K_XL.gguf)", text)
+        self.assertIn("llama-server pid 6001", text)
 
     def test_a_process_that_stays_listed_is_reported_not_called_stopped(self):
         killed = []
@@ -444,6 +586,21 @@ class TheShortcutTests(BootCase):
         self.assertEqual(code, crow_boot.EXIT_OK)
         self.assertEqual(seen["CROW_LNK_PATH"], os.path.join(self.tmp, "Crow.lnk"))
         self.assertEqual(seen["CROW_LNK_DIR"], self.install)
+
+
+class StopWaitsForTheTeardownTests(unittest.TestCase):
+    def test_a_process_exists_until_it_has_ended_and_stop_asks_that(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                 stdin=subprocess.DEVNULL)
+        try:
+            self.assertTrue(crow_boot.process_exists(child.pid))
+        finally:
+            child.kill()
+            child.wait(timeout=30)
+        self.assertFalse(crow_boot.process_exists(child.pid))
+        boot = crow_boot.Boot(STACK, "i", "m", out=io.StringIO(), llama=FakeLlama())
+        self.assertIs(boot.alive, crow_boot.process_exists,
+                      "stop waits on the teardown, not on the exit code")
 
 
 class TheTerminalTests(unittest.TestCase):
