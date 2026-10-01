@@ -1,5 +1,5 @@
 //! T3 finish: the arguments for `crow_boot.py --create-shortcut` and for the
-//! boot menu launch. Nothing here writes a real shortcut or opens a window.
+//! operating-point window the boot menu button opens. Nothing here writes a real shortcut or opens a window.
 
 use crowsetup_core::finish;
 use std::ffi::OsString;
@@ -70,46 +70,39 @@ fn the_start_menu_is_always_added_once() {
 }
 
 #[test]
-fn windows_terminal_is_found_on_path_even_in_windowsapps() {
+fn the_window_runs_under_pythonw_beside_the_python() {
     let tmp = tempfile::tempdir().unwrap();
-    let apps = tmp.path().join("Microsoft").join("WindowsApps");
-    fs::create_dir_all(&apps).unwrap();
-    fs::write(apps.join("wt.exe"), b"").unwrap();
-    let path = std::env::join_paths([tmp.path(), &apps]).unwrap();
-    assert_eq!(finish::find_on_path("wt.exe", &path), Some(apps.join("wt.exe")));
-    assert_eq!(finish::find_on_path("nope.exe", &path), None);
+    let py = tmp.path().join("python.exe");
+    fs::write(&py, b"").unwrap();
+    // no pythonw.exe there: the console Python stands in
+    assert_eq!(finish::windowed_python(&py), py);
+    fs::write(tmp.path().join("pythonw.exe"), b"").unwrap();
+    assert_eq!(finish::windowed_python(&py), tmp.path().join("pythonw.exe"));
 }
 
 #[test]
-fn the_menu_opens_like_the_shortcut_in_windows_terminal() {
-    let py = Path::new("C:\\Python312\\python.exe");
+fn the_boot_menu_button_opens_the_window_like_the_shortcut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let py = tmp.path().join("python.exe");
+    fs::write(&py, b"").unwrap();
+    fs::write(tmp.path().join("pythonw.exe"), b"").unwrap();
     let root = Path::new("D:\\Apps\\Crow");
     let script = root.join("cli").join("crow_boot.py");
-    let wt = Path::new("C:\\Users\\u\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe");
     let default = Path::new("C:\\Users\\u\\AppData\\Local\\Crow");
-    let (prog, args) = finish::menu_command(py, &script, root, Some(wt), Some(default));
-    assert_eq!(prog, wt);
+    let (prog, args) = finish::window_command(&py, &script, root, Some(default));
+    assert_eq!(prog, tmp.path().join("pythonw.exe"));
     assert_eq!(
         strs(&args),
-        vec![
-            "--title".to_string(),
-            "Crow".into(),
-            "-d".into(),
-            "D:\\Apps\\Crow".into(),
-            "C:\\Python312\\python.exe".into(),
-            script.to_string_lossy().into_owned(),
-            "--install-root".into(),
-            "D:\\Apps\\Crow".into(),
-        ]
+        vec![script.to_string_lossy().into_owned(), "--gui".into(), "--install-root".into(), "D:\\Apps\\Crow".into()]
     );
 }
 
 #[test]
-fn without_windows_terminal_the_console_python_runs_the_menu() {
-    let py = Path::new("C:\\Python312\\python.exe");
+fn the_default_root_opens_the_window_without_a_root_flag() {
+    let py = Path::new("C:\\nowhere\\python.exe");
     let default = Path::new("C:\\Users\\u\\AppData\\Local\\Crow");
     let script = default.join("cli").join("crow_boot.py");
-    let (prog, args) = finish::menu_command(py, &script, default, None, Some(default));
+    let (prog, args) = finish::window_command(py, &script, default, Some(default));
     assert_eq!(prog, py);
-    assert_eq!(strs(&args), vec![script.to_string_lossy().into_owned()]);
+    assert_eq!(strs(&args), vec![script.to_string_lossy().into_owned(), "--gui".into()]);
 }

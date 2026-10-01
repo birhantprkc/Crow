@@ -708,5 +708,100 @@ class ThePlanAsJsonTests(BootCase):
             self.assertEqual(cm.exception.code, 2)
 
 
+class TheWindowsHooksTests(BootCase):
+    """#196, the operating-point window: its Cancel button and its stage line
+    reach Boot through `cancelled` and `on_stage`; the menu passes neither."""
+
+    def test_cancelled_ends_a_start_like_ctrl_c_and_stops_what_it_began(self):
+        self.layout("27b")
+        probes = []
+
+        def get(url, timeout):
+            probes.append(url)
+            return NOTHING
+        popen = FakePopen()
+        code = self.boot(popen=popen, get=get, cancelled=lambda: len(probes) >= 2).start("27b")
+        self.assertEqual(code, crow_boot.EXIT_FAILED)
+        self.assertIn("did not land: cancelled", self.out.getvalue())
+        self.assertEqual(self.terminated, [popen.procs[0]])
+        self.assertIsNone(self.contract())
+        self.assertLess(self.clock.t, 5.0, "it ends at once, not at the timeout")
+
+    def test_on_stage_hears_serve_then_sd_server(self):
+        self.layout("image-stack")
+        stages = []
+        get = lambda url, timeout: OK_HEALTH if url.endswith("/health") else (200, b"{}")  # noqa: E731
+        code = self.boot(get=get, on_stage=stages.append).start("image-stack")
+        self.assertEqual(code, crow_boot.EXIT_OK, self.out.getvalue())
+        self.assertEqual(stages, ["serve", "sd-server"])
+
+    def test_the_menu_never_cancels(self):
+        boot = crow_boot.Boot(STACK, "i", "m", out=io.StringIO(), llama=FakeLlama())
+        self.assertFalse(boot.cancelled())
+
+
+class TheShortcutOpensTheWindowTests(BootCase):
+    """#196: `--create-shortcut` now opens the operating-point window under
+    pythonw.exe (no console); `--terminal` keeps the menu's shortcut."""
+
+    def written(self, boot, **kw):
+        seen = {}
+
+        def run(argv, **run_kw):
+            seen.update(run_kw["env"])
+            open(run_kw["env"]["CROW_LNK_PATH"], "wb").close()
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            code = boot.create_shortcut(self.tmp, run=run, which=lambda name: r"X:\apps\wt.exe", **kw)
+        self.assertEqual(code, crow_boot.EXIT_OK, self.out.getvalue())
+        return seen
+
+    def test_the_shortcut_runs_the_window_under_pythonw_with_the_roots(self):
+        boot = self.boot(forwarded_args=["--install-root", self.install, "--models", self.models])
+        seen = self.written(boot)
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(seen["CROW_LNK_TARGET"], crow_boot.quiet_python(sys.executable))
+        self.assertNotIn("wt.exe", seen["CROW_LNK_TARGET"])
+        args = seen["CROW_LNK_ARGS"]
+        self.assertIn("crow_boot.py", args)
+        self.assertIn(" --gui", args)
+        self.assertTrue(args.index("--gui") < args.index("--install-root") < args.index("--models"))
+        self.assertIn(self.install, args)
+        self.assertEqual(seen["CROW_LNK_DIR"], self.install)
+
+    def test_terminal_keeps_the_menu_in_windows_terminal(self):
+        seen = self.written(self.boot(), terminal=True)
+        self.assertEqual(seen["CROW_LNK_TARGET"], r"X:\apps\wt.exe")
+        self.assertNotIn("--gui", seen["CROW_LNK_ARGS"])
+
+    def test_pythonw_is_the_one_beside_the_interpreter(self):
+        folder = os.path.join(self.tmp, "py")
+        os.makedirs(folder)
+        python = os.path.join(folder, "python.exe")
+        open(python, "wb").close()
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(crow_boot.quiet_python(python), python, "no pythonw.exe there")
+            open(os.path.join(folder, "pythonw.exe"), "wb").close()
+            self.assertEqual(crow_boot.quiet_python(python), os.path.join(folder, "pythonw.exe"))
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(crow_boot.quiet_python(python), python)
+
+    def test_gui_opens_the_window_over_this_boot(self):
+        opened = []
+        fake = mock.Mock(open_window=lambda boot: opened.append(boot) or crow_boot.EXIT_OK)
+        with mock.patch.dict(sys.modules, {"crow_boot_gui": fake}):
+            code = crow_boot.main(["--install-root", self.install, "--gui"])
+        self.assertEqual(code, crow_boot.EXIT_OK)
+        (boot,) = opened
+        self.assertEqual(boot.install, os.path.abspath(self.install))
+
+    def test_terminal_only_goes_with_create_shortcut(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err), self.assertRaises(SystemExit) as cm:
+            crow_boot.main(["--terminal"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("--terminal goes with --create-shortcut", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

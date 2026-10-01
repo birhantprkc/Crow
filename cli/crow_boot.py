@@ -12,7 +12,9 @@ a menu, for a script or a test.
     python cli/crow_boot.py --start 27b           start one point (flash-next, 27b, image-stack)
     python cli/crow_boot.py --stop                stop the running point
     python cli/crow_boot.py --start-crow          open the window against the running point
-    python cli/crow_boot.py --create-shortcut DIR a Windows shortcut to this menu in DIR
+    python cli/crow_boot.py --gui                 the operating-point window (crow_boot_gui.py)
+    python cli/crow_boot.py --create-shortcut DIR a Windows shortcut to that window in DIR
+                                                  (add --terminal for one to this menu)
     python cli/crow_boot.py --plan 27b --json     what --start 27b would use, as JSON (the
                                                   installer's check step reads it)
 
@@ -100,9 +102,16 @@ THE DECISIONS, and why each is this way:
   for Enter so they can be read.
 * THE SHORTCUT (`--create-shortcut DIR`, Windows): `DIR\Crow.lnk`, written by
   PowerShell's WScript.Shell with every value passed through the environment
-  (no quoting). Target: Windows Terminal (`wt.exe`) when it is on PATH, running
-  this interpreter with this script; else the interpreter itself. Working
+  (no quoting). Target (#196, the operating-point window): `pythonw.exe` beside
+  this interpreter (the interpreter itself when there is none) running this
+  script with `--gui`, so no console opens. With `--terminal` it opens this
+  menu instead: Windows Terminal (`wt.exe`) when it is on PATH, running the
+  console interpreter with this script; else that interpreter itself. Either
+  way `--install-root`, `--models` and `--stack` are carried along. Working
   folder: the install root. Icon: cli/crow.ico.
+* THE WINDOW (`--gui`) is cli/crow_boot_gui.py: a face over this Boot, which
+  it drives through `cancelled` (a Cancel button ends a start the way Ctrl+C
+  does) and `on_stage` (which server is being waited for).
 
 STANDARD LIBRARY ONLY, plus Crow's own crow_core and crow_platform.
 """
@@ -502,6 +511,19 @@ def _quote(arg: str) -> str:
     return '"%s"' % arg if (not arg or " " in arg or "\t" in arg) else arg
 
 
+def quiet_python(exe: str) -> str:
+    """pythonw.exe beside `exe` on Windows when it is there, else `exe`.
+
+    The windows (Crow's and the operating-point window) need no console; the
+    embeddable and the python.org interpreters both ship pythonw.exe.
+    """
+    if crow_platform.IS_WINDOWS:
+        quiet = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.isfile(quiet):
+            return quiet
+    return exe
+
+
 class LlamaLines:
     """Crow's optional llama.cpp operating points, as crow_core knows them.
 
@@ -562,7 +584,7 @@ class Boot:
                  sleep=None, clock=None, read=None, scan=None, active=None,
                  point_for=None, model_path=None, write_active=None,
                  terminate=None, kill=None, alive=None, log_dir=None,
-                 forwarded_args=(), llama=None):
+                 forwarded_args=(), llama=None, cancelled=None, on_stage=None):
         self.stack, self.install, self.models = stack, install, models
         self.out = out or sys.stdout
         self.style = style or Style()
@@ -583,6 +605,12 @@ class Boot:
         self._note = ""
         self.forwarded_args = list(forwarded_args)
         self.llama = llama or LlamaLines(install)
+        # The window's two hooks (crow_boot_gui.py). `cancelled` is asked on
+        # every turn of the wait: True ends the start like Ctrl+C does here.
+        # `on_stage` hears which server the wait is for ("serve", "sd-server",
+        # "llama-server"). The menu passes neither.
+        self.cancelled = cancelled or (lambda: False)
+        self.on_stage = on_stage or (lambda stage: None)
         self._llama_cache = None
         self.titles = {p.get("id"): (p.get("menu") or {}).get("title") or p.get("id")
                        for p in stack["points"]}
@@ -739,9 +767,13 @@ class Boot:
         start = self.clock()
         next_probe = start
         frame = 0
+        self.on_stage(procs[-1][0])
         if not self.style.animate:
             self.say("   %s (waiting for %s)" % (message, url))
         while True:
+            if self.cancelled():
+                self._end_line()
+                return "cancelled"
             now = self.clock()
             for name, proc in procs:
                 code = proc.poll()
@@ -1029,12 +1061,7 @@ class Boot:
 
     # -- start crow --------------------------------------------------------
     def gui_command(self, base_url: str) -> list:
-        exe = sys.executable
-        if crow_platform.IS_WINDOWS:
-            quiet = os.path.join(os.path.dirname(exe), "pythonw.exe")
-            if os.path.isfile(quiet):
-                exe = quiet
-        return [exe, GUI_SCRIPT, "--base-url", base_url]
+        return [quiet_python(sys.executable), GUI_SCRIPT, "--base-url", base_url]
 
     def no_point_hint(self, running: "dict | None") -> str:
         lines = ["%s No operating point is running." % self.style.icon("nest"),
@@ -1196,14 +1223,27 @@ class Boot:
                 self.pause()
 
     # -- the shortcut ------------------------------------------------------
-    def shortcut_spec(self, folder: str, which=shutil.which) -> dict:
+    def shortcut_spec(self, folder: str, which=shutil.which, gui: bool = False) -> dict:
+        """What `--create-shortcut` writes: this menu, or with `gui` the window.
+
+        The window runs under pythonw.exe (no console) with `--gui`; the menu
+        runs under the console interpreter, in Windows Terminal when there is one.
+        """
         python = sys.executable
         if crow_platform.IS_WINDOWS and os.path.basename(python).lower() == "pythonw.exe":
             console = os.path.join(os.path.dirname(python), "python.exe")
             if os.path.isfile(console):
                 python = console
         script = os.path.abspath(__file__)
-        tail = [_quote(python), _quote(script)] + [_quote(a) for a in self.forwarded_args]
+        forwarded = [_quote(a) for a in self.forwarded_args]
+        if gui:
+            return {"path": os.path.join(os.path.abspath(folder), "Crow.lnk"),
+                    "target": quiet_python(python),
+                    "arguments": " ".join([_quote(script), "--gui"] + forwarded),
+                    "workdir": self.install,
+                    "icon": ICON_FILE if os.path.isfile(ICON_FILE) else "",
+                    "description": "Crow: start a model, then open the Crow window"}
+        tail = [_quote(python), _quote(script)] + forwarded
         terminal = which("wt") or which("wt.exe")
         if terminal:
             target = terminal
@@ -1216,7 +1256,8 @@ class Boot:
                 "icon": ICON_FILE if os.path.isfile(ICON_FILE) else "",
                 "description": "Crow boot menu: start an operating point, then Crow"}
 
-    def create_shortcut(self, folder: str, run=subprocess.run, which=shutil.which) -> int:
+    def create_shortcut(self, folder: str, run=subprocess.run, which=shutil.which,
+                        terminal: bool = False) -> int:
         if not crow_platform.IS_WINDOWS:
             self.say("%s --create-shortcut writes a Windows .lnk; on this platform start "
                      "the menu with: python %s" % (self.style.icon("fail"), os.path.abspath(__file__)))
@@ -1227,7 +1268,7 @@ class Boot:
         if not os.path.isdir(folder):
             self.say("%s no such folder: %s" % (self.style.icon("fail"), folder))
             return EXIT_SETUP
-        spec = self.shortcut_spec(folder, which)
+        spec = self.shortcut_spec(folder, which, gui=not terminal)
         script = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:CROW_LNK_PATH); "
                   "$s.TargetPath = $env:CROW_LNK_TARGET; $s.Arguments = $env:CROW_LNK_ARGS; "
                   "$s.WorkingDirectory = $env:CROW_LNK_DIR; $s.Description = $env:CROW_LNK_DESC; "
@@ -1260,12 +1301,18 @@ def main(argv=None) -> int:
     group.add_argument("--start", metavar="POINT", help="start one operating point")
     group.add_argument("--stop", action="store_true", help="stop the running operating point")
     group.add_argument("--start-crow", action="store_true", help="open the window on the running point")
-    group.add_argument("--create-shortcut", metavar="DIR", help="write a Windows shortcut to this menu")
+    group.add_argument("--gui", action="store_true", help="the operating-point window instead of this menu")
+    group.add_argument("--create-shortcut", metavar="DIR",
+                       help="write a Windows shortcut to the operating-point window")
     group.add_argument("--plan", metavar="POINT", help="print what --start POINT would use (needs --json)")
     ap.add_argument("--json", action="store_true", help="with --plan: the plan as JSON on stdout")
+    ap.add_argument("--terminal", action="store_true",
+                    help="with --create-shortcut: the shortcut opens this terminal menu instead")
     args = ap.parse_args(argv)
     if bool(args.plan) != bool(args.json):
         ap.error("--plan and --json go together: --plan POINT --json")
+    if args.terminal and not args.create_shortcut:
+        ap.error("--terminal goes with --create-shortcut DIR")
 
     style = Style.detect(sys.stdout)
     install = os.path.abspath(args.install_root) if args.install_root else crow_platform.install_dir()
@@ -1304,7 +1351,10 @@ def main(argv=None) -> int:
     if args.start_crow:
         return boot.start_crow()
     if args.create_shortcut:
-        return boot.create_shortcut(args.create_shortcut)
+        return boot.create_shortcut(args.create_shortcut, terminal=args.terminal)
+    if args.gui:
+        import crow_boot_gui
+        return crow_boot_gui.open_window(boot)
     return boot.menu()
 
 
