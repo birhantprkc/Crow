@@ -24,10 +24,8 @@ LAST step, after the 506 MB had already been fetched. "Your client will not star
 is the same sentence before the download and after it, and only one of the two
 costs the user half a gigabyte to hear.
 
-Crow ships TWO clients and this script installs both, with no opt-in switch: the
-package contains cli\crow.py and cli\crow_gui.py either way, so a switch would
-only decide whether this script mentions the second one. The last step prints both
-start lines, the terminal client first. Neither is started here.
+Crow has ONE client, the window: cli\crow_gui.py. The terminal client is gone
+(#187), so the last step prints one start line. It is not started here.
 
 .PARAMETER Selftest
 Run the checks against synthetic inputs, including ones that must fail, and exit.
@@ -67,7 +65,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "2.8.5",
+    [string] $Version   = "3.0.0",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -315,10 +313,10 @@ function Test-Preflight {
     # condition that fails later -- the same shape as the Python row before
     # 0.2.0, which charged half a gigabyte for its warning.
     if (-not $PythonPath) {
-        $warnings += "python is not on the PATH. BOTH clients need it -- the terminal one and the window. Python 3.8 or newer; the terminal client needs nothing beyond the standard library"
+        $warnings += "python is not on the PATH. The window needs it -- Python 3.8 or newer"
     }
     elseif (-not $WebView2Version) {
-        $warnings += "no WebView2 runtime found. cli\crow.py runs in a terminal without it; cli\crow_gui.py is the window and renders in it. It ships with Windows 11 and with Edge"
+        $warnings += "no WebView2 runtime found. cli\crow_gui.py is the window and renders in it, so it will not start without one. It ships with Windows 11 and with Edge"
     }
 
     # NODE IS THE THIRD PREREQUISITE AND THE ONLY WHOLLY OPTIONAL ONE, which is
@@ -583,9 +581,17 @@ function Get-InstalledVersion {
     <#
     The version of the installation sitting in $Dir, or $null.
 
-    Read out of the shipped cli\crow.py with the same pattern pack-release.ps1
-    uses to stamp the package, so the two can never disagree about where the
-    number lives. MANIFEST.json carries hashes, not a version.
+    Read out of the shipped cli\crow_core.py with the same pattern
+    pack-release.ps1 uses to stamp the package, so the two can never disagree
+    about where the number lives. MANIFEST.json carries hashes, not a version.
+
+    THE FALLBACK TO cli\crow.py IS THE UPDATE PATH, NOT HISTORY. Every install
+    from before #187 carries the literal in cli\crow.py and a crow_core.py
+    WITHOUT one. Reading only crow_core.py would answer $null there, which
+    Resolve-InstallAction reads as 'unknown' and refuses without -Force -- and
+    `irm ... | iex` cannot pass -Force, so every existing install would stop
+    updating. crow_core.py first, because after an update the stale crow.py is
+    removed as a dropped file and crow_core.py is the one that stays.
 
     $null means "there is something here but it does not identify itself" --
     which is NOT the same as "nothing is installed", and the caller has to keep
@@ -593,11 +599,13 @@ function Get-InstalledVersion {
     #>
     param([string] $Dir)
 
-    $cli = Join-Path $Dir "cli\crow.py"
-    if (-not (Test-Path -LiteralPath $cli)) { return $null }
-    $m = Select-String -LiteralPath $cli -Pattern '^VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
-    if (-not $m) { return $null }
-    return $m.Matches[0].Groups[1].Value
+    foreach ($name in @("cli\crow_core.py", "cli\crow.py")) {
+        $cli = Join-Path $Dir $name
+        if (-not (Test-Path -LiteralPath $cli)) { continue }
+        $m = Select-String -LiteralPath $cli -Pattern '^VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+        if ($m) { return $m.Matches[0].Groups[1].Value }
+    }
+    return $null
 }
 
 function Resolve-InstallAction {
@@ -1229,7 +1237,8 @@ function Invoke-Selftest {
     C "pip is called on the interpreter found"    ($pipSrc -match '\$facts\.PythonPath -m pip install')
     C "a failed pip prints the manual command"    ($pipSrc -match '-m pip install pywebview" -ForegroundColor White')
     C "and does not become the exit code"         ($pipSrc -match '(?s)pipRc = \$LASTEXITCODE.*?global:LASTEXITCODE = 0')
-    C "a failed pip says the CLI is unaffected"   ($pipSrc -match 'terminal client is unaffected')
+    C "a failed pip says the window needs it"     ($pipSrc -match 'the window cannot start until it is')
+    C "and offers no terminal client instead"     ($pipSrc -notmatch ('terminal client is ' + 'unaffected'))
 
     # THE DICTATION STEP, held against the source for the same reason.
     C "dictation pip names both packages"        ($pipSrc -match '--quiet faster-whisper sounddevice')
@@ -1274,17 +1283,16 @@ function Invoke-Selftest {
         # SEARCHED FROM THE FINAL SCREEN DOWN, and two things forced that.
         # The needles appear in THIS block as literals six hundred lines above
         # the printed ones, which is why they are assembled rather than written
-        # whole -- and since the installer leads with Qwen the terminal line now
+        # whole -- and since the installer leads with Qwen the start line now
         # carries --base-url, so it no longer ends at the colour argument the
-        # old needle pinned it to. Starting after the step header answers both:
-        # what this case is about is the ORDER of the two lines on the last
-        # screen, not the flags either of them happens to carry.
+        # old needle pinned it to. Starting after the step header answers both.
+        # SINCE #187 THE WINDOW IS THE ONLY CLIENT: its line has to be on the
+        # last screen, and the terminal client's must not come back.
         $tailAt = [Math]::Max($src.IndexOf('Write-Step "What is left' + ' to do"'), 0)
-        $cliAt  = $src.IndexOf('cli\crow.py', $tailAt)
-        $guiAt  = $src.IndexOf('cli\crow_gui.py', $tailAt)
-        C "the terminal client's start line is printed" ($cliAt -ge 0)
-        C "the window's start line is printed as well"  ($guiAt -ge 0)
-        C "and the terminal one comes first"            ($cliAt -ge 0 -and $guiAt -gt $cliAt)
+        $cliAt  = $src.IndexOf('cli\' + 'crow.py', $tailAt)
+        $guiAt  = $src.IndexOf('cli\' + 'crow_gui.py', $tailAt)
+        C "the window's start line is printed"           ($guiAt -ge 0)
+        C "NEGATIVE: no terminal-client start line"      ($cliAt -lt 0)
 
         # The anchor the checker actually lands on: the last "llama-server" at or
         # before the printed --moe-stream-l2, which is the region that has to hold
@@ -1363,18 +1371,42 @@ function Invoke-Selftest {
     C "an unparseable version refuses"           ((Resolve-InstallAction "not-a-version" "0.0.5" $false).Action -eq 'unknown')
     C "an unparseable TARGET refuses too"        ((Resolve-InstallAction "0.0.3" "garbage" $false).Action -eq 'unknown')
 
-    # Reading the version back out of a shipped tree, and the two ways that fails.
+    # Reading the version back out of a shipped tree: the layout since #187, the
+    # layout every existing install still has, and the ways that fails.
     $vdir = Join-Path $env:TEMP ("crow-selftest-v-" + [guid]::NewGuid().ToString("N"))
+    $core = Join-Path $vdir "cli\crow_core.py"
+    $old  = Join-Path $vdir "cli\crow.py"
     try {
         New-Item -ItemType Directory -Force -Path (Join-Path $vdir "cli") | Out-Null
-        Set-Content -LiteralPath (Join-Path $vdir "cli\crow.py") -Encoding utf8 `
-                    -Value @('#!/usr/bin/env python', 'VERSION = "1.2.3"', 'DEFAULT_MODEL = "crow"')
-        C "the installed version is read"        ((Get-InstalledVersion $vdir) -eq "1.2.3")
+        # The new layout: crow_core.py carries the literal, there is no crow.py.
+        Set-Content -LiteralPath $core -Encoding utf8 `
+                    -Value @('"""core"""', 'import os', 'VERSION = "1.2.3"', 'DEFAULT_MODEL = "crow"')
+        C "the installed version is read from crow_core.py" ((Get-InstalledVersion $vdir) -eq "1.2.3")
 
-        Set-Content -LiteralPath (Join-Path $vdir "cli\crow.py") -Encoding utf8 -Value @('no version line here')
-        C "a file without VERSION reads as null" ($null -eq (Get-InstalledVersion $vdir))
+        # THE UPDATE PATH. A pre-#187 install: the literal sits in crow.py and
+        # crow_core.py has none. A $null here refuses every `irm | iex` update.
+        Set-Content -LiteralPath $core -Encoding utf8 -Value @('"""core"""', 'import os')
+        Set-Content -LiteralPath $old -Encoding utf8 `
+                    -Value @('#!/usr/bin/env python', 'VERSION = "2.8.5"', 'DEFAULT_MODEL = "crow"')
+        C "an old install (VERSION only in crow.py) is still identified" ((Get-InstalledVersion $vdir) -eq "2.8.5")
+        C "and reads as an update, not 'unknown'"   ((Resolve-InstallAction (Get-InstalledVersion $vdir) "2.8.6" $false).Action -eq 'update')
+
+        # Both carry one: crow_core.py is the owner and wins.
+        Set-Content -LiteralPath $core -Encoding utf8 -Value @('VERSION = "2.9.0"')
+        C "crow_core.py wins over a stale crow.py"  ((Get-InstalledVersion $vdir) -eq "2.9.0")
+
+        Set-Content -LiteralPath $core -Encoding utf8 -Value @('no version line here')
+        Set-Content -LiteralPath $old  -Encoding utf8 -Value @('no version line here')
+        C "files without VERSION read as null"      ($null -eq (Get-InstalledVersion $vdir))
+        C "VERSIONS = [...] is not a version line"  ($null -eq (& { Set-Content -LiteralPath $core -Encoding utf8 -Value @('VERSIONS = ["1.2.3"]'); Get-InstalledVersion $vdir }))
     } finally {
         Remove-Item -LiteralPath $vdir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # And against this script's own tree, when it runs from a checkout: whichever
+    # file holds the literal today, the reader has to find it.
+    if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot "cli\crow_gui.py"))) {
+        $own = Get-InstalledVersion $PSScriptRoot
+        C "this checkout's own version is found ($own)" ($own -match '^\d+\.\d+\.\d+$')
     }
     C "an empty directory reads as null"         ($null -eq (Get-InstalledVersion (Join-Path $env:TEMP "crow-selftest-absent")))
 
@@ -1412,11 +1444,14 @@ function Invoke-Selftest {
     # The case the update path did not have until now: a file the package USED to
     # ship. Compare-Manifest above cannot see it -- it walks the current manifest,
     # and a dropped file is not in it by definition.
-    $was = @("bin/llama.dll", "cli/crow.py", "cli/test_crow.py")
-    $now = @("bin/llama.dll", "cli/crow.py")
+    # The real case since #187: a 2.8.5 manifest names cli\crow.py, the next
+    # package does not, so the update removes the terminal client -- backslash
+    # paths, as MANIFEST.json writes them.
+    $was = @("bin\llama.dll", "cli\crow.py", "cli\crow_core.py", "cli\crow_gui.py")
+    $now = @("bin\llama.dll", "cli\crow_core.py", "cli\crow_gui.py")
     $d = Find-DroppedFiles -PreviousPaths $was -CurrentPaths $now
-    C "a file the package dropped is found"       ($d.Dropped -contains "cli/test_crow.py" -and $d.Dropped.Count -eq 1)
-    C "and the count carries its denominator"     ($d.Checked -eq 3)
+    C "a file the package dropped is found"       ($d.Dropped -contains "cli/crow.py" -and $d.Dropped.Count -eq 1)
+    C "and the count carries its denominator"     ($d.Checked -eq 4)
 
     # THE REGRESSION, and it is not hypothetical. The first version of this asked
     # "what is on disk that the manifest does not name?" and kept an exception
@@ -1434,7 +1469,7 @@ function Invoke-Selftest {
     # Nothing dropped is a real answer and must not be confused with "nothing
     # examined" -- hence the denominator on the quiet path too.
     $d = Find-DroppedFiles -PreviousPaths $was -CurrentPaths $was
-    C "an unchanged package drops nothing"        ($d.Dropped.Count -eq 0 -and $d.Checked -eq 3)
+    C "an unchanged package drops nothing"        ($d.Dropped.Count -eq 0 -and $d.Checked -eq 4)
 
     # First install: no previous manifest exists, so there is nothing to remove.
     # The dangerous reading of an empty list is "everything is dropped".
@@ -1599,10 +1634,9 @@ Write-Item "Disk"     ((Format-Num $facts.FreeDiskGb) + " GB free on " + (Split-
 Write-Item "Windows"  $(if ($facts.Is64Bit) { "64-bit, PowerShell $($facts.PsVersion)" } else { "32-bit" })
 Write-Item "Python"   $(if ($facts.PythonPath) { $facts.PythonPath } else { "not on the PATH" }) `
                       $(if ($facts.PythonPath) { "ok" } else { "warn" })
-# Reported even when it is missing, because the two clients differ in exactly this
-# one prerequisite and a line that only appears on machines that have it would
-# leave the other half wondering which client the install is short of.
-Write-Item "WebView2" $(if ($facts.WebView2Version) { "$($facts.WebView2Version), the window renders in it" } else { "not found -- the terminal client does not need it" }) `
+# Reported even when it is missing: the window is the only client and renders in
+# it, so a machine without it has to hear that here, before the download.
+Write-Item "WebView2" $(if ($facts.WebView2Version) { "$($facts.WebView2Version), the window renders in it" } else { "not found -- the window needs it" }) `
                       $(if ($facts.WebView2Version) { "ok" } else { "warn" })
 Write-Item "Node"     $(if ($facts.NodePath) { "$($facts.NodePath), for MCP servers, the JS syntax check and build_bundle" } else { "not on the PATH -- MCP servers, the JS syntax check and build_bundle want it" }) `
                       $(if ($facts.NodePath) { "ok" } else { "warn" })
@@ -1869,8 +1903,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $InstallTo "session") | Out
 # cannot be answered earlier: whether pip may write into the interpreter this
 # machine happens to have is knowable only by trying.
 #
-# A FAILURE DOES NOT END THE INSTALL. The terminal client is complete without
-# it, everything downloaded is already on disk and verified, and the one thing
+# A FAILURE DOES NOT END THE INSTALL. Everything downloaded is already on disk
+# and verified, the server runs without it, and the one thing
 # the user needs in that case is the command that finishes the job by hand --
 # printed with the interpreter's real path, because `pip` alone on the PATH can
 # be a different Python than the one Crow will run.
@@ -1894,7 +1928,7 @@ if ($facts.PythonPath) {
     if ($pipRc -eq 0) {
         Write-Item "pywebview" "installed" "ok"
     } else {
-        Write-Item "pywebview" "could not be installed -- the terminal client is unaffected" "warn"
+        Write-Item "pywebview" "could not be installed -- the window cannot start until it is" "warn"
         Write-Host "             $($facts.PythonPath) -m pip install pywebview" -ForegroundColor White
     }
 }
@@ -1999,8 +2033,6 @@ Write-Host ""
 Write-Host "  2. Start the engine, then the window:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    engine\target\release\serve.exe --port 8099" -ForegroundColor White
-Write-Host "    python $InstallTo\cli\crow.py --base-url http://127.0.0.1:8099/v1" -ForegroundColor White
-Write-Host "     or the window:" -ForegroundColor DarkGray
 Write-Host "    python $InstallTo\cli\crow_gui.py --base-url http://127.0.0.1:8099/v1" -ForegroundColor White
 Write-Host ""
 Write-Host "  Second: llama.cpp" -ForegroundColor White
@@ -2031,7 +2063,7 @@ Write-Host ""
 # starting. q8_0 leaves 6,627. No --moe-stream: 16.4 GB dense, it fits whole and
 # there are no expert tensors to route. No --chat-template-file: unlike 0731 the
 # embedded template is the correct one.
-Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
+Write-Host "  2. Then start the server, and the window from a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf ``" -ForegroundColor White
 # NOT ON THE LAST LINE, same rule as --slot-save-path below: the value is a path
@@ -2055,19 +2087,10 @@ Write-Host "      --spec-type draft-mtp ``" -ForegroundColor White
 Write-Host "      --jinja" -ForegroundColor White
 Write-Host ""
 # 8082 rather than 8081, so the client has to be told -- and being told is the
-# point: the port is what says which model answered.
-Write-Host "    python $InstallTo\cli\crow.py --base-url http://127.0.0.1:8082/v1" -ForegroundColor White
-Write-Host ""
-# BOTH CLIENTS ARE INSTALLED AND NEITHER IS THE DEFAULT. The terminal one is
-# printed first because it needs nothing but python; the window is printed second
-# because it needs WebView2 as well, and step 1 has already said whether this
-# machine has it.
-Write-Host "     Or the same conversation in a window, if pywebview installed above:" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    python $InstallTo\cli\crow_gui.py" -ForegroundColor White
-Write-Host ""
-Write-Host "     Same core, same session file, same server. Neither client wraps the other," -ForegroundColor DarkGray
-Write-Host "     and neither is needed to use the other." -ForegroundColor DarkGray
+# point: the port is what says which model answered. THE WINDOW IS THE ONLY
+# CLIENT since #187; it needs pywebview (installed above) and WebView2 (step 1
+# said whether this machine has it).
+Write-Host "    python $InstallTo\cli\crow_gui.py --base-url http://127.0.0.1:8082/v1" -ForegroundColor White
 Write-Host ""
 # THE SECOND MODEL, AND IT IS PRINTED EVEN THOUGH THE INSTALLER DOES NOT FETCH IT.
 # It is still shipped -- the binaries, the verified chat template and every flag
@@ -2143,7 +2166,7 @@ if ($l2 -gt 0) {
     Write-Host "      --moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
 }
 Write-Host ""
-Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
+Write-Host "    python $InstallTo\cli\crow_gui.py --base-url http://127.0.0.1:8081/v1" -ForegroundColor White
 Write-Host ""
 
 # THE THIRD MODEL (#140), PRINTED AND NOT FETCHED, same rule as the second: an
@@ -2176,7 +2199,7 @@ Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-Q2_K_
 # the same reason (#170).
 Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-F16.gguf --local-dir $InstallTo\models\qwen-next-gguf" -ForegroundColor White
 Write-Host ""
-Write-Host "    C:\Users\robin\dev\crow-lab\wt-27880\build-27880\bin\Release\llama-server.exe ``" -ForegroundColor White
+Write-Host "    $InstallTo\bin\llama-server.exe ``" -ForegroundColor White
 Write-Host "      -m $InstallTo\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf ``" -ForegroundColor White
 Write-Host "      --port 8083 -c 200000 -b 2048 -ub 2048 ``" -ForegroundColor White
 Write-Host "      -ctk q8_0 -ctv q8_0 -ncmoe 30 ``" -ForegroundColor White
@@ -2187,7 +2210,7 @@ Write-Host ""
 # DER STANDARD BRAUCHT KEIN --base-url MEHR, seit 2.0.0 zeigt DEFAULT_BASE_URL
 # auf 8083. Eine Zeile, die den Standard noch einmal ausschreibt, liest sich wie
 # eine Bedingung.
-Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
+Write-Host "    python $InstallTo\cli\crow_gui.py" -ForegroundColor White
 Write-Host ""
 
 # The phone from anywhere: -Tailscale prints the missing steps without

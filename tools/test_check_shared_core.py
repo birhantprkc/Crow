@@ -310,13 +310,13 @@ def help_text():
               code == 1 and "run_turn" in out and "by name" in out, out.strip()[-300:])
         clean()
 
-        # 9 - THE honesty rule. One surface cannot demonstrate single-sourcing:
-        #     the core has one consumer and every predicate holds by
-        #     construction. Green here would be the checker measuring itself.
-        code, out = run(fixture(tmp, man=manifest(surfaces=["cli/crow.py"]),
-                                drop_gui=True))
-        check("9 one surface is reported as one surface, not as green",
-              code == 1 and "not 2" in out, out.strip()[-300:])
+        # 9 - THE honesty rule. Since #187 one surface is the product, so the
+        #     floor is one: a manifest that declares NO surface holds the core
+        #     against nothing, and green there would be the checker measuring
+        #     itself.
+        code, out = run(fixture(tmp, man=manifest(surfaces=[]), drop_gui=True))
+        check("9 no surface is reported as no surface, not as green",
+              code == 1 and "not 1" in out, out.strip()[-300:])
         clean()
 
         # 10 - a file the manifest names and that is not there is an ERROR. A

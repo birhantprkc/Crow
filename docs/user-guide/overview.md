@@ -34,10 +34,6 @@ crow
 **Second: llama.cpp, Windows**
 
 ```powershell
-python $env:LOCALAPPDATA\Crow\cli\crow.py --serve flash-next-q2-k-xl
-```
-
-```powershell
 python $env:LOCALAPPDATA\Crow\cli\crow_gui.py
 ```
 

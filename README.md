@@ -17,7 +17,13 @@ curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | ba
 curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | bash -s -- --build-image-server
 ```
 
-**Windows** (image server included in the package)
+**Windows, one window** (Crow, the crow-nest engine and the operating points you pick)
+
+```powershell
+irm https://github.com/nibor1896/Crow/releases/latest/download/CrowSetup.exe -OutFile CrowSetup.exe; .\CrowSetup.exe
+```
+
+**Windows, Crow alone** (image server included in the package)
 
 ```powershell
 irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Pack the Windows release on a machine that cannot build the Windows engine.
+r"""Pack the Windows release on a machine that cannot build the Windows engine.
 
 WHAT THIS IS. tools/pack-release.ps1 stages bin/ from a Windows CUDA build tree,
-resolves every DLL import, adds cli/, templates/, manifests/operating-point.json,
+resolves every DLL import, adds cli/, kits/, templates/, manifests/operating-point.json,
 LICENSE, NOTICE, README.md, writes MANIFEST.json (path, bytes, sha256) and zips
 crow-<version>-win-x64.zip. install.ps1 downloads that asset by version and
 verifies every file against MANIFEST.json, so a tag without the asset breaks
@@ -15,10 +15,11 @@ engine the operating point was measured with. On Linux there is no dumpbin, no
 MSVC runtime and no Windows build tree, but there is the previous asset. So
 this takes bin/ FROM THE PREVIOUS PACKAGE, verified against that package's own
 MANIFEST.json before a byte is reused, and stages everything else from the
-checkout exactly as pack-release.ps1 does: cli/ without test_*.py and
-__pycache__, no stray cli/runs logs (2.1.0 shipped ten of them by accident),
-templates/0731-chat-template.jinja, manifests/operating-point.json, the three
-root files. MANIFEST.json is written in the shape install.ps1 reads: a JSON
+checkout exactly as pack-release.ps1 does: cli/ and kits/ without test_*.py,
+__pycache__ and runs/ logs (2.1.0 and 2.8.5 each shipped ten of them),
+templates/0731-chat-template.jinja, manifests/operating-point.json,
+manifests/stack.json (the boot menu's, #196 P1), tools/te_rename.py (CrowSetup's
+Image Stack convert step, #196 P2), the three root files. MANIFEST.json is written in the shape install.ps1 reads: a JSON
 array of {path, bytes, sha256}, backslash paths, upper-case hex.
 
 HOW IT IS CHECKED. --verify re-reads the finished zip the way install.ps1 does
@@ -27,30 +28,273 @@ file in the package is named) and refuses to print a result line otherwise.
 When the engine DOES change, this tool is the wrong one: use pack-release.ps1
 on Windows, which resolves the imports.
 
+WHAT MAY SHIP (#196 C2). One declared set, the same in pack-release.ps1:
+SHIP_TOP_DIRS, SHIP_ROOT_FILES and SHIP_SINGLE_FILES say where a file may live;
+EXCLUDE_DIRS and EXCLUDE_FILES say what never ships (runs/, *.log, __pycache__,
+*.pyc, test_*.py, .env*, secrets.json, session and state files). A package
+that would hold anything else is refused. test_repack_release.py compares
+these lists with the ones in pack-release.ps1, so the two packers cannot drift
+apart again (2.8.5 shipped logs because only one of them filtered).
+
+THE PRIVACY GATE. Before the archive or its manifest is written, every file
+that would be packed -- bin/ reused from the previous package included -- is
+searched as raw bytes, in UTF-8 and in UTF-16LE, ignoring ASCII case, for:
+the builder's profile path (both slash spellings and the JSON-escaped one), the
+user name (as a path segment, \Users\<name>\ and /home/<name>/, and bare), the host name,
+and every --private-pattern. A hit prints file, pattern and count, and the
+tool exits 1. There is no override switch. ONE scoped allowlist exists (PRIVACY_ALLOW):
+upstream words that merely contain the owner's bare name (the "round-robin" of the llama
+server's web UI, tokenizer vocabulary in the sd binaries) pass in the named file, in the
+named byte context, up to a maximum count, and are listed as INFO; anything else refuses.
+Path patterns and the host name are never allowlisted. The patterns describe THIS machine:
+bin/ taken from a package another machine built carries THAT machine's paths,
+so name them (--private-pattern "\Users\<builder>\").
+
     python tools/repack-release.py --previous dist/crow-2.1.0-win-x64.zip \
         --version 2.2.0 --out dist/
 """
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import getpass
 import hashlib
-import io
 import json
 import os
 import re
+import socket
 import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-ROOT_FILES = ("LICENSE", "NOTICE", "README.md")
-CLI_SKIP_DIRS = {"__pycache__", "runs"}
+
+# ---- what may ship (keep identical to the $SHIP_* / $EXCLUDE_* in pack-release.ps1)
+SHIP_ROOT_FILES = ("LICENSE", "NOTICE", "README.md")
+SHIP_TOP_DIRS = ("bin", "cli", "kits")
+SHIP_SINGLE_FILES = ("templates\\0731-chat-template.jinja", "manifests\\operating-point.json",
+                     "manifests\\stack.json", "tools\\te_rename.py")
+EXCLUDE_DIRS = ("runs", "__pycache__", ".crow", "digests", "sessions")
+EXCLUDE_FILES = ("*.log", "*.pyc", "*.pyo", "*.jsonl", "test_*.py", ".env*", "secrets.json",
+                 "session*.json", "state*.json", "settings.json", "*_tokens.json")
+KIT_REQUIRED = ("crow-pathtracer.js", "kit.json", "voxel-kit.js", "SKILL.md", "check_diorama.py",
+                "scaffold\\index.html", "scaffold\\scene.js",
+                "LICENSE.three", "LICENSE.three-mesh-bvh", "LICENSE.three-gpu-pathtracer")
+
+# ---- the privacy gate's scoped allowlist (keep identical to $PRIVACY_ALLOW in pack-release.ps1)
+# Only the BARE user name can be allowlisted, never a path pattern or the host name. Each entry
+# is "file glob @@ name @@ max @@ label @@ context regex": the glob is relative to the package
+# (backslashes, case-insensitive), the name is the owner it is about, max is the most hits the
+# file may carry, the regex describes the bytes that make a hit benign. It is matched against
+# the ASCII-lowercased bytes around the hit, starting at or before the hit and running across it,
+# and holds only syntax that Python and .NET read the same way. Measured 2026-10-01 on the
+# binaries rebuilt from a neutral path (#196 C5): the word "round-robin" twice in the embedded
+# web UI of llama-server-impl.dll, and tokenizer vocabulary (BPE merges lines, vocab JSON keys:
+# Robinson, probing, robinet ...) 29 times in each sd binary. Only UTF-8 hits can be allowed.
+PRIVACY_ALLOW = (
+    r'bin\llama-server-impl.dll @@ robin @@ 2 @@ round-robin (embedded web UI) @@ round-robin',
+    r'bin\sd-*.exe @@ robin @@ 29 @@ tokenizer vocabulary (BPE merges, vocab JSON) @@ (?:\n(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24} (?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}(?:</w>)?\n|"(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}"(?:: ?[0-9]+,|,))',
+)
+ALLOW_WINDOW = 64  # bytes of context read on each side of a hit
 
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest().upper()
 
 
+def read_bytes(path: str) -> bytes:
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def excluded(rel: str) -> str | None:
+    """The rule that keeps `rel` out of a package, or None. Either separator."""
+    parts = rel.replace("/", "\\").split("\\")
+    for d in parts[:-1]:
+        if d.lower() in EXCLUDE_DIRS:
+            return "directory " + d + "\\"
+    name = parts[-1].lower()
+    for pat in EXCLUDE_FILES:
+        if fnmatch.fnmatchcase(name, pat):
+            return "file pattern " + pat
+    return None
+
+
+def shipped_set_violations(paths) -> list[tuple[str, str]]:
+    """Every path that is not in the declared shipped set, with the reason."""
+    bad = []
+    singles = {s.lower() for s in SHIP_SINGLE_FILES}
+    for p in paths:
+        rel = p.replace("/", "\\")
+        low = rel.lower()
+        if low == "manifest.json":
+            continue
+        parts = low.split("\\")
+        if len(parts) == 1:
+            if rel not in SHIP_ROOT_FILES:
+                bad.append((rel, "top-level file outside the shipped set"))
+                continue
+        elif low not in singles and parts[0] not in SHIP_TOP_DIRS:
+            bad.append((rel, "outside the shipped set (top level " + parts[0] + "\\)"))
+            continue
+        why = excluded(rel)
+        if why:
+            bad.append((rel, "excluded: " + why))
+    return bad
+
+
+# ---- the privacy gate
+def _dedupe(items) -> list[str]:
+    seen, out = set(), []
+    for i in items:
+        if i and i.lower() not in seen:
+            seen.add(i.lower())
+            out.append(i)
+    return out
+
+
+def private_patterns(extra=(), profile=None, user=None, host=None) -> tuple[list[str], list[str]]:
+    """(patterns, notes). Defaults describe this machine; the arguments let a test
+    stand in for another one."""
+    notes: list[str] = []
+    pats: list[str] = []
+    if profile is None:
+        profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    profile = (profile or "").rstrip("\\/")
+    if profile:
+        bs = profile.replace("/", "\\")
+        pats += [bs, profile.replace("\\", "/"), bs.replace("\\", "\\\\")]
+    if user is None:
+        try:
+            user = os.environ.get("USERNAME") or getpass.getuser()
+        except Exception:
+            user = os.path.basename(profile)
+    if user:
+        pats += ["\\Users\\%s\\" % user, "/Users/%s/" % user,
+                 "\\\\Users\\\\%s\\\\" % user, "/home/%s/" % user]
+        # The bare name too (#196 C2): "no references to the builder" is wider than paths.
+        if len(user) < 4:
+            notes.append("user name '%s' is shorter than 4 characters and is not searched bare" % user)
+        else:
+            pats.append(user)
+    hosts = [host] if host is not None else [os.environ.get("COMPUTERNAME"), socket.gethostname()]
+    for h in _dedupe(hosts):
+        if len(h) < 4:
+            notes.append("host name %r is shorter than 4 characters and is not searched" % h)
+        else:
+            pats.append(h)
+    pats += [e for e in extra if e]
+    return _dedupe(pats), notes
+
+
+def scan_private(files: dict[str, bytes], patterns) -> list[tuple[str, str, str, int]]:
+    """(path, pattern, encoding, count) for every pattern found in any file."""
+    hits = []
+    for path in sorted(files):
+        low = files[path].lower()  # bytes.lower folds ASCII only, which is what paths are
+        for pat in patterns:
+            for enc in ("utf-8", "utf-16le"):
+                n = low.count(pat.lower().encode(enc))
+                if n:
+                    hits.append((path, pat, enc, n))
+    return hits
+
+
+def _allow_entries(allow=PRIVACY_ALLOW) -> list[dict]:
+    out = []
+    for e in allow:
+        parts = e.split(" @@ ", 4)
+        if len(parts) != 5:
+            raise ValueError("privacy allowlist entry is malformed: " + e)
+        glob, name, mx, label, rx = parts
+        out.append({"glob": glob.lower(), "name": name.lower(), "max": int(mx), "label": label,
+                    "re": re.compile(rx.encode("latin-1"))})
+    return out
+
+
+def bare_user_name(patterns) -> str | None:
+    """The pattern that is the bare user name: the one whose \\Users\\<it>\\ is also searched."""
+    low = [p.lower() for p in patterns]
+    for p in low:
+        if "\\users\\%s\\" % p in low:
+            return p
+    return None
+
+
+def _covered(window: bytes, hit_at: int, hit_len: int, rx) -> bool:
+    """True when rx matches starting at or before the hit and running across all of it."""
+    for s in range(hit_at, -1, -1):
+        m = rx.match(window, s)
+        if m and m.end() >= hit_at + hit_len:
+            return True
+    return False
+
+
+def split_allowed(files: dict[str, bytes], hits, patterns, allow=PRIVACY_ALLOW):
+    """(refused, allowed). refused is [(path, pattern, encoding, count, reason)]; allowed is
+    [(path, label, count, max)]. Only the bare user name, only as UTF-8, only in a file an
+    entry names, only inside the entry's context, only up to its maximum; every other hit
+    stays refused."""
+    bare = bare_user_name(patterns)
+    entries = _allow_entries(allow)
+    refused, allowed = [], []
+    for path, pat, enc, n in hits:
+        mine = []
+        if bare and enc == "utf-8" and pat.lower() == bare:
+            mine = [e for e in entries if e["name"] == bare and fnmatch.fnmatchcase(path.lower(), e["glob"])]
+        if not mine:
+            refused.append((path, pat, enc, n, ""))
+            continue
+        if n > sum(e["max"] for e in mine):
+            refused.append((path, pat, enc, n, "more than the allowed maximum of %d" % sum(e["max"] for e in mine)))
+            continue
+        low = files[path].lower()
+        needle = pat.lower().encode("utf-8")
+        tally = [0] * len(mine)
+        uncovered = 0
+        i = low.find(needle)
+        while i != -1:
+            lo = max(0, i - ALLOW_WINDOW)
+            window = low[lo:i + len(needle) + ALLOW_WINDOW]
+            for k, e in enumerate(mine):
+                if _covered(window, i - lo, len(needle), e["re"]):
+                    tally[k] += 1
+                    break
+            else:
+                uncovered += 1
+            i = low.find(needle, i + len(needle))
+        if uncovered:
+            refused.append((path, pat, enc, uncovered, "outside the allowed contexts"))
+        for e, t in zip(mine, tally):
+            if t > e["max"]:
+                refused.append((path, pat, enc, t, "more than the allowed maximum of %d for %s" % (e["max"], e["label"])))
+            elif t:
+                allowed.append((path, e["label"], t, e["max"]))
+    return refused, allowed
+
+
+def privacy_gate(files: dict[str, bytes], extra=()) -> bool:
+    """True when the files are clean. Prints every hit; the caller must refuse."""
+    pats, notes = private_patterns(extra)
+    for n in notes:
+        print("  privacy gate note: " + n)
+    hits = scan_private(files, pats)
+    print("privacy gate: %d files, %d patterns (profile path x3 spellings, user name, host, %d extra), UTF-8 and UTF-16LE"
+          % (len(files), len(pats), len([e for e in extra if e])))
+    refused, allowed = split_allowed(files, hits, pats)
+    for path, label, n, mx in allowed:
+        print("  privacy gate INFO: allowed %s  %s  x%d (maximum %d)" % (path, label, n, mx))
+    if not refused:
+        print("  privacy gate: clean" + (" (%d allowed hits, see INFO)" % sum(a[2] for a in allowed) if allowed else ""))
+        return True
+    print("PRIVACY GATE: REFUSING TO PACK -- %d hits in %d files" % (len(refused), len({h[0] for h in refused})))
+    for path, pat, enc, n, why in refused:
+        print("  %s  pattern '%s'  %s  x%d%s" % (path, pat, enc, n, "  (%s)" % why if why else ""))
+    print("  nothing was written. Remove the data from the source (or rebuild with path remapping); there is no override.")
+    return False
+
+
+# ---- the package
 def read_manifest(z: zipfile.ZipFile) -> list[dict]:
     raw = z.read("MANIFEST.json").decode("utf-8-sig")
     return json.loads(raw)
@@ -77,36 +321,68 @@ def previous_bin(path: str) -> dict[str, bytes]:
     return out
 
 
-def version_literal() -> str:
-    src = open(os.path.join(REPO, "cli", "crow.py"), encoding="utf-8").read()
-    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', src, re.M)
-    if not m:
-        raise SystemExit("no VERSION literal in cli/crow.py")
-    return m.group(1)
+def version_literal(repo: str = REPO) -> str:
+    """cli/crow_core.py owns the literal since #187; cli/crow.py is the fallback
+    for a checkout from before, whose core carries none."""
+    for name in ("crow_core.py", "crow.py"):
+        path = os.path.join(repo, "cli", name)
+        if not os.path.isfile(path):
+            continue
+        m = re.search(r'^VERSION\s*=\s*"([^"]+)"', read_bytes(path).decode("utf-8"), re.M)
+        if m:
+            return m.group(1)
+    raise SystemExit("no VERSION literal in cli/crow_core.py (nor in an older cli/crow.py)")
 
 
-def stage_from_checkout() -> dict[str, bytes]:
-    files: dict[str, bytes] = {}
-    cli = os.path.join(REPO, "cli")
-    for dirpath, dirnames, filenames in os.walk(cli):
-        dirnames[:] = [d for d in dirnames if d not in CLI_SKIP_DIRS]
+def _walk_shipped(repo: str, sub: str, files: dict[str, bytes]) -> None:
+    for dirpath, dirnames, filenames in os.walk(os.path.join(repo, sub)):
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in EXCLUDE_DIRS)
         for f in sorted(filenames):
-            if f.startswith("test_") and f.endswith(".py"):
-                continue
-            if f.endswith((".pyc", ".pyo", ".log")):
-                continue
             full = os.path.join(dirpath, f)
-            rel = os.path.relpath(full, REPO).replace("/", "\\")
-            files[rel] = open(full, "rb").read()
-    for f in ROOT_FILES:
-        files[f] = open(os.path.join(REPO, f), "rb").read()
-    files["templates\\0731-chat-template.jinja"] = open(
-        os.path.join(REPO, "manifests", "0731-chat-template.jinja"), "rb").read()
-    op = open(os.path.join(REPO, "manifests", "operating-point.json"), "rb").read()
+            rel = os.path.relpath(full, repo).replace("/", "\\")
+            if excluded(rel):
+                continue
+            files[rel] = read_bytes(full)
+
+
+def stage_from_checkout(repo: str = REPO) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    _walk_shipped(repo, "cli", files)
+    for f in SHIP_ROOT_FILES:
+        files[f] = read_bytes(os.path.join(repo, f))
+    files["templates\\0731-chat-template.jinja"] = read_bytes(
+        os.path.join(repo, "manifests", "0731-chat-template.jinja"))
+    op = read_bytes(os.path.join(repo, "manifests", "operating-point.json"))
     json.loads(op.decode("utf-8-sig"))  # must survive as readable JSON
     files["manifests\\operating-point.json"] = op
+    # #196 P1: cli/crow_boot.py starts every operating point from this file and
+    # finds it at ..\manifests\stack.json beside cli\. Required, as in
+    # pack-release.ps1: a package without it has a boot menu that starts nothing.
+    stack = os.path.join(repo, "manifests", "stack.json")
+    if not os.path.isfile(stack):
+        raise SystemExit("manifests/stack.json missing -- the boot menu starts every operating point from it")
+    data = read_bytes(stack)
+    json.loads(data.decode("utf-8-sig"))  # must survive as readable JSON
+    files["manifests\\stack.json"] = data
+    # #196 P2: CrowSetup's convert step runs <install>\tools\te_rename.py to build
+    # the Image Stack's text_encoder_sdcli\. Required, as in pack-release.ps1.
+    te = os.path.join(repo, "tools", "te_rename.py")
+    if not os.path.isfile(te):
+        raise SystemExit("tools/te_rename.py missing -- CrowSetup's Image Stack step needs it")
+    files["tools\\te_rename.py"] = read_bytes(te)
     if "cli\\fonts\\OFL.txt" not in files:
         raise SystemExit("cli/fonts/OFL.txt missing -- the typeface may not ship without it")
+    # The voxel kit (#298) ships in every package, beside cli\ -- pack-release.ps1 does the same.
+    if not os.path.isdir(os.path.join(repo, "kits")):
+        raise SystemExit("kits/ missing -- the voxel kit ships in every package")
+    _walk_shipped(repo, "kits", files)
+    for f in KIT_REQUIRED:
+        if "kits\\pathtracer\\" + f not in files:
+            raise SystemExit("kits/pathtracer/%s missing -- the kit or its licence notice would ship incomplete"
+                             % f.replace("\\", "/"))
+    want = json.loads(files["kits\\pathtracer\\kit.json"].decode("utf-8-sig"))["bundle"]["sha256"]
+    if sha256_bytes(files["kits\\pathtracer\\crow-pathtracer.js"]) != want.upper():
+        raise SystemExit("kits/pathtracer/crow-pathtracer.js does not match kit.json")
     return files
 
 
@@ -126,11 +402,13 @@ def verify(out_zip: str) -> tuple[int, list[str]]:
     problems = []
     with zipfile.ZipFile(out_zip) as z:
         manifest = read_manifest(z)
-        names = {n.replace("/", "\\") for n in z.namelist()}
+        # zipfile writes "/" on Windows and keeps "\\" elsewhere; compare on one spelling
+        real = {n.replace("/", "\\"): n for n in z.namelist()}
+        names = set(real)
         for e in manifest:
             if e["path"] not in names:
                 problems.append("missing: " + e["path"]); continue
-            data = z.read(e["path"])
+            data = z.read(real[e["path"]])
             if sha256_bytes(data) != e["sha256"] or len(data) != e["bytes"]:
                 problems.append("corrupt: " + e["path"])
         named = {e["path"] for e in manifest} | {"MANIFEST.json"}
@@ -143,17 +421,29 @@ def verify(out_zip: str) -> tuple[int, list[str]]:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--previous", required=True, help="the previous release's crow-*-win-x64.zip")
-    ap.add_argument("--version", default=None, help="defaults to cli/crow.py's VERSION")
+    ap.add_argument("--version", default=None, help="defaults to cli/crow_core.py's VERSION")
     ap.add_argument("--out", default=os.path.join(REPO, "dist"))
+    ap.add_argument("--repo", default=REPO, help="the checkout to stage from (default: the one this tool is in)")
+    ap.add_argument("--private-pattern", action="append", default=[], metavar="TEXT",
+                    help="a further string that must not appear in any packed file (repeatable); "
+                         "use it for the paths of the machine that built bin/")
     a = ap.parse_args(argv)
-    version = a.version or version_literal()
-    if a.version and a.version != version_literal():
-        print("NOTE: --version %s but cli/crow.py says %s" % (a.version, version_literal()))
+    version = a.version or version_literal(a.repo)
+    if a.version and a.version != version_literal(a.repo):
+        print("NOTE: --version %s but the checkout says %s" % (a.version, version_literal(a.repo)))
     files = previous_bin(a.previous)
     print("bin/ reused from %s: %d files, every byte matched its manifest" % (a.previous, len(files)))
-    staged = stage_from_checkout()
+    staged = stage_from_checkout(a.repo)
     print("staged from the checkout: %d files" % len(staged))
     files.update(staged)
+    bad = shipped_set_violations(files)
+    if bad:
+        print("REFUSING TO PACK -- %d files are not in the shipped set:" % len(bad))
+        for rel, why in bad:
+            print("  %s  (%s)" % (rel, why))
+        return 1
+    if not privacy_gate(files, a.private_pattern):
+        return 1
     os.makedirs(a.out, exist_ok=True)
     out_zip = os.path.join(a.out, "crow-%s-win-x64.zip" % version)
     manifest = write_package(out_zip, files)

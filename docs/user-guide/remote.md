@@ -3,7 +3,7 @@
 # Phone (remote)
 
 The window, mirrored to a paired phone: same session, same chat, send / stop / approve from the
-phone. Window only; the terminal says "stage 2" (#249).
+phone. (#249).
 
 ## Start and pair
 

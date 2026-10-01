@@ -8,6 +8,7 @@ the model — that is a separate line, printed at the end of the run.
 | | |
 |---|---|
 | Windows | `install.ps1` — five steps, no elevation, everything under `%LOCALAPPDATA%\Crow` |
+| Windows, one window | `CrowSetup.exe` from the [latest release](https://github.com/nibor1896/Crow/releases/latest): Crow, the crow-nest engine and the operating points you pick, with resume. See [CrowSetup.exe](#crowsetupexe-windows) |
 | Linux | `install.sh` — five steps, no root, everything under `${XDG_DATA_HOME:-~/.local/share}/crow` |
 | The model | `hf download`, separately, 73.45 GiB + 0.9 GiB for the projector |
 
@@ -21,7 +22,7 @@ the model — that is a separate line, printed at the end of the run.
 | **System RAM** | 32 GB for the 27B. **64 GB for Flash-Next** — `-ncmoe 30` keeps the experts of 30 of 48 layers in system RAM |
 | **Disk** | ~2 GB for Crow, **73.45 GiB for the model** (3 shards) plus 0.9 GiB for the projector. The 27B is 16.35 GiB plus 0.9 |
 | **OS** | Windows x64 · Linux x86_64 (Arch/Omarchy is what it was ported on and measured on) |
-| **Python** | 3.9+ (`str.removesuffix` in the core). The terminal client uses the standard library only |
+| **Python** | 3.9+ (`str.removesuffix` in the core). |
 | **WebView2** | Window only, Windows. Ships with Windows 11 and with Edge |
 | **WebKitGTK** | Window only, Linux. `webkit2gtk-4.1` + `python-gobject` from the distribution — neither installer asks for root |
 | **wl-clipboard** | Linux only, and only for pasting an image into the window. `xclip` under X11 |
@@ -50,7 +51,7 @@ with paths resolved.
 |---|---|
 | everything under `%LOCALAPPDATA%\Crow` | elevate — there is no administrator prompt |
 | verifies every file against the release manifest | write to Program Files, the registry or `PATH` |
-| installs **both** clients, the window and the terminal one | download the model, or start anything |
+| installs the window | download the model, or start anything |
 
 | flag | |
 |---|---|
@@ -100,6 +101,67 @@ their DLLs with `dumpbin` exactly as it does for `llama-server.exe`; a DLL alrea
 copied twice. `sd-server.exe` links ggml-cuda statically and imports `cublasLt64_13.dll`
 directly. Upstream's `win-cuda12` zip is not used: it brings a second CUDA runtime (563 MB) and
 its `sm_120` support is unverified (#314).
+
+---
+
+## CrowSetup.exe (Windows)
+
+One window that installs Crow, the crow-nest engine and the operating points you pick, and
+resumes where it stopped. `install.ps1` above stays the way to install Crow alone.
+
+| installs | |
+|---|---|
+| Crow | the release package, always |
+| crow-nest engine | the engine zip from the crow-nest release, always. Every model runs on it |
+| operating points | any of Flash-Next (200k), 27B (128k), Image Stack. The optional llama.cpp section downloads nothing |
+| Python | only when no Python 3.10+ is found (`py` launcher, `PATH`): the embeddable 3.13, pip, and `pywebview` (required), `faster-whisper`, `sounddevice` (voice, a missing one only warns) |
+
+| | |
+|---|---|
+| resume | closing the window or a crash keeps the `.part` files and `%LOCALAPPDATA%\Crow\setup\state.json`. The next start re-hashes the partial file and continues by `Range`; at most the last 64 MB is fetched again |
+| verify | a file is renamed into place only after its sha256 matches. A mismatch refetches that one file, once |
+| retries | a download that gets no bytes for 30 s counts as stalled and is retried with 1 to 30 s backoff, without limit. `401`, `403` and `404` stop with a Retry button |
+| order | the Crow package, the engine, small files, then the large containers. A file two points share is fetched once |
+| blocked points | a point this machine cannot run stays visible with its reason in one line |
+| configuration | `stack.json` and the [boot menu](boot.md) are the configuration. No environment variable is written |
+| landed | shown only after every selected point resolves like `crow_boot.py` resolves it: files present with the right size and sha256, `serve.exe` and `sd-server.exe` start |
+| shortcuts | created through `crow_boot.py --create-shortcut`: the folder you chose and the Start menu |
+| update | the version is compared, `models\` and user data are left alone, a locked file is renamed to `.old` |
+| not done | no administrator prompt, no registry, no Apps & Features entry |
+
+Install root: `%LOCALAPPDATA%\Crow`, models in `<install>\models` (the same layout as
+[Where things live](#where-things-live)).
+
+| flag | |
+|---|---|
+| `--headless` | no window: the installer without WebView2 (Windows 11 ships it, so this is the fallback) |
+| `--source <dir>` | take the files from a local folder instead of Hugging Face and GitHub |
+| `--install-root <dir>` | install root, default `%LOCALAPPDATA%\Crow` |
+| `--package-source <dir>` | Crow's package and the engine package from `<dir>\<asset>`, checked against the embedded size and sha256; every other file from its URL (or `--source`) |
+| `--points <ids>` | with `--headless`: the points to install (`flash-next`, `27b`, `image-stack`) |
+| `--shortcut-dir <dir>` | the shortcut goes into `<dir>` only, not the Desktop or the Start menu |
+| `--no-shortcuts` | no shortcut at all |
+| `--selftest` | run the checks, open no window, use no network. Exit code 0 is green |
+
+### Build it
+
+```powershell
+powershell -NoProfile -File installer\build.ps1 -CrowZip <crow-X-win-x64.zip> -EngineZip <crow-nest-engine-X-win-x64.zip>
+powershell -NoProfile -File installer\build.ps1 -Selftest
+```
+
+| step | |
+|---|---|
+| vendor | the Python 3.13.16 embeddable zip and `get-pip.py` into `installer\vendor\`, each against a sha256 pinned in the script. The pip is the pypa/get-pip commit with pip 26.2.1, so the sha cannot move under a pin |
+| `packages.json` | asset, bytes, sha256, version and release URL of the two zips; the exe embeds it |
+| build | `cargo build --release -p crowsetup --features bundle`, paths remapped, C runtime linked static |
+| check | `crowsetup.exe --selftest` must exit 0 |
+| privacy gate | `tools\repack-release.py` scans the exe for the builder's profile path, user name and host name, as UTF-8 and UTF-16. A hit refuses the build and nothing is copied |
+| output | `installer\dist\CrowSetup.exe`, with its size and sha256 printed |
+
+Needs Rust (edition 2024), Python 3 for the gate, and the network on the first run. `-Selftest`
+needs neither the network nor `cargo`. CI builds without the `bundle` feature and runs
+`cargo test` and `crowsetup --selftest` in `installer\`.
 
 ---
 

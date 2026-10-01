@@ -31,8 +31,8 @@
 #
 # THE MODEL ROOT IS A LINK AND NOT A VARIABLE. $CROW_HOME/models is a symlink to
 # whatever tree `--models DIR` names, because <install>/models is what
-# crow_platform.models_dir() answers with nothing set -- so the window, the
-# terminal client and tools/start-server.py all read the same tree with no
+# crow_platform.models_dir() answers with nothing set -- so the window and
+# tools/start-server.py both read the same tree with no
 # environment at all. A CHECKOUT IS ITS OWN <install> (crow_core.INSTALL_ROOT is
 # the parent of cli/), so a checkout takes the same link of its own; the last
 # step prints that line. See link_models().
@@ -121,15 +121,26 @@ die()   { printf '\n%serror:%s %s\n' "$R" "$Z" "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 
 # The version literal, read from the one place that owns it.
-# tools/check_operating_point.py holds cli/crow.py, install.ps1 and the README
+# tools/check_operating_point.py holds the core, install.ps1 and the README
 # badge against the manifest. This script deliberately carries NO copy of the
 # number: a fourth place nobody checks is a fourth place that drifts.
-version_from_crow_py() {
+version_literal() {  # version_literal <file> -> the VERSION literal, or nothing
     [ -f "$1" ] || return 0
     # awk and not `sed | head`: `pipefail` is on, and a producer that is still
     # writing when head closes the pipe turns a correct answer into exit 141.
     awk '/^VERSION[ \t]*=[ \t]*"/ { s = $0
         sub(/^VERSION[ \t]*=[ \t]*"/, "", s); sub(/".*/, "", s); print s; exit }' "$1"
+}
+
+# The version of the Crow tree at <dir>: cli/crow_core.py owns the literal since
+# #187, and cli/crow.py is the fallback because every tree from before then --
+# an older tarball, an older checkout -- carries it there and has a crow_core.py
+# without one.
+version_of_tree() {  # version_of_tree <dir>
+    local v
+    v="$(version_literal "$1/cli/crow_core.py")"
+    [ -n "$v" ] || v="$(version_literal "$1/cli/crow.py")"
+    [ -z "$v" ] || printf '%s\n' "$v"
 }
 
 # Where to fetch from when there is no checkout. A ref that looks like a release
@@ -534,17 +545,32 @@ selftest() {
     # 1-2. The version literal. The regex has to find the real one and has to
     # find nothing in a file that does not declare one -- a regex that answers
     # something for every input would silently tag a release "".
-    printf 'VERSION = "9.9.9"\n' > "$tmp/crow.py"
-    local v; v="$(version_from_crow_py "$tmp/crow.py")"
-    check "the version regex reads the literal out of cli/crow.py" \
+    mkdir -p "$tmp/vnew/cli" "$tmp/vold/cli"
+    printf '"""core"""\nVERSION = "9.9.9"\n' > "$tmp/vnew/cli/crow_core.py"
+    local v; v="$(version_of_tree "$tmp/vnew")"
+    check "the version regex reads the literal out of cli/crow_core.py" \
           "$([ "$v" = "9.9.9" ] && echo 0 || echo 1)" "got '$v'"
+    # A tree from before #187: the literal sits in cli/crow.py and crow_core.py
+    # has none. Reading only the core would call every older tarball 'unknown'.
+    printf '"""core"""\nimport os\n' > "$tmp/vold/cli/crow_core.py"
+    printf 'VERSION = "2.8.5"\n' > "$tmp/vold/cli/crow.py"
+    v="$(version_of_tree "$tmp/vold")"
+    check "an older tree (VERSION only in cli/crow.py) is still read" \
+          "$([ "$v" = "2.8.5" ] && echo 0 || echo 1)" "got '$v'"
+    printf 'VERSION = "2.9.0"\n' > "$tmp/vold/cli/crow_core.py"
+    v="$(version_of_tree "$tmp/vold")"
+    check "crow_core.py wins over a stale crow.py" \
+          "$([ "$v" = "2.9.0" ] && echo 0 || echo 1)" "got '$v'"
     printf '# no version here\nVERSIONS = ["1.2.3"]\n' > "$tmp/noversion.py"
-    v="$(version_from_crow_py "$tmp/noversion.py")"
+    v="$(version_literal "$tmp/noversion.py")"
     check "NEGATIVE: a file without the literal yields nothing, not a guess" \
           "$([ -z "$v" ] && echo 0 || echo 1)" "got '$v'"
-    # And against the real file, which is the one that matters.
+    v="$(version_of_tree "$tmp/absent")"
+    check "NEGATIVE: a tree with neither file yields nothing" \
+          "$([ -z "$v" ] && echo 0 || echo 1)" "got '$v'"
+    # And against the real tree, which is the one that matters.
     if [ -n "$REPO" ]; then
-        v="$(version_from_crow_py "$REPO/cli/crow.py")"
+        v="$(version_of_tree "$REPO")"
         check "the regex finds this repository's own version ($v)" \
               "$(printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' && echo 0 || echo 1)" \
               "got '$v'"
@@ -600,14 +626,15 @@ selftest() {
     # Silence is the interesting half -- a manifest that reports drift on a
     # clean install is one nobody reads by the third run.
     mkdir -p "$tmp/src/cli" "$tmp/src/tools/archive/2026-08" "$tmp/dst"
-    printf 'print(1)\n' > "$tmp/src/cli/crow.py"
+    printf 'print(1)\n' > "$tmp/src/cli/crow.py"           # a pre-#187 install's client
+    printf 'print(5)\n' > "$tmp/src/cli/crow_core.py"
     printf 'print(2)\n' > "$tmp/src/cli/crow_gui.py"
     printf 'x\n'        > "$tmp/src/LICENSE"
-    printf 'print(3)\n' > "$tmp/src/cli/test_crow.py"      # must not ship
+    printf 'print(3)\n' > "$tmp/src/cli/test_crow_gui.py"  # must not ship
     printf 'x\n'        > "$tmp/src/tools/start-server.py" # must ship
     printf 'x\n'        > "$tmp/src/tools/archive/2026-08/measure-vram.ps1"  # must not
     ( cd "$tmp/src" && tar cf - . ) | ( cd "$tmp/dst" && tar xf - )
-    rm -f "$tmp/dst/cli/test_crow.py" "$tmp/dst/tools/archive/2026-08/measure-vram.ps1"
+    rm -f "$tmp/dst/cli/test_crow_gui.py" "$tmp/dst/tools/archive/2026-08/measure-vram.ps1"
     # A MODEL TREE IS NOT PAYLOAD, in either direction: 73 GiB must never be
     # sha256'd into manifest.sha256 on the way in, and the link at
     # <install>/models must not read as drift on the way back out. Both hold
@@ -623,7 +650,7 @@ selftest() {
           "$([ -z "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")" ] && echo 0 || echo 1)" \
           "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")"
     check "test_*.py is not in the payload" \
-          "$(grep -q 'test_crow.py' "$tmp/dst/manifest.sha256" && echo 1 || echo 0)"
+          "$(grep -q 'test_crow_gui.py' "$tmp/dst/manifest.sha256" && echo 1 || echo 0)"
     check "NEGATIVE: a models/ tree in the source is not in the payload either" \
           "$(grep -q ' models/' "$tmp/dst/manifest.sha256" && echo 1 || echo 0)" \
           "$(grep ' models/' "$tmp/dst/manifest.sha256" || true)"
@@ -644,16 +671,18 @@ selftest() {
     check "an edited file reads 'changed' and a deleted one 'missing'" \
           "$(printf '%s' "$out" | grep -q '^changed cli/crow_gui.py$' \
              && printf '%s' "$out" | grep -q '^missing LICENSE$' && echo 0 || echo 1)" "$out"
-    rm -f "$tmp/src/cli/crow_gui.py"
+    # The real case since #187: the terminal client leaves the payload, and an
+    # update of an older install has to remove it like any other dropped file.
+    rm -f "$tmp/src/cli/crow.py"
     manifest_of "$tmp/src" > "$tmp/next.sha256"
     out="$(manifest_dropped "$tmp/dst/manifest.sha256" "$tmp/next.sha256")"
-    check "a file the new payload no longer ships is reported dropped" \
-          "$([ "$out" = "cli/crow_gui.py" ] && echo 0 || echo 1)" "$out"
+    check "a file the new payload no longer ships (cli/crow.py) is reported dropped" \
+          "$([ "$out" = "cli/crow.py" ] && echo 0 || echo 1)" "$out"
 
     out="$(manifest_changes "$tmp/dst/manifest.sha256" "$tmp/next.sha256")"
     check "a package that dropped one file and changed none reads '0 0'" \
           "$([ "$out" = "0 0" ] && echo 0 || echo 1)" "$out"
-    printf 'print(4)\n' > "$tmp/src/cli/crow.py"
+    printf 'print(4)\n' > "$tmp/src/cli/crow_gui.py"
     printf 'new\n'      > "$tmp/src/cli/crow_extra.py"
     manifest_of "$tmp/src" > "$tmp/next2.sha256"
     out="$(manifest_changes "$tmp/dst/manifest.sha256" "$tmp/next2.sha256")"
@@ -868,9 +897,9 @@ preflight() {
     step "Checking this machine"
     local problems=0
 
-    # Python. BOTH clients need it; the terminal one needs nothing else.
+    # Python. The window is Python.
     if [ -z "$PY" ]; then
-        bad "no python3 on the PATH. Both clients are Python"
+        bad "no python3 on the PATH. The window is Python"
         problems=$((problems + 1))
     else
         local pv; pv="$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
@@ -889,8 +918,8 @@ preflight() {
     fi
 
     # The window's half of the promise, and it is a WARNING rather than a
-    # refusal for install.ps1's reason: a missing runtime costs one client, not
-    # the install. The terminal client runs on the standard library alone.
+    # refusal for install.ps1's reason: a missing runtime is fixed with one
+    # package-manager line, and the rest of the install is still worth having.
     #
     # WE CANNOT INSTALL IT AND DO NOT PRETEND TO. PyGObject is not a wheel that
     # pip can build here without the GObject headers, and the headers come from
@@ -904,9 +933,9 @@ EOF
     then
         ok "PyGObject with Gtk 3.0 and WebKit2 4.1 -- the window can render"
     else
-        warn "no PyGObject / Gtk 3.0 / WebKit2 4.1. cli/crow.py runs in a terminal without"
-        note "them; cli/crow_gui.py is the window and renders in WebKitGTK. Install them"
-        note "with your package manager -- this script never asks for a root password:"
+        warn "no PyGObject / Gtk 3.0 / WebKit2 4.1. cli/crow_gui.py is the window and renders"
+        note "in WebKitGTK, so it will not start without them. Install them with your"
+        note "package manager -- this script never asks for a root password:"
         cmd "$PACMAN_LINE"
     fi
 
@@ -994,7 +1023,7 @@ resolve_source() {
     if [ -n "$REPO" ]; then
         SOURCE="$REPO"
         SOURCE_TMP=""
-        VERSION="$(version_from_crow_py "$REPO/cli/crow.py")"
+        VERSION="$(version_of_tree "$REPO")"
         ok "from this checkout: $REPO (version ${VERSION:-unknown})"
         return
     fi
@@ -1008,8 +1037,8 @@ resolve_source() {
     tar -xzf "$SOURCE_TMP/crow.tar.gz" -C "$SOURCE_TMP"
     # GitHub's archive wraps everything in Crow-<ref>/.
     SOURCE="$(find "$SOURCE_TMP" -mindepth 1 -maxdepth 1 -type d | sed -n 1p)"
-    [ -f "$SOURCE/cli/crow.py" ] || die "the tarball does not look like Crow: no cli/crow.py"
-    VERSION="$(version_from_crow_py "$SOURCE/cli/crow.py")"
+    [ -f "$SOURCE/cli/crow_gui.py" ] || die "the tarball does not look like Crow: no cli/crow_gui.py"
+    VERSION="$(version_of_tree "$SOURCE")"
     ok "unpacked version ${VERSION:-unknown}"
 }
 
@@ -1085,8 +1114,9 @@ install_venv() {
     if "$CROW_HOME/venv/bin/python" -m pip install --quiet --upgrade pywebview; then
         ok "pywebview $("$CROW_HOME/venv/bin/python" -m pip show pywebview 2>/dev/null | sed -n 's/^Version: //p')"
     else
-        warn "pip could not install pywebview. The terminal client is unaffected:"
-        cmd "$PY $CROW_HOME/cli/crow.py"
+        warn "pip could not install pywebview, and the window cannot start without it."
+        note "Retry by hand:"
+        cmd "$CROW_HOME/venv/bin/python -m pip install pywebview"
     fi
     if [ "$WITH_VOICE" = 1 ]; then
         if "$CROW_HOME/venv/bin/python" -m pip install --quiet --upgrade faster-whisper sounddevice; then
@@ -1498,7 +1528,6 @@ final_screen() {
         cmd "ln -s $MODELS_DIR $REPO/models"
     fi
     printf '\n'
-    note "The terminal client needs nothing but Python:  $PY $CROW_HOME/cli/crow.py"
     [ "$WITH_TAILSCALE" = 1 ] || note "The phone from anywhere (HTTPS, Tailscale): re-run with --tailscale"
     note "The Linux page -- paths, the float rule, the escape hatches, troubleshooting:"
     note "https://github.com/$REPO_SLUG/blob/main/docs/user-guide/linux.md"
@@ -1565,7 +1594,7 @@ done
 REPO=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    [ -f "$REPO/cli/crow.py" ] || REPO=""
+    [ -f "$REPO/cli/crow_gui.py" ] || REPO=""
 fi
 
 PY="$(command -v python3 || command -v python || true)"

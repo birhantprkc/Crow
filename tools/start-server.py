@@ -47,8 +47,8 @@ def main(argv: list[str]) -> int:
             return 1
     else:
         for pid, line in running:
-            print("running (pid %s): %s"
-                  % (pid, crow_core.served_model(line) or "unreadable command line"))
+            # #196 C3: a crow-nest serve is named by its point and port.
+            print(crow_core.running_server_label(pid, line))
         for i, k in enumerate(keys, 1):
             print("  %d) %s" % (i, crow_core.model_label(k)))
         try:

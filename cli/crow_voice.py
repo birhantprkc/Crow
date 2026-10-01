@@ -19,12 +19,12 @@ BOTH IMPORTS ARE OPTIONAL, the way pywebview is for the window itself.
 `available()` NAMES what is missing and returns it as a sentence; it never
 raises. A machine without a microphone is still a machine that runs Crow.
 
-THE MODEL IS `small`, AND THAT IS A CEILING DECISION. robin's rule was no
+THE MODEL IS `small`, AND THAT IS A CEILING DECISION. The owner's rule was no
 gigabyte download. Measured against the HuggingFace API on 2026-08-21:
 `small` 486.2 MB, `medium` 1531 MB, `turbo` 1622 MB, `large-v3` 3087 MB -- so
 `small` is simply the largest rung that fits. Multilingual, and NOT one of the
 `distil-*` or German-tuned checkpoints: most users speak English into this box
-and robin speaks German into it, and a one-language model would have to be
+and the owner speaks German into it, and a one-language model would have to be
 chosen against one of them.
 """
 
@@ -254,7 +254,7 @@ def transcribe_file(path: str, stats: "dict | None" = None) -> str:
 def model_loaded() -> bool:
     """#290: is the model in memory? False before the first dictation, which
     loads it -- or, on a machine without install.ps1's copy, downloads the
-    486 MB first (~52 s on robin's first try). The phone says so meanwhile."""
+    486 MB first (~52 s on the owner's first try). The phone says so meanwhile."""
     return _model is not None
 
 

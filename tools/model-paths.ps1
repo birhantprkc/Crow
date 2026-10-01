@@ -58,6 +58,12 @@ function Get-ModelTable {
     if (-not $json.models -or -not $json.models.entries) {
         throw "model table has no models.entries: $ManifestPath"
     }
+    # #196 C1: the shipped manifest carries no `_root` (it named one machine).
+    # The tree is the client's: $env:CROW_MODELS, else <repo>\models.
+    if (-not $json.models._root) {
+        $root = if ($env:CROW_MODELS) { $env:CROW_MODELS } else { Join-Path (Split-Path $PSScriptRoot -Parent) 'models' }
+        $json.models | Add-Member -NotePropertyName _root -NotePropertyValue $root -Force
+    }
     return $json.models
 }
 
@@ -106,7 +112,7 @@ function Get-SamplingDefault {
     .DESCRIPTION
         The temperature stood in six files. Five had it because somebody copied a
         working probe, and none of the five carried the reason -- that lived in a
-        comment in cli/crow.py which had not been copied along. When 0731 moves
+        comment in the client source which had not been copied along. When 0731 moves
         the value, six edits would have to agree or the probes measure something
         the client never does.
 

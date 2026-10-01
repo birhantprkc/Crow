@@ -70,7 +70,7 @@
   <!-- pipeline, two rows -->
   <rect x="66" y="540" width="240" height="86" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="186" y="574" text-anchor="middle" class="tb">PROMPT</text>
-  <text x="186" y="600" text-anchor="middle" class="sub">cli/crow.py</text>
+  <text x="186" y="600" text-anchor="middle" class="sub">cli/crow_gui.py</text>
 
   <rect x="366" y="540" width="290" height="86" rx="12" fill="#ffffff" stroke="#5b8def" stroke-width="1.8"/>
   <text x="511" y="574" text-anchor="middle" class="tb">llama-server</text>

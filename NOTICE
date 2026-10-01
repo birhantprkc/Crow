@@ -85,9 +85,8 @@ SIL Open Font License, Version 1.1 -- not MIT.
 
 Two `.ttf` files ship in `cli/fonts/`. The full licence text sits beside them in
 `cli/fonts/OFL.txt` and must stay there: under the OFL a font may be bundled and
-redistributed ONLY with that notice. `cli/test_crow.py` asserts the file is
-present, because without it redistribution is a licence violation that nothing
-else in the build would catch.
+redistributed ONLY with that notice. Without it redistribution is a licence
+violation that nothing else in the build would catch.
 
 
 --------------------------------------------------------------------------------

@@ -5,6 +5,54 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 3.0.0 — 2026-10-01
+
+**`CrowSetup.exe` installs Crow, the crow-nest engine and the operating points in one window, and the window is Crow's only client.** The installer is attached to this release; it downloads Crow's package and the crow-nest v0.8.0 engine from their releases, resumes after a stop, and writes the shortcut to the new operating-point window. The terminal client and `crow --serve` are removed: start Crow with `python <install>/cli/crow_gui.py`; installs of 2.8.5 and older update through the usual one-liner. Major version because a command line that used to work no longer exists.
+
+### Added
+
+- **`CrowSetup.exe` installs Crow, the crow-nest engine and the chosen operating points** (#196, 2026-10-01). One Rust exe whose window (WebView2) uses Crow's own look: the crow fills as the progress, "Flying to the nest", "Landed. Crow is ready.".
+  - **Selection:** Crow and the engine are required; Flash-Next, 27B and Image Stack are chosen per row; a point the machine cannot run (no RTX 50 card, under 64 GB RAM for Flash-Next, not enough disk) stays visible with its reason.
+  - **Downloads resume:** each file goes to `.part` with `setup\state.json` (fsync every 64 MiB), Range + If-Range, unbounded retries with a stall timeout, sha256 before the rename, a fallback to IPv4 after resets. Closing with X and starting again shows "Welcome back" and continues. Measured 2026-10-01: a 927,607,488 B file from Hugging Face killed at 30.4 % resumed from byte 268,447,949 and verified; Pause resumed at the exact byte; a `--source` install killed at 6.0 GB continued from the last checkpoint.
+  - **Configuration** comes from `manifests/stack.json` and the boot menu; nothing is written to the user environment. Models always go to `<install>\models`; the shortcut passes `--models`. The Image Stack's `text_encoder_sdcli/` is derived on the machine and the upstream `text_encoder/` deleted.
+  - **Python:** a found Python 3.10+ is used, else the bundled embeddable 3.13.16.
+  - **Flags:** `--headless`, `--selftest`, `--source <dir>`, `--package-source <dir>`, `--install-root <dir>`, `--shortcut-dir <dir>`, `--no-shortcuts`. `installer/build.ps1` builds it remapped, with a static C runtime, and refuses on the privacy gate (18,488,320 B on 2026-10-01).
+- **The operating-point window** (#196, 2026-10-01). `python cli\crow_boot.py --gui`, and the shortcut the installer writes: the three crow-nest points and the optional llama.cpp lines with Start, the crow filling while a point starts, "Landed." with the running point and Stop on top, "One model at a time." when a second start is refused, and "Open Crow window" for the chat. The terminal menu stays (`--terminal` writes its shortcut). Measured 2026-10-01: the 27B landed in 15.3 s through the window; Stop took 4.4 s with every port free afterwards.
+
+- **A boot menu starts an operating point, then Crow** (#196, 2026-10-01). It is started with `python cli\crow_boot.py`, or from a shortcut via `--create-shortcut <folder>`, which uses Windows Terminal when present.
+  - **Entries:** Start Crow, the three crow-nest points (Flash-Next, 27B, Image Stack, the baseline), and below them under "Optional (llama.cpp)" Crow's llama.cpp lines, dimmed. Only lines whose files are on disk are shown. The last entries are Stop and Quit.
+  - **Starting a point:** an animated "flying to the nest" line replaces the server log. "Landed" shows for 5 s, then the menu comes back.
+  - **Context:** the 27B point runs at 128k (`CROW_CONTEXT=131072`), the Image Stack at the dense default 65,536 so Qwen-Image fits beside it. Measured on Windows (RTX 5090, BF16 KV, F16 projector), 2026-10-01: 200,000 is refused at boot, needing 13.03 GiB of states against 12.17 GiB free. At 131,072 the boot took 12 s, `/props` showed `n_ctx` 131072 with vision, and the card had 28,342 of 32,607 MiB in use (1,252 idle). 200k waits for an 8-bit KV cache in crow-nest.
+  - **One point at a time, in both directions.** A second start names what runs and how to stop it.
+  - **Configuration:** everything comes from `manifests/stack.json`, which now ships in the package. The menu writes `active-point.json` for the window.
+  - **Measured on Windows, 2026-10-01**, from a hardlinked install layout and the engine pack of crow-nest #131: the 27B ready in 9-13 s, the Image Stack in 10 s (sd-server started after serve), the 27B GGUF line in 9-12 s. A second start was refused (exit 3). After Stop, every port was free.
+  - Stop waits on the process handle: a 13 GB llama-server was gone from the scan after 0.08 s but from `tasklist` only after 1.61 s.
+  - Flags `--status`, `--start <point>`, `--stop` and `--start-crow` work without the menu. `docs/user-guide/boot.md` documents it.
+
+- **`manifests/stack.json` describes the three installable operating points** (#196, 2026-10-01). Flash-Next + vision, 27B + vision and 27B + Qwen-Image 2.1. Each point lists every file with repo, pinned revision, bytes and sha256, plus serve's env and argv, ports, the readiness probe and the identity (`/props` `model_path`). Disk per point: 105,644,572,827 B, 18,784,665,622 B and 69,434,804,127 B. The projectors, the tokenizer and the crow0924 hot set are marked `mirror-pending`: they move into our CNQ repos on Hugging Face, upload on robin's word. Qwen-Image stays upstream. `tools/check_stack.py` validates it (5 of 5 offline, 31 of 31 `--online` against HF on 2026-10-01), and a test pins its sd-server line to `crow_core.image_server_command`. This is the data the installer and the boot script will read.
+- **`tools/te_rename.py` derives `text_encoder_sdcli/` from upstream Qwen-Image** (#196, 2026-10-01). It rewrites only the tensor names (`model.language_model.*`, `model.visual.*`, `lm_head.*` → `text_encoders.llm.*`). The payload is copied byte for byte, each shard is atomic and the run is resumable. Checked against the four upstream shard headers read by HTTP range: 750 tensors, 0 mismatches, and headers and index byte-identical to the copy the image stack was measured with.
+
+### Changed
+
+- **The window finds crow-nest by itself** (#196, 2026-10-01). Without `--base-url` it now also tries `127.0.0.1:8099` (`/health` = ok) after any llama-server. Crow sees `serve.exe` and `sd-server.exe` as servers. Starting a second operating point is refused, naming the running serve. `tools/start-server.py` lists a running serve as `crow-nest <point> on port 8099`.
+- **The image server starts only on the Image Stack** (#196, 2026-10-01). `%LOCALAPPDATA%\Crow\active-point.json` (written by the coming boot script) names the running point. On `flash-next` or `27b` the window no longer warms sd-server, and the image tools say that image generation needs the Image Stack. Beside Flash-Next, serve leaves 73-185 MiB of VRAM, so a warm-up there would not fit; that it fails is not measured. Without the file, or when its serve pid is dead, nothing changes.
+- **No owner name and no machine paths in what ships** (#196, 2026-10-01). Model prompts and texts say "the user". `operating-point.json` no longer carries a models root or a lab binary path. Models come from `$CROW_MODELS`, else `<install>/models`, and a line's own build from `CROW_LLAMA_SERVER_<KEY>`, else `<install>/bin`. A test fails on any owner name or profile path in the shipped files: 389 hits before, 0 after.
+
+### Fixed
+
+- **Release packages no longer carry local logs or builder paths** (#196, 2026-10-01). `crow-2.8.5-win-x64.zip` (643,483,909 B) shipped 10 `cli/runs/llama-server-808x*.log` files with local model paths; 2.8.4 and 2.1.0 have the same, per the audit. Both packers now ship only a declared set and exclude `runs/`, `*.log`, `.env*`, `secrets.json` and session files. Before writing anything they scan every packed file (UTF-8 and UTF-16LE) for the builder's profile path, user name and host name, and refuse on any hit, with no override. On the 2.8.5 tree the scan catches the logs and 10 binaries (`ggml-cuda.dll`, `llama.dll`, `sd-server.exe` and others) that embed build paths. `pack-release.ps1` has no personal `-BuildDir` default any more (`$env:CROW_BUILD_DIR`). Selftests: `pack-release.ps1` 52 OK, `test_repack_release` 18 OK.
+
+### Known limitations
+
+- **The published 2.1.0 and 2.8.4 Windows assets still contain the local logs.** The 2.8.5 asset was replaced on 2026-10-01 by a repack of the `v2.8.5` tag with its own packer and the rebuilt `bin\` (643,542,202 B, 59 files, no `runs/` logs).
+  - The gate refuses the binaries those packages were built from.
+  - `bin\` was rebuilt on 2026-10-01 from a path without a user name, at the same commits and CMake options: llama.cpp `1c3c967` with its working-tree diff, sd.cpp `2f88688`. Builder paths went from up to 258 per file to 0, sizes changed by less than 0.03 %.
+  - The gate passes that rebuild. It allows only three upstream word sites, each by file, exact context and measured maximum: "round-robin" twice in `llama-server-impl.dll`, and 29 tokenizer-vocabulary entries ("Robin", "Robinson") in each of `sd-cli.exe` and `sd-server.exe`. Paths are never allowed.
+
+### Removed
+
+- **The terminal client and `crow --serve` are gone** (#187, 2026-10-01). `cli/crow.py` and its suite `cli/test_crow.py` are deleted; the window is the only client: `python <install>/cli/crow_gui.py`, against crow-nest with `--base-url http://127.0.0.1:8099/v1`. `--serve <model>` has no replacement: the window boots a llama.cpp operating point from its model menu, and crow-nest's `serve` starts from the crow-nest repository. The version literal now lives in `cli/crow_core.py`; the installers read it there and fall back to `cli/crow.py` only for installs older than this change, so those still update. `tools/run_server_block.py` (E14 block), which drove the terminal client, moved to `tools/archive/2026-10/`. The suites are now `test_crow_core`, `test_crow_gui` and `test_crow_remote`; dropping `test_crow` is a deliberate coverage reduction: 3,143 tests before, 2,945 after (Windows, 2026-10-01, same 7 known Windows-only failures both times); 332 of the 480 `test_crow` tests that guarded `crow_core` functions were moved into `test_crow_core`, and the tests of code that lost its last caller went with that code.
+
 ## 2.8.5 — 2026-09-30
 
 **The phone remote answers a refused request instead of resetting the connection.** A test of it went red on

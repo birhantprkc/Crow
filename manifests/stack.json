@@ -1,0 +1,830 @@
+{
+ "_what": "The three operating points the installer and the boot script install and start: every file with its pinned source, the engine env and argv, the ports, the readiness probe and the identity. tools/check_stack.py validates it (offline; --online re-checks bytes, sha256 and revisions against Hugging Face). Keys starting with _ are documentation, the convention of manifests/operating-point.json.",
+ "_status": "published = in our Hugging Face repo at the pinned revision. mirror-pending = to be copied into our repo at repo/path (owner decision 2026-10-01; the upload happens on the owner's word); until then fetch it from source, whose sha256 is the file's. upstream = fetched from the third-party repo at the pinned revision (Qwen-Image stays upstream, owner decision 2026-10-01). Uploading the mirror moves the repo revision and rewrites its SHA256SUMS: update revision, the SHA256SUMS entry and the status, then run tools/check_stack.py --online.",
+ "_paths": "Every path starts with a placeholder; no absolute path is written here. Forward slashes; the installer converts them for the platform.",
+ "schema": "crow-stack/1",
+ "placeholders": {
+  "INSTALL": "the install root (Windows: %LOCALAPPDATA%\\Crow)",
+  "MODELS": "the models root: $CROW_MODELS when set, else ${INSTALL}/models (Crow cli/crow_platform.py models_dir)"
+ },
+ "licenses": {
+  "qwen-community-1.0": {
+   "name": "Qwen Community License 1.0",
+   "non_commercial": false,
+   "show_at_install": false,
+   "text_file": "fn-license",
+   "summary": "Use, copy, modify and distribute, including commercially, with the notice kept in every copy; a Model-as-a-Service or AI Work Assistant business needs a separate licence from Qwen for commercial use."
+  },
+  "apache-2.0": {
+   "name": "Apache License 2.0",
+   "non_commercial": false,
+   "show_at_install": false,
+   "text_file": "27b-license",
+   "summary": "Permissive; keep the licence and notices."
+  },
+  "qwen-research": {
+   "name": "Qwen Research License Agreement",
+   "non_commercial": true,
+   "show_at_install": true,
+   "text_file": "qi-license",
+   "summary": "Research or evaluation purposes only. Commercial use needs a separate licence from Qwen (model-business@notice.qwencloud.com). Crow ships no Qwen-Image weights; the installer fetches them from Qwen/Qwen-Image-2.1."
+  }
+ },
+ "files": [
+  {
+   "id": "fn-cnq",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "Qwen3.8-Flash-Next-CNQ4.5-M.cnq",
+   "revision": "3ebead456fbff1ceebe600fddc83cb13106b06ce",
+   "bytes": 104727179972,
+   "sha256": "7c058e555667b1c3d8f7d804d4a3393ba3664161dd307305718d85e4f33646b7",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/Qwen3.8-Flash-Next-CNQ4.5-M.cnq",
+   "source": null,
+   "status": "published",
+   "license": "qwen-community-1.0",
+   "role": "container"
+  },
+  {
+   "id": "fn-sidecar",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "Qwen3.8-Flash-Next-CNQ4.5-M.cnq.sidecar.jsonl",
+   "revision": "3ebead456fbff1ceebe600fddc83cb13106b06ce",
+   "bytes": 436716,
+   "sha256": "af85905fbf46c12fa9528d22f2932b8785c55731a8c8fb013b2e91eecc6f0692",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/Qwen3.8-Flash-Next-CNQ4.5-M.cnq.sidecar.jsonl",
+   "source": null,
+   "status": "published",
+   "license": "qwen-community-1.0",
+   "role": "report"
+  },
+  {
+   "id": "fn-hotsets-longctx2100",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "hotsets-M-longctx2100-n160.json",
+   "revision": "3ebead456fbff1ceebe600fddc83cb13106b06ce",
+   "bytes": 83705,
+   "sha256": "4a408907d553518ee4421e59eae09e243db82ac0cd677557596dfdbaa4b099dc",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/hotsets-M-longctx2100-n160.json",
+   "source": null,
+   "status": "published",
+   "license": "qwen-community-1.0",
+   "role": "hotset"
+  },
+  {
+   "id": "fn-sha256sums",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "SHA256SUMS",
+   "revision": "3ebead456fbff1ceebe600fddc83cb13106b06ce",
+   "bytes": 784,
+   "sha256": "97ea0d58545d63bf08d4a8f71093a82945f7a2c9dde7373aadded39c876fa9b5",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/SHA256SUMS",
+   "source": null,
+   "status": "published",
+   "license": "qwen-community-1.0",
+   "role": "checksums"
+  },
+  {
+   "id": "fn-license",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "LICENSE",
+   "revision": "3ebead456fbff1ceebe600fddc83cb13106b06ce",
+   "bytes": 3235,
+   "sha256": "a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/LICENSE",
+   "source": null,
+   "status": "published",
+   "license": "qwen-community-1.0",
+   "role": "license"
+  },
+  {
+   "id": "fn-hotsets-crow0924",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "hotsets-M-crow0924-n160.json",
+   "revision": null,
+   "bytes": 37167,
+   "sha256": "f83e210a21391521b145d53d41fb0308f99cf6543bada03860127544a1b6fff5",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/hotsets-M-crow0924-n160.json",
+   "source": {
+    "host": "github",
+    "repo": "nibor1896/crow-nest",
+    "path": "decode_out/hotsets-M-crow0924-n160.json",
+    "revision": "f4a3bd86f7b33db883f59c251cc04b37ac1ceeda",
+    "bytes": 37167,
+    "sha256": "f83e210a21391521b145d53d41fb0308f99cf6543bada03860127544a1b6fff5",
+    "license": "apache-2.0"
+   },
+   "status": "mirror-pending",
+   "license": "apache-2.0",
+   "role": "hotset"
+  },
+  {
+   "id": "fn-mmproj",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "mmproj-F16.gguf",
+   "revision": null,
+   "bytes": 904004000,
+   "sha256": "1f7b7f0b984cf065c604360c29c8098362ed61b290db0ff12c6f360bb1a8a980",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/mmproj-F16.gguf",
+   "source": {
+    "host": "huggingface",
+    "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "path": "mmproj-F16.gguf",
+    "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+    "bytes": 904004000,
+    "sha256": "1f7b7f0b984cf065c604360c29c8098362ed61b290db0ff12c6f360bb1a8a980",
+    "license": "qwen-community-1.0"
+   },
+   "status": "mirror-pending",
+   "license": "qwen-community-1.0",
+   "role": "projector"
+  },
+  {
+   "id": "fn-tokenizer",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "tokenizer.json",
+   "revision": null,
+   "bytes": 12809320,
+   "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/tokenizer.json",
+   "source": {
+    "host": "huggingface",
+    "repo": "Qwen/Qwen3.8-Flash-Next",
+    "path": "tokenizer.json",
+    "revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+    "bytes": 12809320,
+    "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "license": "qwen-community-1.0"
+   },
+   "status": "mirror-pending",
+   "license": "qwen-community-1.0",
+   "role": "tokenizer"
+  },
+  {
+   "id": "fn-tokenizer-config",
+   "repo": "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M",
+   "path": "tokenizer_config.json",
+   "revision": null,
+   "bytes": 17928,
+   "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+   "dest": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/tokenizer_config.json",
+   "source": {
+    "host": "huggingface",
+    "repo": "Qwen/Qwen3.8-Flash-Next",
+    "path": "tokenizer_config.json",
+    "revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+    "bytes": 17928,
+    "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "license": "qwen-community-1.0"
+   },
+   "status": "mirror-pending",
+   "license": "qwen-community-1.0",
+   "role": "tokenizer"
+  },
+  {
+   "id": "27b-cnq",
+   "repo": "nibor1896/Qwen3.8-27B-CNQ4.5",
+   "path": "Qwen3.8-27B-CNQ4.5.cnq",
+   "revision": "c56199781278de7987e617fdeafcd053d470e8e6",
+   "bytes": 17844005845,
+   "sha256": "ba014aeb00215cdc8d6e46d84d0b76733906b8003cb98173d9643acb05fa147d",
+   "dest": "${MODELS}/Qwen3.8-27B-CNQ4.5/Qwen3.8-27B-CNQ4.5.cnq",
+   "source": null,
+   "status": "published",
+   "license": "apache-2.0",
+   "role": "container"
+  },
+  {
+   "id": "27b-sidecar",
+   "repo": "nibor1896/Qwen3.8-27B-CNQ4.5",
+   "path": "Qwen3.8-27B-CNQ4.5.cnq.sidecar.jsonl",
+   "revision": "c56199781278de7987e617fdeafcd053d470e8e6",
+   "bytes": 213231,
+   "sha256": "5fc23c469c7209b3d805892bb9dcab78353d7dbdeb830556ad79a89722936160",
+   "dest": "${MODELS}/Qwen3.8-27B-CNQ4.5/Qwen3.8-27B-CNQ4.5.cnq.sidecar.jsonl",
+   "source": null,
+   "status": "published",
+   "license": "apache-2.0",
+   "role": "report"
+  },
+  {
+   "id": "27b-sha256sums",
+   "repo": "nibor1896/Qwen3.8-27B-CNQ4.5",
+   "path": "SHA256SUMS",
+   "revision": "c56199781278de7987e617fdeafcd053d470e8e6",
+   "bytes": 266,
+   "sha256": "3fb9af863cbb7a80c9b3b6ae97632df276e40f1e605c83c3b0f80c03a9878087",
+   "dest": "${MODELS}/Qwen3.8-27B-CNQ4.5/SHA256SUMS",
+   "source": null,
+   "status": "published",
+   "license": "apache-2.0",
+   "role": "checksums"
+  },
+  {
+   "id": "27b-license",
+   "repo": "nibor1896/Qwen3.8-27B-CNQ4.5",
+   "path": "LICENSE",
+   "revision": "c56199781278de7987e617fdeafcd053d470e8e6",
+   "bytes": 11544,
+   "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a",
+   "dest": "${MODELS}/Qwen3.8-27B-CNQ4.5/LICENSE",
+   "source": null,
+   "status": "published",
+   "license": "apache-2.0",
+   "role": "license"
+  },
+  {
+   "id": "27b-mmproj",
+   "repo": "nibor1896/Qwen3.8-27B-CNQ4.5",
+   "path": "mmproj-F16.gguf",
+   "revision": null,
+   "bytes": 927607488,
+   "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e",
+   "dest": "${MODELS}/Qwen3.8-27B-CNQ4.5/mmproj-F16.gguf",
+   "source": {
+    "host": "huggingface",
+    "repo": "unsloth/Qwen3.8-27B-GGUF",
+    "path": "mmproj-F16.gguf",
+    "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+    "bytes": 927607488,
+    "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e",
+    "license": "apache-2.0"
+   },
+   "status": "mirror-pending",
+   "license": "apache-2.0",
+   "role": "projector"
+  },
+  {
+   "id": "27b-tokenizer",
+   "repo": "nibor1896/Qwen3.8-27B-CNQ4.5",
+   "path": "tokenizer.json",
+   "revision": null,
+   "bytes": 12809320,
+   "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+   "dest": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer.json",
+   "source": {
+    "host": "huggingface",
+    "repo": "Qwen/Qwen3.8-27B",
+    "path": "tokenizer.json",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "bytes": 12809320,
+    "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "license": "apache-2.0"
+   },
+   "status": "mirror-pending",
+   "license": "apache-2.0",
+   "role": "tokenizer"
+  },
+  {
+   "id": "27b-tokenizer-config",
+   "repo": "nibor1896/Qwen3.8-27B-CNQ4.5",
+   "path": "tokenizer_config.json",
+   "revision": null,
+   "bytes": 17928,
+   "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+   "dest": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer_config.json",
+   "source": {
+    "host": "huggingface",
+    "repo": "Qwen/Qwen3.8-27B",
+    "path": "tokenizer_config.json",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "bytes": 17928,
+    "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "license": "apache-2.0"
+   },
+   "status": "mirror-pending",
+   "license": "apache-2.0",
+   "role": "tokenizer"
+  },
+  {
+   "id": "qi-license",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "LICENSE",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 7831,
+   "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+   "dest": "${MODELS}/qwen-image-2.1/LICENSE",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "license"
+  },
+  {
+   "id": "qi-transformer-index",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 30283,
+   "sha256": "17987f6623b1c814d0ef55a137d99142b7b3b040eb1bf241b5575dd35af803a2",
+   "dest": "${MODELS}/qwen-image-2.1/transformer/diffusion_pytorch_model.safetensors.index.json",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "weights"
+  },
+  {
+   "id": "qi-transformer-1",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 9968332504,
+   "sha256": "9e6bc2d641e67bf277895ea8777141044a38f3edb7101bc469b2961dd7c36b4b",
+   "dest": "${MODELS}/qwen-image-2.1/transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "weights"
+  },
+  {
+   "id": "qi-transformer-2",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 4261951904,
+   "sha256": "3aaf234dcbe128530479735854a346b5e3e66283b7c11db56f836bbd1c13ebaa",
+   "dest": "${MODELS}/qwen-image-2.1/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "weights"
+  },
+  {
+   "id": "qi-text-encoder-index",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "text_encoder/model.safetensors.index.json",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 67795,
+   "sha256": "859146bff8db1d617fca8b457a5223edff963bb70076b3645f2189fe0540a147",
+   "dest": "${MODELS}/qwen-image-2.1/text_encoder/model.safetensors.index.json",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "converter-input"
+  },
+  {
+   "id": "qi-text-encoder-1",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "text_encoder/model-00001-of-00004.safetensors",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 4998056552,
+   "sha256": "dde00291b5f7fb92013895310a3da0ddba78674df9f10d505d375243dc01fc6f",
+   "dest": "${MODELS}/qwen-image-2.1/text_encoder/model-00001-of-00004.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "converter-input"
+  },
+  {
+   "id": "qi-text-encoder-2",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "text_encoder/model-00002-of-00004.safetensors",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 4915962464,
+   "sha256": "9047faccc0a6d98496a52d55f27be1c94a9c259d1e283fbea0128d054a948d42",
+   "dest": "${MODELS}/qwen-image-2.1/text_encoder/model-00002-of-00004.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "converter-input"
+  },
+  {
+   "id": "qi-text-encoder-3",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "text_encoder/model-00003-of-00004.safetensors",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 4915962496,
+   "sha256": "8c54187654c0176b73ae73785bf791dc9a14c9df7fb4310083a09d42048cb57e",
+   "dest": "${MODELS}/qwen-image-2.1/text_encoder/model-00003-of-00004.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "converter-input"
+  },
+  {
+   "id": "qi-text-encoder-4",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "text_encoder/model-00004-of-00004.safetensors",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 2704357976,
+   "sha256": "5311532aaaeae3259eb6a7b2c600636be1159adf7ded35f53579f7d0e7d43cdd",
+   "dest": "${MODELS}/qwen-image-2.1/text_encoder/model-00004-of-00004.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "converter-input"
+  },
+  {
+   "id": "qi-vae",
+   "repo": "Qwen/Qwen-Image-2.1",
+   "path": "vae/diffusion_pytorch_model.safetensors",
+   "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+   "bytes": 1350989512,
+   "sha256": "a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417",
+   "dest": "${MODELS}/qwen-image-2.1/vae/diffusion_pytorch_model.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "qwen-research",
+   "role": "weights"
+  }
+ ],
+ "derived": [
+  {
+   "id": "qi-text-encoder-sdcli",
+   "_what": "Upstream text_encoder/ with its tensor names rewritten for sd-server's conditioner; header-only, every payload byte as downloaded.",
+   "_sizes": "Each shard is the upstream shard plus the header growth: +3 bytes per model.language_model.* name, +18 per model.visual.* and lm_head.* name, minus the dropped __metadata__ entry (31 bytes) and the upstream header padding (0/2/4/2 bytes). Shard sha256 is not pinned: te_rename verifies every output payload byte against its input instead.",
+   "tool": "tools/te_rename.py",
+   "argv": [
+    "${MODELS}/qwen-image-2.1/text_encoder",
+    "${MODELS}/qwen-image-2.1/text_encoder_sdcli"
+   ],
+   "inputs": [
+    "qi-text-encoder-index",
+    "qi-text-encoder-1",
+    "qi-text-encoder-2",
+    "qi-text-encoder-3",
+    "qi-text-encoder-4"
+   ],
+   "dest": "${MODELS}/qwen-image-2.1/text_encoder_sdcli",
+   "outputs": [
+    {
+     "path": "model-00001-of-00004.safetensors",
+     "bytes": 4998063064,
+     "sha256": null
+    },
+    {
+     "path": "model-00002-of-00004.safetensors",
+     "bytes": 4915962857,
+     "sha256": null
+    },
+    {
+     "path": "model-00003-of-00004.safetensors",
+     "bytes": 4915962887,
+     "sha256": null
+    },
+    {
+     "path": "model-00004-of-00004.safetensors",
+     "bytes": 2704358078,
+     "sha256": null
+    },
+    {
+     "path": "model.safetensors.index.json",
+     "bytes": 72302,
+     "sha256": "6506d5d2f074eb0c7055054f09d0336a1e68f4ba95ae4539caae45ed2182b399"
+    }
+   ],
+   "bytes": 17534419188
+  }
+ ],
+ "_crow_files": "Files every Crow install gets, whatever points are chosen: the dictation model (faster-whisper small, CTranslate2). dest is under ${INSTALL}, not ${MODELS}: cli/crow_voice.py model_dir loads <crow>/models/whisper-small beside the client and only when model.bin is there. status upstream, revision pinned; licence mit is the repo card's (the repo carries no licence file, so it is not under licenses). Same file fields as files, without source.",
+ "crow_files": [
+  {
+   "id": "whisper-config",
+   "repo": "Systran/faster-whisper-small",
+   "path": "config.json",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 2370,
+   "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828",
+   "dest": "${INSTALL}/models/whisper-small/config.json",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  },
+  {
+   "id": "whisper-vocabulary",
+   "repo": "Systran/faster-whisper-small",
+   "path": "vocabulary.txt",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 459861,
+   "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+   "dest": "${INSTALL}/models/whisper-small/vocabulary.txt",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  },
+  {
+   "id": "whisper-tokenizer",
+   "repo": "Systran/faster-whisper-small",
+   "path": "tokenizer.json",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 2203239,
+   "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+   "dest": "${INSTALL}/models/whisper-small/tokenizer.json",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  },
+  {
+   "id": "whisper-model",
+   "repo": "Systran/faster-whisper-small",
+   "path": "model.bin",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "bytes": 483546902,
+   "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
+   "dest": "${INSTALL}/models/whisper-small/model.bin",
+   "status": "upstream",
+   "license": "mit",
+   "role": "dictation"
+  }
+ ],
+ "points": [
+  {
+   "id": "flash-next",
+   "menu": {
+    "title": "Qwen3.8-Flash-Next",
+    "line": "200k context — great for coding & vision",
+    "gui": "200k context. Great for coding and vision."
+   },
+   "files": [
+    "fn-cnq",
+    "fn-sidecar",
+    "fn-hotsets-longctx2100",
+    "fn-hotsets-crow0924",
+    "fn-mmproj",
+    "fn-tokenizer",
+    "fn-tokenizer-config",
+    "fn-sha256sums",
+    "fn-license"
+   ],
+   "derived": [],
+   "bytes": {
+    "published": 104727704412,
+    "mirror_pending": 916868415,
+    "upstream": 0,
+    "files": 105644572827,
+    "derived": 0,
+    "disk": 105644572827
+   },
+   "engine": {
+    "binary": {
+     "windows": "${INSTALL}/bin/serve.exe"
+    },
+    "cwd": "${INSTALL}",
+    "env": {
+     "CROW_CNQ": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/Qwen3.8-Flash-Next-CNQ4.5-M.cnq",
+     "CROW_HOTSETS": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/hotsets-M-crow0924-n160.json",
+     "CROW_TOKENIZER": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/tokenizer.json",
+     "CROW_TOKENIZER_CONFIG": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/tokenizer_config.json",
+     "CROW_VIT_MMPROJ": "${MODELS}/Qwen3.8-Flash-Next-CNQ4.5-M/mmproj-F16.gguf"
+    },
+    "env_engine_default": {
+     "CROW_LOCK": "not set: the engine default; crow-nest#131 moves the lock to a per-user state dir"
+    },
+    "argv": [
+     "--port",
+     "8099",
+     "--slot-save-path",
+     "${INSTALL}/session"
+    ],
+    "dirs": [
+     "${INSTALL}/session"
+    ],
+    "port": 8099,
+    "context": 200000,
+    "_context": "crow-nest geo.rs:199 CONTEXT_FLOOR",
+    "readiness": {
+     "method": "GET",
+     "path": "/health",
+     "status": 200,
+     "json": {
+      "status": "ok"
+     }
+    },
+    "identity": {
+     "method": "GET",
+     "path": "/props",
+     "field": "model_path",
+     "endswith": "Qwen3.8-Flash-Next-CNQ4.5-M.cnq",
+     "vision": true
+    }
+   },
+   "image_server": null,
+   "crow_env": {},
+   "preflight": {
+    "gpu": {
+     "arch": "blackwell",
+     "sm": "sm_120",
+     "_source": "crow-nest docs/getting-started.md:18-19: the FP4 path builds for compute_120a; the Ampere/Ada fallback is not planned (crow-nest #12). Measured on one RTX 5090, 32,607 MiB."
+    },
+    "host_ram": {
+     "pinned_max_gib": 46,
+     "_source": "crow-nest geo.rs:42 HOST_PINNED_CAP; the operating value is min(cap, free_for_pin - CROW_RAM_MARGIN_GB), derived at boot. Measured on a 64 GB host class."
+    },
+    "disk_bytes": 105644572827
+   }
+  },
+  {
+   "id": "27b",
+   "menu": {
+    "title": "Qwen3.8-27B",
+    "line": "128k context — great speed, awesome for coding & vision",
+    "gui": "128k context. Great speed, coding and vision."
+   },
+   "files": [
+    "27b-cnq",
+    "27b-sidecar",
+    "27b-mmproj",
+    "27b-tokenizer",
+    "27b-tokenizer-config",
+    "27b-sha256sums",
+    "27b-license"
+   ],
+   "derived": [],
+   "bytes": {
+    "published": 17844230886,
+    "mirror_pending": 940434736,
+    "upstream": 0,
+    "files": 18784665622,
+    "derived": 0,
+    "disk": 18784665622
+   },
+   "engine": {
+    "binary": {
+     "windows": "${INSTALL}/bin/serve.exe"
+    },
+    "cwd": "${INSTALL}",
+    "env": {
+     "CROW_CNQ": "${MODELS}/Qwen3.8-27B-CNQ4.5/Qwen3.8-27B-CNQ4.5.cnq",
+     "CROW_TOKENIZER": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer.json",
+     "CROW_TOKENIZER_CONFIG": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer_config.json",
+     "CROW_VIT_MMPROJ": "${MODELS}/Qwen3.8-27B-CNQ4.5/mmproj-F16.gguf",
+     "CROW_CONTEXT": "131072"
+    },
+    "env_engine_default": {
+     "CROW_LOCK": "not set: the engine default; crow-nest#131 moves the lock to a per-user state dir"
+    },
+    "argv": [
+     "--port",
+     "8099",
+     "--slot-save-path",
+     "${INSTALL}/session"
+    ],
+    "dirs": [
+     "${INSTALL}/session"
+    ],
+    "port": 8099,
+    "context": 131072,
+    "_context": "owner decision 2026-10-01: the 27B alone runs at 128k for now, the image stack keeps the dense default 65,536 (crow-nest geo.rs DENSE_CONTEXT_FLOOR). Measured 2026-10-01 on Windows (RTX 5090, BF16 KV, F16 projector): 200,000 refused at boot, 13.03 GiB of states needed against 12.17 GiB free. 200k waits for an 8-bit KV cache in crow-nest",
+    "readiness": {
+     "method": "GET",
+     "path": "/health",
+     "status": 200,
+     "json": {
+      "status": "ok"
+     }
+    },
+    "identity": {
+     "method": "GET",
+     "path": "/props",
+     "field": "model_path",
+     "endswith": "Qwen3.8-27B-CNQ4.5.cnq",
+     "vision": true
+    }
+   },
+   "image_server": null,
+   "crow_env": {},
+   "preflight": {
+    "gpu": {
+     "arch": "blackwell",
+     "sm": "sm_120",
+     "_source": "crow-nest docs/getting-started.md:18-19: the FP4 path builds for compute_120a; the Ampere/Ada fallback is not planned (crow-nest #12). Measured on one RTX 5090, 32,607 MiB."
+    },
+    "host_ram": {
+     "pinned_max_gib": null,
+     "_source": "dense family: no routed experts, no hot set and no pinned expert tier (crow-nest boot.rs:50-56). No host-RAM floor is stated in crow-nest's docs."
+    },
+    "disk_bytes": 18784665622
+   }
+  },
+  {
+   "id": "image-stack",
+   "menu": {
+    "title": "Image Stack",
+    "line": "27B + Qwen-Image 2.1 — create AWESOME pictures",
+    "gui": "27B with Qwen-Image 2.1. Create pictures."
+   },
+   "files": [
+    "27b-cnq",
+    "27b-sidecar",
+    "27b-mmproj",
+    "27b-tokenizer",
+    "27b-tokenizer-config",
+    "27b-sha256sums",
+    "27b-license",
+    "qi-transformer-index",
+    "qi-transformer-1",
+    "qi-transformer-2",
+    "qi-text-encoder-index",
+    "qi-text-encoder-1",
+    "qi-text-encoder-2",
+    "qi-text-encoder-3",
+    "qi-text-encoder-4",
+    "qi-vae",
+    "qi-license"
+   ],
+   "derived": [
+    "qi-text-encoder-sdcli"
+   ],
+   "bytes": {
+    "published": 17844230886,
+    "mirror_pending": 940434736,
+    "upstream": 33115719317,
+    "files": 51900384939,
+    "derived": 17534419188,
+    "disk": 69434804127
+   },
+   "engine": {
+    "binary": {
+     "windows": "${INSTALL}/bin/serve.exe"
+    },
+    "cwd": "${INSTALL}",
+    "env": {
+     "CROW_CNQ": "${MODELS}/Qwen3.8-27B-CNQ4.5/Qwen3.8-27B-CNQ4.5.cnq",
+     "CROW_TOKENIZER": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer.json",
+     "CROW_TOKENIZER_CONFIG": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer_config.json",
+     "CROW_VIT_MMPROJ": "${MODELS}/Qwen3.8-27B-CNQ4.5/mmproj-F16.gguf"
+    },
+    "env_engine_default": {
+     "CROW_LOCK": "not set: the engine default; crow-nest#131 moves the lock to a per-user state dir"
+    },
+    "argv": [
+     "--port",
+     "8099",
+     "--slot-save-path",
+     "${INSTALL}/session"
+    ],
+    "dirs": [
+     "${INSTALL}/session"
+    ],
+    "port": 8099,
+    "context": 65536,
+    "_context": "crow-nest geo.rs:205-208 DENSE_CONTEXT_FLOOR, the dense family's default; 200k on the 27B is not measured",
+    "readiness": {
+     "method": "GET",
+     "path": "/health",
+     "status": 200,
+     "json": {
+      "status": "ok"
+     }
+    },
+    "identity": {
+     "method": "GET",
+     "path": "/props",
+     "field": "model_path",
+     "endswith": "Qwen3.8-27B-CNQ4.5.cnq",
+     "vision": true
+    }
+   },
+   "image_server": {
+    "_what": "sd-server exactly as Crow builds it: cli/crow_core.py image_server_command (argv) plus cli/crow_platform.py image_server_platform_args (the Windows --mmap). Crow starts it from an empty working folder it owns (crow_core.image_server_workdir, #324).",
+    "binary": {
+     "windows": "${INSTALL}/bin/sd-server.exe"
+    },
+    "argv": [
+     "--diffusion-model",
+     "${MODELS}/qwen-image-2.1/transformer/diffusion_pytorch_model.safetensors.index.json",
+     "--llm",
+     "${MODELS}/qwen-image-2.1/text_encoder_sdcli/model.safetensors.index.json",
+     "--vae",
+     "${MODELS}/qwen-image-2.1/vae/diffusion_pytorch_model.safetensors",
+     "--backend",
+     "te=cpu",
+     "--diffusion-fa",
+     "--max-vram",
+     "7",
+     "--vae-tiling",
+     "--model-args",
+     "qwen_image_2_1_prefix_cache_type=q8_0",
+     "--listen-port",
+     "8097",
+     "-v"
+    ],
+    "argv_platform": {
+     "windows": [
+      "--mmap"
+     ],
+     "linux": []
+    },
+    "port": 8097,
+    "readiness": {
+     "method": "GET",
+     "path": "/sdcpp/v1/capabilities",
+     "status": 200
+    }
+   },
+   "crow_env": {
+    "CROW_IMAGE_MODEL_DIR": "${MODELS}/qwen-image-2.1"
+   },
+   "preflight": {
+    "gpu": {
+     "arch": "blackwell",
+     "sm": "sm_120",
+     "_source": "crow-nest docs/getting-started.md:18-19: the FP4 path builds for compute_120a; the Ampere/Ada fallback is not planned (crow-nest #12). Measured on one RTX 5090, 32,607 MiB."
+    },
+    "host_ram": {
+     "pinned_max_gib": null,
+     "_source": "Windows: sd-server needs --mmap; measured 2026-09-28 beside the default 27B serve the image completed with commit 51,149 of 64,901 MB (Crow crow_platform.image_server_platform_args). VRAM: --max-vram 7 keeps it beside the 27B, card peak 31,322-31,566 MiB of 32,127 (Linux, crow_core.image_server_command)."
+    },
+    "disk_bytes": 69434804127
+   }
+  }
+ ]
+}

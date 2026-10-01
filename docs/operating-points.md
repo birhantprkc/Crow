@@ -83,11 +83,7 @@ packaged `b10269` cannot load it. Build the pin `6c84c7d5d` and apply PR #28040 
 hand) and PR #27880 (applies cleanly) for the line above. Do not build `b10687` or newer: it
 aborts during CUDA warmup on this card, and the cause is not attributed.
 
-Crow does this for you from the manifest, with the log and the process group it needs:
-
-```powershell
-python $env:LOCALAPPDATA\Crow\cli\crow.py --serve flash-next-q2-k-xl
-```
+The window does this for you from the manifest, from its model menu, with the log and the process group it needs.
 
 ---
 
@@ -132,6 +128,9 @@ $HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/Qwen3.8-Flash-Next-UD-Q
 `python3 ~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl` builds that line from the
 manifest instead of repeating it. `CROW_MODELS` points one shell at a model tree;
 `<install>/models` is where the core looks with nothing set — see [Linux](user-guide/linux.md).
+A line whose manifest entry names its own `binary` takes it from `<install>/bin`; the
+per-line variable `CROW_LLAMA_SERVER_<KEY>` (the model key upper-cased, `-` as `_`, e.g.
+`CROW_LLAMA_SERVER_FLASH_NEXT_Q2_K_XL`) points that one line at another build.
 
 ---
 
@@ -167,9 +166,14 @@ token and the smaller download, and it runs on the **packaged** engine.
 ## crow-nest — the Rust engine
 
 Crow runs on crow-nest, the Rust engine built for this project. Since v0.2.0 (2026-09-14) its
-decode is faster than llama.cpp on the same machine, with identical greedy outputs; vision is
-served from the container itself, no projector file. Since v0.3.0 (2026-09-17) the engine runs
-on Linux too, inside the same memory-bounded scope Crow uses for llama-server.
+decode is faster than llama.cpp on the same machine, with identical greedy outputs. Since v0.3.0
+(2026-09-17) the engine runs on Linux too, inside the same memory-bounded scope Crow uses for
+llama-server. Since crow-nest #108 (2026-09-24) serve takes vision from the F16 projector
+`mmproj-F16.gguf` (`CROW_VIT_MMPROJ`) when it finds one. Without it Flash-Next falls back to the
+container's NVFP4 `vit` section; the 27B container has no `vit` section, so it boots text-only.
+
+Every file, environment variable and argument of the installable points (Flash-Next, 27B and
+the image stack) is in [`manifests/stack.json`](../manifests/stack.json), held by `tools/check_stack.py`.
 
 The line below is **v0.3.0**, the engine these numbers were measured against. `v0.3.1` was
 released later the same day, 2026-09-18 ([release](https://github.com/nibor1896/crow-nest/releases/tag/v0.3.1));
@@ -181,7 +185,7 @@ the three things on it that Crow has to know about are under
 | Engine | crow-nest `v0.3.0` ([repo](https://github.com/nibor1896/crow-nest), [release](https://github.com/nibor1896/crow-nest/releases/tag/v0.3.0)), Windows and Linux, own HTTP server, OpenAI-compatible |
 | Model | `CNQ4.5-M`, the project's own quant: one 104.7 GB NVFP4 container of `Qwen3.8-Flash-Next` ([package](https://huggingface.co/nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M)) |
 | Context | 200,000, one slot |
-| Vision | yes, from the container's own `vit` section (no `--mmproj`, nothing extra to download) |
+| Vision | yes. At v0.3.0 from the container's own `vit` section; since crow-nest #108 serve prefers the F16 projector `mmproj-F16.gguf` (904,004,000 B, `CROW_VIT_MMPROJ`) and falls back to that section without it |
 | Decode | Windows: **45.1 tok/s** (22.18 ms/token) vs llama.cpp 44.9 on the same prompt, greedy ids bit-identical. Linux: 36.8 tok/s at 16k context (the ten-task form, the same figure the Windows record of that form shows) |
 | Prefill | Windows: 771 tok/s default, **871 tok/s** with `CROW_PF_GEMM_B=1`, vs llama.cpp 922.5 (16k reference prompt). Linux: **968 tok/s** cold on the same 16k prompt, 740 tok/s on a cold 1024-token prompt, warm short turns 228 ms prefill / 247 ms to the first token |
 | Quality | ten-task suite unchanged (2/5/3) against the llama.cpp operating point's reading |
@@ -201,7 +205,7 @@ Start on Windows (PowerShell, two windows; engine repo root):
 ```powershell
 # engine (from the crow-nest repo root)
 $env:CROW_PF_GEMM_B = "1"
-engine/target_srv/release/serve.exe --port 8099 --slot-save-path decode_out/session
+engine/target/release/serve.exe --port 8099 --slot-save-path decode_out/session
 
 # Crow (the window; pick the engine above, http://127.0.0.1:8099/v1, in its model menu)
 python cli/crow_gui.py
@@ -432,7 +436,7 @@ over. No arm is compared against a control from another session.
 
 The binary the 2026-09-01 series was measured on, for the record:
 
-    C:\Users\robin\dev\crow-lab\wt-27880\build-27880\bin\Release\llama-server.exe `
+    & $env:CROW_LLAMA_SERVER_FLASH_NEXT_Q2_K_XL `
       -m <models>\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
       --port 8083 -c 200000 -b 2048 -ub 2048 `
       -ctk q8_0 -ctv q8_0 -ncmoe 30 `

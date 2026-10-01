@@ -35,7 +35,6 @@ honest and also meant the cases never ran anywhere they were not being watched.
 from __future__ import annotations
 
 import atexit
-import difflib
 import io
 import inspect
 import json
@@ -58,7 +57,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import crow            # noqa: E402
 import crow_core       # noqa: E402
 import crow_gui        # noqa: E402
 import crow_platform   # noqa: E402
@@ -360,68 +358,6 @@ class TheStreamReachesThePageTests(ApiCase):
         the stream having them would pass on anything."""
         events = self.sink_events(RECORDED)
         self.assertEqual(len([m for m in events if m["k"] == "think_open"]), 1)
-
-
-class _ReasoningLeaksIntoTheAnswer(crow_gui.Sink):
-    """A sink that reports the thoughts as answer text.
-
-    The single most likely mistake in a window that shows reasoning: one stream
-    of text with the thoughts merged in. It is here to be driven through the
-    same comparison as the real one, because "the two clients answer the same
-    question the same way" has to be able to fail.
-    """
-
-    def reasoning_text(self, piece: str) -> None:
-        self.answer_text(piece)
-
-
-class AcrossTheClientBoundaryTests(ApiCase):
-    """E4's diff runs CLI against CLI. This runs CLI against the window.
-
-    The same recorded stream through BOTH sinks, the visible answer of each
-    written to a file, and `diff`. That is the sharper form of "both clients
-    answer the same question the same way", and it costs nothing.
-    """
-
-    def _cli_text(self, deltas: list[dict]) -> str:
-        out = io.StringIO()
-        self.serve(chunks_for(deltas))
-        crow_core.stream_reply(
-            crow_core.Conversation("SYS"), base_url="http://x/v1", model="crow",
-            api_key="k", temperature=0.0, timeout=1.0,
-            events=crow.TerminalEvents(out=out, prefix=""))
-        return out.getvalue()
-
-    def _files(self, cli: str, gui: str) -> tuple[str, str]:
-        cli_path = os.path.join(self.dir, "answer-cli.txt")
-        gui_path = os.path.join(self.dir, "answer-gui.txt")
-        for path, text in ((cli_path, cli), (gui_path, gui)):
-            with io.open(path, "w", encoding="utf-8", newline="") as fh:
-                fh.write(text)
-        return cli_path, gui_path
-
-    def _diff(self, cli_path: str, gui_path: str) -> str:
-        with io.open(cli_path, encoding="utf-8") as fh:
-            a = fh.readlines()
-        with io.open(gui_path, encoding="utf-8") as fh:
-            b = fh.readlines()
-        return "".join(difflib.unified_diff(a, b, "cli", "gui"))
-
-    def test_both_clients_show_the_same_answer_for_the_same_stream(self):
-        """POSITIVE, as two files and a diff."""
-        cli_path, gui_path = self._files(
-            self._cli_text(RECORDED), self.answer_text(self.sink_events(RECORDED)))
-        self.assertEqual(self._diff(cli_path, gui_path), "")
-
-    def test_a_sink_that_writes_reasoning_into_the_answer_fails_the_diff(self):
-        """NEGATIVE, and the case the positive one is worthless without."""
-        cli_path, gui_path = self._files(
-            self._cli_text(RECORDED),
-            self.answer_text(self.sink_events(RECORDED,
-                                              klass=_ReasoningLeaksIntoTheAnswer)))
-        self.assertNotEqual(self._diff(cli_path, gui_path), "",
-                            "a sink that shows the thoughts as the answer passed "
-                            "the comparison -- then the comparison checks nothing")
 
 
 # --------------------------------------------------------------------- P2 ---
@@ -1881,25 +1817,25 @@ class SessionRoundTripTests(ApiCase):
     right here.
     """
 
-    def test_what_the_window_wrote_is_what_the_cli_reads(self):
-        """FORWARD. The window saves; `load_session` -- the same function
-        cli/crow.py calls at start -- reads the same messages back."""
+    def test_what_the_window_wrote_is_what_the_core_reads(self):
+        """FORWARD. The window saves; the core's `load_session` reads the same
+        messages back."""
         api = self.api()
         self.a_chat(api, "was macht der Prefix-Cache", "Er haelt.")
         api._persist_live()
         self.assertTrue(os.path.exists(self.session))
 
         restored = crow_core.load_session("http://127.0.0.1:1/v1", None)
-        self.assertIsNotNone(restored, "the CLI's reader sees no session")
+        self.assertIsNotNone(restored, "the core's reader sees no session")
         messages, _tokens, _kv = restored
         self.assertEqual([m["role"] for m in messages],
                          [m["role"] for m in api._conversation.payload()])
         self.assertEqual([m["content"] for m in messages],
                          [m["content"] for m in api._conversation.payload()])
 
-    def test_what_the_cli_wrote_is_what_the_window_shows(self):
+    def test_what_the_core_wrote_is_what_the_window_shows(self):
         """BACKWARD, and it is the direction a window with its own format fails.
-        The file is written the way cli/crow.py writes one; the window has to
+        The file is written by the core's `save_session`; the window has to
         SHOW it, not merely hold it."""
         conversation = crow_core.Conversation(None)
         conversation.append("user", "was macht der Prefix-Cache")
@@ -1933,14 +1869,14 @@ class SessionRoundTripTests(ApiCase):
         self.assertIn("code_open", kinds, "a stored fence was not cut by the core")
         self.assertIn("think_open", kinds, "a stored thought was not replayed")
 
-    def test_the_window_stamps_the_file_with_the_version_the_cli_owns(self):
+    def test_the_window_stamps_the_file_with_the_version_the_core_owns(self):
         """The same file from both doors means the same header from both doors."""
         api = self.api()
         self.a_chat(api, "x")
         api._persist_live()
         with io.open(self.session, encoding="utf-8") as fh:
             saved = json.load(fh)
-        self.assertEqual(saved["version"], crow.VERSION)
+        self.assertEqual(saved["version"], crow_core.VERSION)
         self.assertEqual(saved[crow_core.SESSION_FORMAT_KEY], crow_core.SESSION_FORMAT)
 
     def test_crows_own_keys_do_not_disturb_the_core(self):
@@ -2488,9 +2424,8 @@ class TheWindowBorrowsAndDoesNotRebuildTests(unittest.TestCase):
         self.code = _code_only(self.source)
 
     def test_no_callback_ends_the_process(self):
-        """`main` in cli/crow.py catches CrowError and returns 2. A `sys.exit`
-        inside a callback is the wrong translation of that: it takes the window,
-        the unsaved session and the running turn with it."""
+        """A `sys.exit` inside a callback takes the window, the unsaved session
+        and the running turn with it."""
         body = self.source.split('def main(')[0]
         self.assertNotIn("sys.exit(", body,
                          "a callback in this file can end the process")
@@ -2516,18 +2451,15 @@ class TheWindowBorrowsAndDoesNotRebuildTests(unittest.TestCase):
         self.assertIn("CROW_ACCENT_HEX", self.code)
 
     def test_the_version_literal_does_not_appear_here(self):
-        """install.ps1 greps cli/crow.py for `^VERSION = "..."`. A second file
-        carrying one is a second thing to bump, and the stale one is the one no
-        release step reads."""
+        """#187: install.ps1 greps cli/crow_core.py for `^VERSION = "..."`. A
+        second file carrying one is a second thing to bump, and the stale one
+        is the one no release step reads. The window takes the core's."""
         self.assertIsNone(re.search(r'^VERSION\s*=\s*"', self.source, re.M))
-        self.assertEqual(crow_gui.client_version(), crow.VERSION)
-
-    def test_a_missing_client_file_leaves_the_version_empty(self):
-        """The empty default is load-bearing: a window that could not read the
-        version must stay quiet rather than stamp a session with a guess."""
-        empty = tempfile.mkdtemp(prefix="crow-empty-")
-        self.addCleanup(shutil.rmtree, empty, True)
-        self.assertEqual(crow_gui.client_version(os.path.join(empty, "crow.py")), "")
+        core = (HERE / "crow_core.py").read_text(encoding="utf-8")
+        found = re.search(r'^VERSION\s*=\s*"([^"]+)"', core, re.M)
+        self.assertIsNotNone(found, "install.ps1 would read $null")
+        self.assertEqual(found.group(1), crow_core.VERSION)
+        self.assertEqual(crow_gui.client_version(), crow_core.VERSION)
 
     def test_the_drag_region_is_the_one_webview2_understands(self):
         """`-webkit-app-region: drag` is Electron's. WebView2 does not know it,
@@ -3046,8 +2978,8 @@ class AReopenedChatKeepsItsToolRowsTests(unittest.TestCase):
         self.assertTrue([m for m in drawn if m["k"] == "code_open"])
 
     def test_the_window_formats_arguments_instead_of_dumping_json(self):
-        """The `hasattr` guard was never True: format_tool_args lived in
-        cli/crow.py, so the window always took the raw-JSON fallback."""
+        """The `hasattr` guard was never True: format_tool_args lived in the
+        terminal client, so the window always took the raw-JSON fallback."""
         self.assertTrue(hasattr(crow_core, "format_tool_args"))
         out = []
         crow_gui.Turn(out.append).tool_started(
@@ -3113,8 +3045,9 @@ class TheLiveRateIsWallClockOnPurposeTests(unittest.TestCase):
 
 
 class TheReasoningSliderIsTheSameCommandTests(ApiCase):
-    """#116, the window half. The terminal half is in test_crow.py, and BOTH
-    exist for the reason the ticket names: #99 is the case where one surface was
+    """#116, the window half. The core half is in test_crow_core.py
+    (TheReasoningLevelBelongsToTheChatTests), and BOTH exist for the reason the
+    ticket names: #99 is the case where one surface was
     forgotten -- `format_tool_args` behind a hasattr guard that had been False
     since the split, so the feature worked in one client and not the other for
     months with nothing in the suite able to see it.
@@ -5085,7 +5018,7 @@ class TheMemoryLineTests(unittest.TestCase):
         """
         import ast
 
-        for module in ("crow_gui.py", "crow.py", "crow_core.py"):
+        for module in ("crow_gui.py", "crow_core.py"):
             text = (HERE / module).read_text(encoding="utf-8")
             tree = ast.parse(text)
             docs = set()
@@ -5451,9 +5384,7 @@ class TheSkillSheetTests(unittest.TestCase):
         # that names another working area than the typed `--root` -- the same
         # event `_bind_root` re-pins for, reached from the launch.
         self.assertEqual(self.source.count("crow_core.prompt_head()"), 4)
-        terminal = (HERE / "crow.py").read_text(encoding="utf-8")
-        self.assertEqual(terminal.count("crow_core.prompt_head()"), 2)
-        for name, text in (("crow_gui.py", self.source), ("crow.py", terminal)):
+        for name, text in (("crow_gui.py", self.source),):
             self.assertNotIn("crow_core.memory_block()", text, name)
             self.assertNotIn("crow_core.skill_block()", text, name)
 
@@ -7215,8 +7146,8 @@ class TheServerGoneMidSessionTests(ApiCase):
     which is why nothing in the event log recorded a crash.
 
     THE SENTENCE THAT WOULD HAVE SAID SO ALREADY EXISTED and only the terminal
-    printed it. `grep "start llama-server"` found it in cli/crow.py and not once
-    in cli/crow_gui.py, so the window showed the raw WinError and no way out.
+    printed it. `grep "start llama-server"` found it in the terminal client and
+    not once in cli/crow_gui.py, so the window showed the raw WinError and no way out.
     """
 
     def _dies_with(self, exc):
@@ -7384,9 +7315,8 @@ class TheUpdateButtonTests(ApiCase):
 
     def test_the_check_uses_the_version_the_window_knows(self):
         """FOUND BY RUNNING IT, AND THE SUITE COULD NOT HAVE. `CLIENT_VERSION`
-        is assigned by cli/crow.py when that file is imported, and the window
-        never imports it -- it reads the literal out of that file with
-        `client_version()` instead. So the constant is EMPTY in this process,
+        was assigned by the terminal client when that file was imported, and the
+        window never imported it -- it asks `client_version()` instead. So the constant is EMPTY in this process,
         `parse_version` refuses it, and a check built on it answers "no update"
         forever -- including on the day one is published, which is the only day
         it matters.
@@ -7398,11 +7328,10 @@ class TheUpdateButtonTests(ApiCase):
         crow_core.fetch_latest_version = lambda timeout=4.0: "99.0.0"
         self.addCleanup(setattr, crow_core, "fetch_latest_version", real)
         # THE CONSTANT IS EMPTIED ON PURPOSE, and without this line the case is
-        # blind: THIS FILE imports cli/crow.py at the top, and that import is
-        # what assigns `CLIENT_VERSION`. The window imports no such thing, so
-        # the state under test is the empty one, and a case that measured the
-        # test runner's imports would pass while the window answered "no
-        # update" forever.
+        # blind: the core assigns `CLIENT_VERSION` at import, so a window
+        # whose check read the constant would pass here while a window that
+        # lost it answered "no update" forever. Emptied, the state under test
+        # is the one where only `client_version()` can answer.
         was, crow_core.CLIENT_VERSION = crow_core.CLIENT_VERSION, ""
         self.addCleanup(setattr, crow_core, "CLIENT_VERSION", was)
         state = api.update_check()
@@ -10822,7 +10751,7 @@ class TheGoalEnginePausesAndAsksTests(ApiCase):
         report = api._goal_nudge()
         self.assertIn("PAUSED at step 2 (environment)", report)
         self.assertIn("Two or three concrete proposals", report)
-        self.assertIn("Ask robin whether he has further input", report)
+        self.assertIn("Ask the user whether they have further input", report)
         self.turn(api, report, "1. software GL 2. no GPU 3. A) stop serve "
                                "B) llama.cpp 4. Do you have more input?")
         self.assertIsNone(api._goal_nudge())
@@ -15274,7 +15203,6 @@ class RemoteSlashTests(RemoteCase):
     def test_it_is_on_every_list(self):
         self.assertIn("/remote", crow_core.SLASH_COMMANDS)
         self.assertIn("/remote", crow_gui.Api.WHAT_THEY_DO)
-        self.assertIn("/remote", crow.HELP)
         self.assertIsNotNone(self.api().slash_answer("/remote status"))
 
     def test_on_starts_persists_and_opens_the_dialog(self):
@@ -16894,6 +16822,58 @@ class TheCloseSavesThenEndsTests(unittest.TestCase):
         button = button[:button.index("</div>")]
         self.assertIn("classList.add('closing')", button)
         self.assertIn('body.closing::after{content:"saving the chat', source)
+
+
+
+class TheWindowWarmsOnlyOnTheImageStackTests(unittest.TestCase):
+    """#196 C3: with `active-point.json` naming `27b` or `flash-next` the
+    window starts no sd-server; `image-stack` and no file warm as before.
+    The real core decides; only the disk and the thread are stand-ins."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-c3-gui-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        weights = os.path.join(self.dir, "w.safetensors")
+        open(weights, "w").close()
+        self.thread = mock.Mock()
+        for target, attr, value in (
+                (crow_platform, "config_dir", mock.Mock(return_value=self.dir)),
+                (crow_core, "image_server_binary",
+                 mock.Mock(return_value=os.path.join(self.dir, "sd-server"))),
+                (crow_core, "_image_model_files", lambda _m: [weights] * 3),
+                (crow_core.subprocess, "Popen",
+                 mock.Mock(side_effect=AssertionError("Popen must not run"))),
+                (crow_gui.threading, "Thread", self.thread)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _point(self, point):
+        with open(os.path.join(self.dir, "active-point.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"point": point, "base_url": "http://127.0.0.1:8099/v1",
+                       "started_at": "2026-10-01T10:00:00+02:00",
+                       "pids": {"serve": os.getpid(), "image": None}}, fh)
+
+    def test_27b_and_flash_next_warm_nothing_image_stack_warms(self):
+        for point in ("27b", "flash-next"):
+            self._point(point)
+            self.assertFalse(crow_gui.warm_image_server(), point)
+        self.thread.assert_not_called()
+        self._point("image-stack")
+        self.assertTrue(crow_gui.warm_image_server())
+        self.assertEqual(self.thread.call_args.kwargs.get("target"),
+                         crow_core.image_server_warm)
+
+    def test_no_file_or_a_broken_one_warms_as_before(self):
+        self.assertTrue(crow_gui.warm_image_server())            # no file
+        with open(os.path.join(self.dir, "active-point.json"), "w") as fh:
+            fh.write("{broken")
+        self.assertTrue(crow_gui.warm_image_server())
+        self.assertEqual(self.thread.call_count, 2)
+        self._point("27b")
+        self.assertFalse(crow_gui.warm_image_server())
+        self.assertEqual(self.thread.call_count, 2)
 
 
 if __name__ == "__main__":

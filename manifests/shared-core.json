@@ -11,14 +11,9 @@
  "core_module": "crow_core",
  "surfaces": [
   {
-   "path": "cli/crow.py",
-   "label": "cli",
-   "why": "The terminal client. It owns the screen, the slash commands, VERSION and nothing else; every behaviour a second client would need sits behind the import block at the top of it."
-  },
-  {
    "path": "cli/crow_gui.py",
    "label": "gui",
-   "why": "The window, and the reason this checker can say anything at all. Until it landed the core had ONE consumer, every predicate below held by construction, and a green result here was the tool measuring itself - which is why the honesty rule refuses to report on fewer than two surfaces. It owns widgets, the tick and the German surface language; it owns no decision. It lives in cli/ and not gui/ because tools/pack-release.ps1:431 copies cli/ as a whole and nothing else, so a gui/ would be absent from the package with nothing saying so."
+   "why": "The window, and since #187 the only client: the terminal client cli/crow.py was removed, so the window is the client. Until it landed the core had ONE consumer (the terminal) and a green result here was the tool measuring itself; since #187 it is one consumer again, and the honesty rule asks for at least one declared surface plus the helpers held to predicates (1)-(3). It owns widgets, the tick and the German surface language; it owns no decision. It lives in cli/ and not gui/ because tools/pack-release.ps1:431 copies cli/ as a whole and nothing else, so a gui/ would be absent from the package with nothing saying so."
   }
  ],
  "helpers": [
@@ -37,6 +32,16 @@
    "path": "cli/crow_remote.py",
    "label": "remote",
    "why": "#249, the phone's way into a running window: a LAN-only HTTP server (pairing, paired devices, the /api dispatcher, the event streams) and the QR encoder for its pairing URL. A HELPER and not a surface, because it is not a client of the core -- it owns transport and pairing, never a turn, a wording or a decision: the /remote wording lives in the core, every call it forwards is answered by the window's Api, and what reaches it are callables. It never imports crow_core, so a core name appearing in here is a finding rather than a wiring. Its own status lines go to crow.log through a callable, not into the chat. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else."
+  },
+  {
+   "path": "cli/crow_boot.py",
+   "label": "boot",
+   "why": "#196 phase 1, the boot menu: starts one of the three operating points from manifests/stack.json (serve, and sd-server for the Image Stack), waits for readiness, writes the contract file and opens the window against it. A HELPER and not a surface, because it is not a client of the core -- it never runs a turn, a session or a tool; it is a launcher that starts processes and then the surface. Every core fact it needs (the contract file, the point a serve is, the process scan, the image server's working folder) it takes from crow_core by qualified name, so a second definition here is exactly what predicates (1)-(3) catch. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else."
+  },
+  {
+   "path": "cli/crow_boot_gui.py",
+   "label": "boot-gui",
+   "why": "#196, the operating-point window: the boot menu as a window (`crow_boot.py --gui`, the shortcut's target under pythonw.exe), with its page in cli/crow_boot_gui.html. A HELPER and not a surface, for the reason crow_boot.py is one: it never runs a turn, a session or a tool. It is a face over crow_boot.Boot and decides nothing of its own -- the plan, the one-at-a-time check, the start, the readiness wait, the contract file, Stop and Start Crow are Boot's, called as they are; it holds only the window's state and wording. The one core fact it shows itself (the crow-nest port) it takes from crow_core by qualified name, so a core name defined in here is a finding. The crow on its taskbar button is the window's own icon code (crow_gui.shell_buttons, crow_gui.icon_png), imported when the window opens rather than copied; only its AppUserModelID is its own. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else."
   }
  ],
  "names": [
@@ -234,7 +239,7 @@
    ],
    "only": {
     "surface": "cli/crow_gui.py",
-    "because": "The terminal must NOT write it, and that is the entry rather than a comment: `--root` states where THAT run works, while `active` decides where the WINDOW opens next time. They were nearly one key -- `recent[0]` -- and `crow --root D:\\x` in a terminal would then have silently moved the window's next start. A call site appearing in cli/crow.py is that coupling coming back, and this line is what turns it red."
+    "because": "The terminal must NOT write it, and that is the entry rather than a comment: `--root` states where THAT run works, while `active` decides where the WINDOW opens next time. They were nearly one key -- `recent[0]` -- and `crow --root D:\\x` in a terminal would then have silently moved the window's next start. The terminal client went with #187; the line stays so a second surface that writes it goes red."
    },
    "why": "#92. Written only where a person chose: the picker, or 'no folder'. `remember_root` fills the menu and is a different fact -- both surfaces write that one."
   },
@@ -287,7 +292,7 @@
    ],
    "only": {
     "surface": "cli/crow_gui.py",
-    "because": "#90's capability 6 splits into two halves - WHERE a code block begins and ends, which is a decision, and how it is drawn with a copy button, which is a surface. This is the first half, and today only the window is wired to it. The terminal still carries its own fence handling inside cli/crow.py's Renderer, which also owns the spill file, the highlighter and the live line counter; moving that onto this class changes what every CLI answer prints and is not E12's stage. The 'only' line is here so that debt is a declaration somebody can act on rather than a duplication nobody noticed."
+    "because": "#90's capability 6 splits into two halves - WHERE a code block begins and ends, which is a decision, and how it is drawn with a copy button, which is a surface. This is the first half, and today only the window is wired to it. The terminal client carried its own fence handling in its Renderer until #187 removed it. The 'only' line stays so a second surface has to be wired to this class or declared here."
    },
    "why": "Two clients with two ideas of what a fence is means one frames what the other reads as prose. The rule this class carries and the Renderer does not: a fence is a WHOLE line, so 'call it with ```json' mid-sentence opens nothing, and what follows the backticks has to be a bare language tag."
   },
@@ -349,15 +354,7 @@
   {
    "name": "start_server",
    "kind": "def",
-   "user_entry": true,
-   "evidence": [
-    "start_server("
-   ],
-   "only": {
-    "surface": "cli/crow.py",
-    "because": "#114 gives the terminal the boot. The window reaches a server through `model_command` instead (#115), which is where the question this stage did not answer is answered -- what happens to the open conversation -- and it answers it in one sentence both surfaces print. A DIRECT call site in cli/crow_gui.py would be a second boot path with its own idea of that, and the failure it invites is the one nothing reports: two llama-servers overbook the card, and the driver moves what does not fit into host memory without printing a word."
-   },
-   "why": "The one place that turns a model key into a running server. Written twice it would be two command lines, and a fourth copy of the operating point is exactly what manifests/operating-point.json exists to prevent -- three copies already drifted once, on 2026-08-10."
+   "why": "The one place that turns a model key into a running server. Written twice it would be two command lines, and a fourth copy of the operating point is exactly what manifests/operating-point.json exists to prevent -- three copies already drifted once, on 2026-08-10. NO LONGER A USER ENTRY since #187: the terminal client that called it directly (#114) is gone, and the window reaches a server through `model_command` (#115) -- a DIRECT call site in cli/crow_gui.py would be a second boot path, and two llama-servers overbook the card without a word."
   },
   {
    "name": "model_command",
@@ -489,19 +486,14 @@
    "why": "What Ctrl+C says. The partial turn is discarded rather than appended, and this sentence is the only place the user is told the context is untouched."
   },
   {
-   "id": "the resume line",
-   "text": "messages only -- the first turn pays a prefill",
-   "why": "The difference between a warm cache and a restored transcript, in the one line the user reads at start. Measured 2026-08-10: a start that said 'cache warm' was followed by cached 0/21004 and 469.51 s to the first token."
-  },
-  {
    "id": "brand: the window background",
    "text": "#0b0e17",
    "why": "The wordmark's ground. Written once means one product; written twice means the day one of them is corrected."
   },
   {
    "id": "brand: the accent",
-   "text": "38;2;126;176;248",
-   "why": "#7eb0f8, the blue of the wordmark - listed in the form it is actually WRITTEN, as the truecolor escape. The hex spelling exists only in the comment beside it, and a manifest that pinned the comment would be checking prose."
+   "text": "#7eb0f8",
+   "why": "The blue of the wordmark, as CROW_ACCENT_HEX writes it. Until #187 it was pinned as the truecolor escape 38;2;126;176;248, the form the terminal wrote; the window spells it in hex and the escape is gone."
   },
   {
    "id": "the model switch note",

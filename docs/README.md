@@ -10,7 +10,8 @@ Everything else is in this folder.
 | | |
 |---|---|
 | [Overview](user-guide/overview.md) | start, the window part by part, features, tools, licences: what the front page used to carry |
-| [Install](user-guide/install.md) | requirements, both installers, the model download, updating, where everything lands; optional `--voice`, `--tailscale` / `-Tailscale`, `--pathtracer` / `-PathTracer` |
+| [Install](user-guide/install.md) | requirements, both installers, `CrowSetup.exe` (the Windows window: Crow, engine, operating points, resume), the model download, updating, where everything lands; optional `--voice`, `--tailscale` / `-Tailscale`, `--pathtracer` / `-PathTracer` |
+| [Boot menu](user-guide/boot.md) | `cli\crow_boot.py`: start one of the three operating points (or an optional llama.cpp line), then Crow; one point at a time, stop, flags, the shortcut, where the logs go |
 | [Window](user-guide/window.md) | the client, panel by panel: pinned cards, selection and links, layout |
 | [Linux](user-guide/linux.md) | install, the paths table, the engine build, memory scopes for server, render and command, optional helpers, the window on Wayland, troubleshooting |
 | [Memory](user-guide/memory.md) | what is written, by whom, and the gate |
@@ -31,7 +32,7 @@ Everything else is in this folder.
 |---|---|
 | [Tools](reference/tools.md) | the twenty-eight built in, plus MCP |
 | [Server flags](reference/server-flags.md) | what the inference server is started with, and why each flag is there |
-| [Client flags](reference/client-flags.md) | what `crow` and the window take |
+| [Client flags](reference/client-flags.md) | what the window takes |
 | [Reasoning levels](reference/reasoning-levels.md) | `low`, `medium`, `high`, and the thinking budget |
 | [Settings](reference/settings.md) | the settings sheet, `settings.json`, and the secret store |
 | [mcp.json](reference/mcp-json.md) | every key, both transports |

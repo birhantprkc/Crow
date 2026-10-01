@@ -2,13 +2,12 @@
 
 # Architecture
 
-Six modules under `cli/`. Line counts (`wc -l`) measured 2026-09-24 on local main (b9cac62).
+Five modules under `cli/`. Line counts (`wc -l`) measured 2026-09-24 on local main (b9cac62).
 
 | | lines | holds |
 |---|---|---|
 | `crow_core.py` | 25886 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
 | `crow_gui.py` | 17192 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
-| `crow.py` | 2623 | the terminal client. Screen, slash commands, `VERSION` |
 | `crow_platform.py` | 1435 | the platform seam: where things live, how a process is found and killed, per OS |
 | `crow_voice.py` | 293 | dictation: microphone and recogniser, and the phone's recorded clip (#290) |
 | `crow_remote.py` | 1477 | the phone mirror (#249): LAN HTTP + SSE server, pairing, devices, stdlib QR, the loopback listener for `tailscale serve` and the read-only Tailscale state (stage 5), the phone's audio upload (#290) |
@@ -23,10 +22,8 @@ screen and nothing else.
 | what a tool does, what a level asks before, what a turn costs | how a row is drawn, which key closes a menu |
 | the sentences a user reads | where on screen they appear |
 
-**The window is the client.** `crow.py` is still shipped, still tested and still
-the one that runs with the standard library alone, but nothing in the product
-assumes it: the window boots the server, holds the goal, draws the panels and is
-what every user-facing page describes first.
+**The window is the client.** The terminal client is gone (#187); the window boots the
+server, holds the goal and draws the panels. `VERSION` lives in `crow_core.py`.
 
 Two surfaces that write the same sentence agree with each other right up to the
 day one is edited. `manifests/shared-core.json` names what may exist only once,
@@ -69,7 +66,7 @@ separate pane window, which is still what Windows uses. See [the browser](../use
 
 ## Registries
 
-Rebuilt in place by `mcp_apply()`, never rebound: `crow.py` does
+Rebuilt in place by `mcp_apply()`, never rebound: a surface that does
 `from crow_core import TOOLS`, which binds the value.
 
 | | |

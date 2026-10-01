@@ -9,13 +9,13 @@ This file is the seam: every OS-dependent fact is answered here, the core asks
 and does not branch, and a reader who wants to know what changes between the two
 platforms reads ONE file.
 
-WHY THE NAME IS `crow_platform` AND NOT `platform`. `python cli/crow.py` puts
-cli/ on sys.path[0], so a file called cli/platform.py would shadow the standard
+WHY THE NAME IS `crow_platform` AND NOT `platform`. `python cli/crow_gui.py`
+puts cli/ on sys.path[0], so a file called cli/platform.py would shadow the standard
 library's `platform` module for every client that starts from this directory --
 the same trap crow_core.py's own docstring records for cli/json.py.
 
-STANDARD LIBRARY ONLY, like the core: the terminal client's stdlib-only
-invariant runs through here, and `/proc` plus `shutil.which` answer everything
+STANDARD LIBRARY ONLY, like the core: the core's stdlib-only invariant runs
+through here, and `/proc` plus `shutil.which` answer everything
 `psutil` would have.
 
 THE LAYOUT, and Windows does not move:
@@ -164,7 +164,7 @@ def install_dir() -> str:
 def log_dir() -> str:
     """Where a server boot writes its .out.log and .err.log.
 
-    WINDOWS KEEPS `runs\\` UNDER THE CURRENT DIRECTORY, which is robins Ansage
+    WINDOWS KEEPS `runs\\` UNDER THE CURRENT DIRECTORY, which is the owner's Ansage
     vom 2026-08-28: the traces of a Crow boot lie beside the ones the B5 runs
     already write, not under a random name in %TEMP% that nobody finds after a
     crash. On Linux the window is started from a desktop entry and the current
@@ -249,7 +249,7 @@ def binary_is_for_this_os(path: str) -> bool:
     """Could this spelling of a path name a program on THIS platform?
 
     #140 lets a server line name its own binary, and the flash-next line names
-    `C:/Users/.../dev/crow-lab/.../llama-server.exe`. On Windows a missing
+    `bin\\llama-server.exe`. On Windows a missing
     binary at that path is ITS OWN error -- falling back would boot a build that
     cannot load the architecture. On Linux the same string is not a statement
     about this machine at all: it is a Windows path, it can never exist here,
@@ -274,8 +274,91 @@ def binary_is_for_this_os(path: str) -> bool:
 # The Windows process list, and it is a PowerShell query because there is no
 # /proc: Get-CimInstance is the documented way to a command line, and tasklist
 # does not print one. Moved here from crow_core.py with its behaviour intact.
-_PROCESS_QUERY = ("Get-CimInstance Win32_Process -Filter \"Name like 'llama-server%'\""
+# #196 C3: it also asks for crow-nest's `serve.exe` and the image server
+# `sd-server.exe`, which hold the card just as firmly as a llama-server does.
+_PROCESS_QUERY = ("Get-CimInstance Win32_Process -Filter \"Name like 'llama-server%'"
+                  " or Name = 'serve.exe' or Name like 'sd-server%'\""
                   " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+
+# #196 C3: the three kinds of server the scan reports, named by executable.
+KIND_LLAMA = "llama-server"
+KIND_CROW_NEST = "crow-nest"     # serve.exe, both crow-nest operating points
+KIND_IMAGE = "image"             # sd-server.exe
+# The port each listens on when its command line names none: serve.rs
+# DEFAULT_PORT 8099; sd.cpp examples/server/runtime.h listen_port 1234.
+# llama-server's own default is not assumed -- discovery has always read --port.
+_DEFAULT_PORTS = {KIND_CROW_NEST: 8099, KIND_IMAGE: 1234}
+_PORT_FLAGS = {KIND_LLAMA: "--port", KIND_CROW_NEST: "--port",
+               KIND_IMAGE: "--listen-port"}
+
+
+def _kind_of_name(name: str) -> "str | None":
+    """The kind for an executable's base name, or None for anything else.
+
+    `serve` is matched EXACTLY: the name is generic, and only crow-nest's
+    binary carries it bare. The other two keep the prefix match the Windows
+    query has always used (`llama-server%`).
+    """
+    name = name.lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name.startswith("llama-server"):
+        return KIND_LLAMA
+    if name == "serve":
+        return KIND_CROW_NEST
+    if name.startswith("sd-server"):
+        return KIND_IMAGE
+    return None
+
+
+_EXE_WITH_SPACES = re.compile(r'\s*"?([^"]*?\.exe)(?=["\s]|$)', re.IGNORECASE)
+
+
+def _base_name(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _executable_name(command_line: str) -> str:
+    """The base name of the program a command line starts.
+
+    A quoted first token is the program; otherwise the first word is, unless
+    it names no server and the line holds an unquoted Windows path with a
+    space (`C:\\Program Files\\...\\serve.exe`) -- then that path up to `.exe`.
+    """
+    text = (command_line or "").strip()
+    if text.startswith('"'):
+        return _base_name(text[1:].split('"', 1)[0])
+    exe = (text.split(None, 1) or [""])[0]
+    if _kind_of_name(_base_name(exe)) is None:
+        hit = _EXE_WITH_SPACES.match(text)
+        if hit:
+            exe = hit.group(1)
+    return _base_name(exe)
+
+
+def server_kind(command_line: str) -> "str | None":
+    """#196 C3: which server a scanned command line is -- KIND_LLAMA,
+    KIND_CROW_NEST, KIND_IMAGE -- or None.
+
+    Read off the EXECUTABLE, so notepad with serve.log open is not a server.
+    A line that merely mentions llama-server still counts as one: that is what
+    the listing reader has always accepted, and it is kept unchanged.
+    """
+    kind = _kind_of_name(_executable_name(command_line))
+    if kind is None and "llama-server" in (command_line or ""):
+        return KIND_LLAMA
+    return kind
+
+
+def server_port(command_line: str) -> "int | None":
+    """The port a scanned server listens on, where it can be derived: its own
+    flag, else its kind's default (none for llama-server)."""
+    kind = server_kind(command_line)
+    if kind is None:
+        return None
+    hit = re.search(r"(?:^|\s)%s[\s=]+(\d+)" % re.escape(_PORT_FLAGS[kind]),
+                    command_line)
+    return int(hit.group(1)) if hit else _DEFAULT_PORTS.get(kind)
 
 # The POSIX fallback, used only where /proc cannot be read (a container with it
 # unmounted, a BSD). `ps` is a subprocess; /proc is four file reads and no fork.
@@ -292,9 +375,9 @@ def _quote(arg: str) -> str:
     return '"%s"' % arg if (" " in arg or "\t" in arg) else arg
 
 
-def _proc_servers(proc_root: str = "/proc", name: str = "llama-server"
-                  ) -> "list[tuple[str, str]] | None":
-    """Every llama-server in /proc, or None when /proc cannot be read.
+def _proc_servers(proc_root: str = "/proc") -> "list[tuple[str, str]] | None":
+    """Every server in /proc (llama-server, crow-nest's serve, sd-server), or
+    None when /proc cannot be read.
 
     None IS NOT AN EMPTY LIST HERE. "No /proc" and "no server" are different
     answers and the caller does different things with them: the first falls back
@@ -325,7 +408,7 @@ def _proc_servers(proc_root: str = "/proc", name: str = "llama-server"
         # same narrowing the Windows query gets from `Name like 'llama-server%'`:
         # a text editor with llama-server.log open is not a server, and a
         # measurement script that mentions one is not one either.
-        if not os.path.basename(args[0]).startswith(name):
+        if _kind_of_name(os.path.basename(args[0])) is None:
             continue
         out.append((pid, " ".join(_quote(a) for a in args)))
     return out
@@ -338,7 +421,7 @@ def _run_query(argv: list[str]) -> str:
     # because listing the processes had already swallowed it.
     done = subprocess.run(argv, capture_output=True, text=True,
                           stdin=subprocess.DEVNULL,
-                          encoding="utf-8", errors="replace", timeout=60)
+                          encoding="utf-8", errors="replace", timeout=60, **no_console_kwargs())
     return done.stdout if done.returncode == 0 else ""
 
 
@@ -347,17 +430,21 @@ def _parse_process_table(text: str) -> list[tuple[str, str]]:
     out = []
     for raw in (text or "").splitlines():
         line = raw.strip()
-        if not line or "llama-server" not in line:
+        if not line:
             continue
         pid, _, rest = line.partition("\t")
         if not rest:
             pid, _, rest = line.partition(" ")
+        if server_kind(rest) is None:
+            continue
         out.append((pid.strip(), rest.strip()))
     return out
 
 
 def find_servers(query=None, proc_root: str = "/proc") -> list[tuple[str, str]]:
-    """Every llama-server on this machine, as (pid, command line).
+    """Every model server on this machine, as (pid, command line): each
+    llama-server, crow-nest's serve and the image server sd-server (#196 C3).
+    `server_kind` and `server_port` read a line's kind and port.
 
     An unreadable process list comes back EMPTY rather than raising: the caller
     runs this on the path that starts a server, and refusing to boot because a
@@ -385,6 +472,20 @@ def find_servers(query=None, proc_root: str = "/proc") -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------- spawning and killing ---
+
+def no_console_kwargs() -> dict:
+    """The subprocess.run keywords for a short helper (a query, taskkill).
+
+    The owner's live test 2026-10-01: the operating-point window runs under
+    pythonw, which has no console, so every console program it started (the
+    process scan every 5 s, taskkill on Stop, nvidia-smi) opened a console
+    window of its own in the foreground. CREATE_NO_WINDOW starts it without one.
+    Linux: nothing to do.
+    """
+    if IS_WINDOWS:
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
 
 def spawn_kwargs(detached: bool = True) -> dict:
     r"""The Popen keywords that keep a server out of the console that bore it.
@@ -553,7 +654,7 @@ def image_server_platform_args() -> list[str]:
     """What this platform appends to sd-server's argv (#320).
 
     WINDOWS: `--mmap`. Under WDDM every CUDA allocation also counts against
-    the system commit limit (robin's machine: no pagefile, 64,901 MB). serve
+    the system commit limit (the owner's machine: no pagefile, 64,901 MB). serve
     holds 26.7 GB of it, and sd-server without --mmap needs ~37 GB more (the
     CPU text encoder's copy 14.4 GB + pinned DiT staging 14 GB), so every job
     died in `cudaMalloc failed: out of memory` with VRAM free; a VRAM loan
@@ -571,7 +672,7 @@ def oom_hint() -> str:
 
     WINDOWS: under WDDM every CUDA allocation also counts against the system
     commit limit, so a `cudaMalloc failed: out of memory` can come with VRAM
-    free (robin's machine, 2026-09-28: 10 GB free, commit exhausted).
+    free (the owner's machine, 2026-09-28: 10 GB free, commit exhausted).
     ELSEWHERE nothing: the card is what runs out.
     """
     if not IS_WINDOWS:
@@ -589,7 +690,7 @@ def _systemd_version(run: str) -> int:
     if run not in _SYSTEMD_VERSIONS:
         try:
             first = subprocess.run([run, "--version"], capture_output=True, text=True,
-                                   timeout=5, stdin=subprocess.DEVNULL).stdout.split()
+                                   timeout=5, stdin=subprocess.DEVNULL, **no_console_kwargs()).stdout.split()
             _SYSTEMD_VERSIONS[run] = int(first[1]) if first[:1] == ["systemd"] else 0
         except (OSError, subprocess.SubprocessError, ValueError, IndexError):
             _SYSTEMD_VERSIONS[run] = 0
@@ -734,7 +835,7 @@ def _systemctl_user(*args: str) -> str:
         return ""
     try:
         return subprocess.run([ctl, "--user", *args], capture_output=True, text=True,
-                              timeout=5, stdin=subprocess.DEVNULL).stdout
+                              timeout=5, stdin=subprocess.DEVNULL, **no_console_kwargs()).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -932,7 +1033,7 @@ def kill_pid(pid) -> bool:
     if IS_WINDOWS:
         subprocess.run(["taskkill", "/PID", str(number), "/F"],
                        capture_output=True, stdin=subprocess.DEVNULL,
-                       timeout=30)
+                       timeout=30, **no_console_kwargs())
         return True
     import signal
     try:
@@ -947,6 +1048,48 @@ def kill_pid(pid) -> bool:
     return True
 
 
+def pid_alive(pid) -> bool:
+    """#196 C3: True while a process with this pid exists.
+
+    Windows: OpenProcess + GetExitCodeProcess (STILL_ACTIVE), no subprocess;
+    access denied means it exists. POSIX: signal 0. A pid the OS has since
+    reused for another program also reads as alive -- this answers "exists",
+    not "is still the same program".
+    """
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if number <= 0:
+        return False
+    if IS_WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD)
+        handle = kernel32.OpenProcess(0x1000, False, number)  # QUERY_LIMITED
+        if not handle:
+            return ctypes.get_last_error() == 5               # ACCESS_DENIED
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259                          # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(number, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def kill_tree(pid) -> bool:
     """#310, Windows only: `taskkill /PID <pid> /T /F` -- the process AND the
     children it started. `proc.kill()` on cmd.exe left those running. True
@@ -957,7 +1100,7 @@ def kill_tree(pid) -> bool:
     try:
         done = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
                               capture_output=True, stdin=subprocess.DEVNULL,
-                              timeout=30)
+                              timeout=30, **no_console_kwargs())
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return done.returncode == 0
@@ -967,7 +1110,7 @@ def terminate_tree(proc, grace: float = 5.0) -> None:
     """End a child this process started, and whatever it started in turn.
 
     THE HANDLE, NEVER A NAME. #158 was paid once: a measurement script swept
-    "every llama-server" and took robins running test server with it. What dies
+    "every llama-server" and took the owner's running test server with it. What dies
     here is the process this caller spawned.
 
     Windows: killing the handle is the whole story (TerminateProcess). Linux:
@@ -1017,10 +1160,6 @@ def terminate_tree(proc, grace: float = 5.0) -> None:
 
 
 # --------------------------------------------------------------- the shell ---
-
-def shell_name() -> str:
-    """What `run_command` runs a command line through, as the model reads it."""
-    return "cmd.exe" if IS_WINDOWS else "bash"
 
 
 def shell_executable() -> "str | None":
@@ -1118,7 +1257,7 @@ def find_browser_path() -> "str | None":
 _GPU_HEADROOM_MIB = 512
 
 # #279. CROW'S OWN BROWSER PANEL IS A SECOND GPU CLIENT. Measured
-# 2026-09-24 (robin's diorama run, serve up, ~560 MiB free at boot): the
+# 2026-09-24 (the owner's diorama run, serve up, ~560 MiB free at boot): the
 # panel's WebKitWebProcess held 343 MiB of the card, and twice a GPU render
 # 5-10 s earlier was followed by a SIGSEGV of that process inside
 # libnvidia-eglcore (coredumpctl, 13:15:20 and 13:16:01 local). 512 MiB was
@@ -1157,7 +1296,7 @@ def gpu_free_mib(query=None) -> "int | None":
                     [exe, "--query-gpu=memory.free",
                      "--format=csv,noheader,nounits"],
                     capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                    timeout=10)
+                    timeout=10, **no_console_kwargs())
             except (OSError, subprocess.SubprocessError):
                 return ""
             return done.stdout if done.returncode == 0 else ""
@@ -1192,7 +1331,7 @@ def gpu_card(query=None) -> "tuple[str, int] | None":
                     [exe, "--query-gpu=name,memory.total",
                      "--format=csv,noheader,nounits"],
                     capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                    timeout=10)
+                    timeout=10, **no_console_kwargs())
             except (OSError, subprocess.SubprocessError):
                 return ""
             return done.stdout if done.returncode == 0 else ""
@@ -1336,7 +1475,7 @@ def render_gl_mode(free_mib: "int | None" = None, panel: bool = False) -> str:
                        and free_mib >= gpu_headroom_mib(panel)) else "unavailable"
 
 
-# #293. THE ANGLE BACKENDS, IN ORDER. `vulkan` is robin's decision of
+# #293. THE ANGLE BACKENDS, IN ORDER. `vulkan` is the owner's decision of
 # 2026-09-25 and the launcher line of the research brief (Chromium's
 # "Using GPU hardware in headless Chrome",
 # https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/gpu/using-gpu-hardware-in-headless-chrome.md;
@@ -1390,7 +1529,7 @@ def render_renderer_verdict(renderer: "str | None", why: str = "",
     UNMASKED_RENDERER_WEBGL) is the real GPU, else the reason it is not.
 
     A software string is refused by name. When nvidia-smi names an NVIDIA
-    card, the string must say NVIDIA -- robin's rule of 2026-09-25: the
+    card, the string must say NVIDIA -- the owner's rule of 2026-09-25: the
     capture is taken on the card or not at all. `card` is the suite's seam
     (a (name, MiB) tuple, or False for none)."""
     if not renderer:
@@ -1420,54 +1559,6 @@ def font_store() -> str:
     # there and nothing the user installed by hand.
     return os.path.join(_xdg_base("XDG_DATA_HOME", (".local", "share")),
                         "fonts", APP_DIR_XDG)
-
-
-def install_fonts(source_dir: str, names: "list[str]", family: str = "") -> int:
-    """Copy the bundled faces into the per-user store. 0 installed, 1 nothing new.
-
-    WINDOWS REGISTERS, LINUX INDEXES, and that is the whole difference. The
-    Windows store wants an entry under HKCU\\...\\Fonts with the FULL PATH as the
-    value (a bare filename registers a font Windows then cannot find, and it
-    fails silently); fontconfig wants no registry at all, only a directory it
-    already scans and a cache refresh to see it before the next login.
-
-    `fc-cache` IS BEST EFFORT AND NEVER FATAL: without it the faces are still
-    installed, they are simply not visible to a program that started earlier --
-    and a missing typeface may never keep a client from starting.
-    """
-    target = font_store()
-    if not names:
-        return 2
-    try:
-        os.makedirs(target, exist_ok=True)
-    except OSError:
-        return 2
-    done = 0
-    for name in names:
-        dst = os.path.join(target, name)
-        if not os.path.isfile(dst):
-            try:
-                shutil.copyfile(os.path.join(source_dir, name), dst)
-            except OSError:
-                continue
-            done += 1
-    if IS_WINDOWS:
-        import winreg
-        key = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0,
-                            winreg.KEY_SET_VALUE) as k:
-            for name in names:
-                dst = os.path.join(target, name)
-                winreg.SetValueEx(k, "%s (%s)" % (family, name), 0,
-                                  winreg.REG_SZ, dst)
-        return 0 if done else 1
-    if done and shutil.which("fc-cache"):
-        try:
-            subprocess.run(["fc-cache", "-f", target], capture_output=True,
-                           stdin=subprocess.DEVNULL, timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return 0 if done else 1
 
 
 # ------------------------------------------------------------- the updater ---

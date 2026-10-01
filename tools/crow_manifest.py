@@ -57,4 +57,8 @@ def model_path(key, path=MANIFEST, absolute=True):
     rel = models["entries"][key]["path"]
     if not absolute:
         return "models/" + rel
-    return os.path.join(models["_root"].replace("/", os.sep), rel.replace("/", os.sep))
+    # #196 C1: the shipped manifest carries no `_root` (it named one machine).
+    # The tree is the client's: $CROW_MODELS, else <repo>/models.
+    root = (models.get("_root") or os.environ.get("CROW_MODELS")
+            or os.path.join(os.path.dirname(os.path.dirname(MANIFEST)), "models"))
+    return os.path.join(root.replace("/", os.sep), rel.replace("/", os.sep))

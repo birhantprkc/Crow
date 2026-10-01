@@ -23,7 +23,7 @@ check: lint test
 
 # 2,880 cases (2026-09-24: 1,455 core, 476 terminal, 896 window, 53 phone mirror) over the core, the terminal client, the window and the phone mirror.
 test:
-    cd cli && {{py}} -m unittest test_crow_core test_crow test_crow_gui test_crow_remote
+    cd cli && {{py}} -m unittest test_crow_core test_crow_gui test_crow_remote
 
 # E9/F63/F7/F82 only -- see the reasoning in pyproject.toml.
 lint:
