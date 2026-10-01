@@ -433,7 +433,7 @@ over. No arm is compared against a control from another session.
 
 The binary the 2026-09-01 series was measured on, for the record:
 
-    C:\Users\robin\dev\crow-lab\wt-27880\build-27880\bin\Release\llama-server.exe `
+    & $env:CROW_LLAMA_SERVER_FLASH_NEXT_Q2_K_XL `
       -m <models>\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
       --port 8083 -c 200000 -b 2048 -ub 2048 `
       -ctk q8_0 -ctv q8_0 -ncmoe 30 `

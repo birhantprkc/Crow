@@ -176,5 +176,31 @@ class Cli(unittest.TestCase):
             self.assertEqual(self.cli("--manifest", os.path.join(tmp, "none.json")).returncode, 2)
 
 
+class ImageServerArgvDrift(unittest.TestCase):
+    """stack.json's sd-server line is the one Crow itself builds (#196).
+
+    The manifest copies crow_core.image_server_command; a change on either side
+    without the other would boot the installed image stack on a line nobody
+    measured. Paths are compared after expanding ${MODELS}, the flags verbatim.
+    """
+
+    def test_the_manifest_argv_is_crow_cores_argv(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "cli"))
+        import crow_core
+        import crow_platform
+        server = point(REAL, "image-stack")["image_server"]
+        models = os.path.join("M", "models")
+        model_dir = os.path.join(models, "qwen-image-2.1")
+        for plat, extra in server["argv_platform"].items():
+            with self.subTest(platform=plat), \
+                    mock.patch.object(crow_core, "image_model_dir", return_value=model_dir), \
+                    mock.patch.object(crow_core, "image_server_binary", return_value="sd-server"), \
+                    mock.patch.object(crow_platform, "image_server_platform_args", return_value=list(extra)):
+                built = crow_core.image_server_command(server["port"])[1:]
+            want = [a.replace("${MODELS}", models).replace("/", os.sep) if "${MODELS}" in a else a
+                    for a in server["argv"]] + list(extra)
+            self.assertEqual(built, want)
+
+
 if __name__ == "__main__":
     unittest.main()
