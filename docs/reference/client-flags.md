@@ -8,6 +8,8 @@
 | `--reasoning-effort`, `--reasoning-budget N` | no flag in the window | per chat via `/reasoning` and `/budget`: [reasoning levels](reasoning-levels.md) |
 | `--rollover-digest-tokens N`, `--context-clear-at SHARE` | no flag in the window | the settings `rollover_digest_tokens` and `context_clear_at`: [settings](settings.md#145148154--budgets-favourites-digest) |
 | `--turn-token-budget N`, `--subtask-max-tokens N`, `--bundler PATH` | no flag in the window | the settings `turn_token_budget`, `subtask_max_tokens` and `bundler`: [settings](settings.md#145148154--budgets-favourites-digest) |
+| `-m`, `--model NAME` | `crow` | the model name in the request body, sent with `--base-url` and `--api-key` (`provider_endpoint`) |
+| `--api-key KEY` | `local-no-provider` | the key sent with `--base-url` and `--model` |
 | `--mode` | `auto` | `manual` asks before writing and executing, `allowedit` before executing, `yolo` asks for nothing and means it -- outside paths and git commit included; `git_push` still asks, and the level never outlives the process |
 | `--no-review` | off | stop the model saving memories and skills after a turn |
 | `--no-memory-approval` | off | let the review write to memory without asking. **The gate is on by default** |

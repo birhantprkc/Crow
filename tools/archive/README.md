@@ -8,3 +8,6 @@ reads it, and ruff skips the directory (`pyproject.toml`). History is in git -- 
 by `git mv`, so `git log --follow` on any of them reaches back past the move.
 
 The rule, from `docs/plans/linux-implementation-plan.md` 5.3: `tools/` accepts only scripts referenced by the justfile, the docs, CI or the checkers; experiments go to `tools/archive/` at merge time.
+
+`2026-10/run_server_block.py` and its test: the E14 block of #90. It drove the terminal client `cli/crow.py`
+through a pipe and cannot run since #187 removed that client.

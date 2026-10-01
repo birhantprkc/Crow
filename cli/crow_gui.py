@@ -18517,7 +18517,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
     parser.add_argument("--api-key", default="local-no-provider")
     parser.add_argument("--system", default=DEFAULT_SYSTEM)
-    # The same flag the terminal has, resolved by the same function in the core.
+    # Resolved by the core's system_in_language, like every other system prompt.
     parser.add_argument("--language", default=os.environ.get("CROW_LANGUAGE") or None)
     parser.add_argument("--no-session", dest="session", action="store_false",
                         default=True)
