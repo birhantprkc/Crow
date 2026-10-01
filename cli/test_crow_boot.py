@@ -373,9 +373,16 @@ class StoppingTests(BootCase):
         crow_core.write_active_point("image-stack", "http://127.0.0.1:8099/v1",
                                      {"serve": 7001, "image": 7002})
         killed = []
-        scan = lambda: [("7001", r"C:\x\bin\serve.exe --port 8099"),  # noqa: E731
-                        ("7002", r"C:\x\bin\sd-server.exe --listen-port 8097"),
-                        ("6001", "llama-server.exe -m D:/m/a.gguf --port 8081")]
+        listed = [("7001", r"C:\x\bin\serve.exe --port 8099"),
+                  ("7002", r"C:\x\bin\sd-server.exe --listen-port 8097"),
+                  ("6001", "llama-server.exe -m D:/m/a.gguf --port 8081")]
+        scans = []
+
+        def scan():
+            # An ended process stays listed for one more scan (Windows teardown).
+            scans.append(list(killed))
+            gone = scans[-2] if len(scans) > 1 else []
+            return [row for row in listed if row[0] not in gone]
         boot = self.boot(scan=scan, kill=killed.append,
                          alive=lambda pid: str(pid) not in killed)
         code = boot.stop()
@@ -385,6 +392,18 @@ class StoppingTests(BootCase):
         self.assertIsNone(self.contract())
         self.assertIn("Stopped Image Stack (image-stack)", text)
         self.assertIn(crow_boot.kill_hint("6001"), text)
+        self.assertGreaterEqual(len(scans), 3, "it waits until the scan no longer lists them")
+
+    def test_a_process_that_stays_listed_is_reported_not_called_stopped(self):
+        killed = []
+        listed = [("7001", r"C:\x\bin\serve.exe --port 8099")]
+        code = self.boot(scan=lambda: listed, kill=killed.append,
+                         alive=lambda pid: False).stop()
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_FAILED)
+        self.assertIn("still there", text)
+        self.assertIn(crow_boot.kill_hint("7001"), text)
+        self.assertNotIn("Stopped", text)
 
     def test_a_pid_only_the_contract_names_is_not_killed(self):
         crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",

@@ -62,7 +62,8 @@ THE DECISIONS, and why each is this way:
   was unreadable. The refusal names what runs and how to stop it: the menu
   entry, `--stop`, or the pid with `taskkill /PID <pid> /F` (`kill <pid>`).
 * STOP ends every serve and sd-server the process scan sees, waits until they
-  are gone and removes the contract file. A pid that only the contract file
+  are no longer listed (an ended process stays listed while Windows tears it
+  down; up to 30 s) and removes the contract file. A pid that only the contract file
   names is not killed (a pid outlives its process and may belong to another
   program by now); it is reported with the command. A llama-server is NOT an operating point and is never killed
   by name (#158); it is reported with its pid and the command that ends it.
@@ -118,7 +119,7 @@ LANDED_S = 5
 OPENED_S = 3
 POLL_S = 1.0
 FRAME_S = 0.12
-STOP_WAIT_S = 15.0
+STOP_WAIT_S = 30.0
 LOG_TAIL_LINES = 10
 
 EXIT_OK, EXIT_FAILED, EXIT_SETUP, EXIT_REFUSED = 0, 1, 2, 3
@@ -751,12 +752,21 @@ class Boot:
             return EXIT_OK
         for _role, pid in targets:
             self.kill(pid)
-        deadline = self.clock() + STOP_WAIT_S
+        began = self.clock()
+        deadline = began + STOP_WAIT_S
         left = [p for _r, p in targets]
         while left and self.clock() < deadline:
             left = [p for p in left if self.alive(p)]
+            if not left:
+                # GONE IS "NO LONGER LISTED", NOT "HAS AN EXIT CODE". Measured
+                # 2026-10-01: right after taskkill the 27B serve had its exit
+                # code and was still in the process list with 4 GB while
+                # Windows tore it down. The next point must not start beside it.
+                listed = {str(pid) for pid, _line in self.scan() or []}
+                left = [p for _r, p in targets if p in listed]
             if left:
                 self.sleep(0.25)
+        took = self.clock() - began
         self._remove(path)
         names = {"serve": "serve", "image": "sd-server"}
         done = ", ".join("%s pid %s" % (names[r], p) for r, p in targets)
@@ -765,8 +775,9 @@ class Boot:
                      % (self.style.icon("warn"), self.label(point) if point else "the point",
                         done, ", ".join(left), " and ".join(kill_hint(p) for p in left)))
             return EXIT_FAILED
-        self.say("%s Stopped %s (%s)."
-                 % (self.style.icon("stop"), self.label(point) if point else "the running point", done))
+        self.say("%s Stopped %s (%s) in %.0f s."
+                 % (self.style.icon("stop"), self.label(point) if point else "the running point",
+                    done, took))
         self._mention_strays(strays)
         self._mention_llamas(llamas)
         return EXIT_OK
@@ -801,9 +812,10 @@ class Boot:
     def no_point_hint(self, running: "dict | None") -> str:
         lines = ["%s No operating point is running." % self.style.icon("nest"),
                  "   Start one of the three operating points first:"]
-        for p in self.stack["points"]:
-            menu = p.get("menu") or {}
-            lines.append("     - %s  %s" % (menu.get("title") or p.get("id"), menu.get("line") or ""))
+        titles = [(p.get("menu") or {}).get("title") or p.get("id") for p in self.stack["points"]]
+        width = max(len(t) for t in titles)
+        for title, p in zip(titles, self.stack["points"]):
+            lines.append("     - %s  %s" % (title.ljust(width), (p.get("menu") or {}).get("line") or ""))
         if running:
             lines.append("   (Running now: %s.)" % self.describe(running))
         return "\n".join(lines)
