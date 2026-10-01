@@ -399,3 +399,22 @@ fn selftest_scenarios_pass() {
         assert!(r.is_ok(), "{name}: {r:?}");
     }
 }
+
+/// #196 P2-E2E: the install steps return layout's one-line summary
+/// ("Crow 2.8.5 installed (60 files)", "... is up to date"); the step row shows
+/// it as it is. Measured headless: "[crow] ok Installed. Version Crow 2.8.5
+/// installed (60 files)."
+#[test]
+fn package_steps_show_the_summary_as_it_is() {
+    let mut f = FakeSteps::default();
+    let (out, events) = run_once(&mut f, &selection(&["27b"], &root()));
+    assert_eq!(out, Outcome::Done);
+    let ok = |name: &str| {
+        events.iter().find_map(|e| match e {
+            Event::Step { name: n, status: StepStatus::Ok, detail } if n == name => Some(detail.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(ok("crow").as_deref(), Some("Crow 3.0.0 installed (60 files)."));
+    assert_eq!(ok("engine").as_deref(), Some("Engine 0.9.0 installed (4 files)."));
+}

@@ -60,7 +60,8 @@ pub trait Steps {
         on: &mut dyn FnMut(Event),
         cancel: &AtomicBool,
     ) -> Result<(), FetchError>;
-    /// Returns the installed version.
+    /// Returns layout's one-line summary ("Crow 3.0.0 installed (60 files)",
+    /// "engine 0.9.0 is up to date ..."), shown as the step's detail.
     fn install_crow(&mut self, zip: &Path, install_root: &Path) -> Result<String, String>;
     fn install_engine(&mut self, zip: &Path, install_root: &Path) -> Result<String, String>;
     fn ensure_python(&mut self, install_root: &Path) -> Result<PythonInfo, String>;
@@ -126,6 +127,16 @@ pub fn gb(bytes: u64) -> String {
         format!("{:.1} GB", bytes as f64 / 1e9)
     } else {
         format!("{} MB", bytes.div_ceil(1_000_000))
+    }
+}
+
+/// A summary as a step detail: first letter upper case, one closing period.
+fn sentence(s: &str) -> String {
+    let s = s.trim().trim_end_matches('.');
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => format!("{}{}.", f.to_uppercase(), c.as_str()),
+        None => String::new(),
     }
 }
 
@@ -358,12 +369,12 @@ impl Runner<'_> {
             let zip = job.dest.clone();
             let root2 = root.clone();
             self.step(name, &mut |s| {
-                let v = if kind == FileKind::CrowPackage {
+                let summary = if kind == FileKind::CrowPackage {
                     s.install_crow(&zip, &root2)?
                 } else {
                     s.install_engine(&zip, &root2)?
                 };
-                Ok(format!("Installed. Version {v}."))
+                Ok(sentence(&summary))
             })?;
             self.mark(&key);
         }
@@ -632,12 +643,7 @@ impl RealSteps {
     }
 
     fn fetch_options(&self) -> FetchOptions {
-        FetchOptions {
-            source: self.source.clone(),
-            stall_secs: 30,
-            checkpoint_bytes: 64 * 1024 * 1024,
-            max_backoff_secs: 30,
-        }
+        FetchOptions::production(self.source.clone())
     }
 }
 
@@ -925,10 +931,10 @@ pub mod testing {
             Ok(())
         }
         fn install_crow(&mut self, _zip: &Path, _root: &Path) -> Result<String, String> {
-            self.step("install crow", "crow").map(|_| "3.0.0".into())
+            self.step("install crow", "crow").map(|_| "Crow 3.0.0 installed (60 files)".into())
         }
         fn install_engine(&mut self, _zip: &Path, _root: &Path) -> Result<String, String> {
-            self.step("install engine", "engine").map(|_| "0.9.0".into())
+            self.step("install engine", "engine").map(|_| "engine 0.9.0 installed (4 files)".into())
         }
         fn ensure_python(&mut self, _root: &Path) -> Result<PythonInfo, String> {
             self.step("python", "python").map(|_| python())

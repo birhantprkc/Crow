@@ -29,6 +29,13 @@ pub struct FetchOptions {
     pub max_backoff_secs: u64,
 }
 
+impl FetchOptions {
+    /// The spec's values: 30 s stall, 64 MiB checkpoints, 30 s backoff cap.
+    pub fn production(source: Source) -> FetchOptions {
+        FetchOptions { source, stall_secs: 30, checkpoint_bytes: 64 * 1024 * 1024, max_backoff_secs: 30 }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
     /// 401/403/404 and friends: not retried in a loop, the UI offers Retry.
@@ -73,6 +80,13 @@ pub fn download(
     };
     if cx.already_there()? {
         return Ok(());
+    }
+    // A `verified` entry whose file is not there (deleted, or the image
+    // stack's convert input) is stale: start the file over, or a stop
+    // part-way leaves a partial file recorded as verified.
+    if cx.state.files.get(&job.id).is_some_and(|f| f.verified) {
+        cx.state.files.insert(job.id.clone(), Default::default());
+        cx.state.save()?;
     }
     for pass in 0..2 {
         let got = cx.transfer()?;
