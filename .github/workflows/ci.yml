@@ -106,3 +106,27 @@ jobs:
       - name: install.sh selftest
         if: runner.os == 'Linux'
         run: bash install.sh --selftest
+
+  # CrowSetup.exe (#196). Windows only: the exe is a Windows program (wry/WebView2).
+  # No `bundle` feature and no installer/vendor files here: the bundled build needs the
+  # release packages and is made by installer/build.ps1. --selftest opens no window and
+  # uses no network. Toolchain and cache as in nibor1896/crow-nest's CI.
+  installer:
+    name: installer (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: installer
+
+      - name: cargo test
+        working-directory: installer
+        run: cargo test --locked
+
+      - name: crowsetup --selftest
+        working-directory: installer
+        run: cargo run --locked -p crowsetup -- --selftest
