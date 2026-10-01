@@ -7,6 +7,15 @@ The reasoning is in the commit and on the issue.
 
 ### Added
 
+- **A boot menu starts an operating point, then Crow** (#196, 2026-10-01). It is started with `python cli\crow_boot.py`, or from a shortcut via `--create-shortcut <folder>`, which uses Windows Terminal when present.
+  - **Entries:** Start Crow, the three crow-nest points (Flash-Next, 27B, Image Stack, the baseline), and below them under "Optional (llama.cpp)" Crow's llama.cpp lines, dimmed. Only lines whose files are on disk are shown. The last entries are Stop and Quit.
+  - **Starting a point:** an animated "flying to the nest" line replaces the server log. "Landed" shows for 5 s, then the menu comes back.
+  - **One point at a time, in both directions.** A second start names what runs and how to stop it.
+  - **Configuration:** everything comes from `manifests/stack.json`, which now ships in the package. The menu writes `active-point.json` for the window.
+  - **Measured on Windows, 2026-10-01**, from a hardlinked install layout and the engine pack of crow-nest #131: the 27B ready in 9-13 s, the Image Stack in 10 s (sd-server started after serve), the 27B GGUF line in 9-12 s. A second start was refused (exit 3). After Stop, every port was free.
+  - Stop waits on the process handle: a 13 GB llama-server was gone from the scan after 0.08 s but from `tasklist` only after 1.61 s.
+  - Flags `--status`, `--start <point>`, `--stop` and `--start-crow` work without the menu. `docs/user-guide/boot.md` documents it.
+
 - **`manifests/stack.json` describes the three installable operating points** (#196, 2026-10-01). Flash-Next + vision, 27B + vision and 27B + Qwen-Image 2.1. Each point lists every file with repo, pinned revision, bytes and sha256, plus serve's env and argv, ports, the readiness probe and the identity (`/props` `model_path`). Disk per point: 105,644,572,827 B, 18,784,665,622 B and 69,434,804,127 B. The projectors, the tokenizer and the crow0924 hot set are marked `mirror-pending`: they move into our CNQ repos on Hugging Face, upload on robin's word. Qwen-Image stays upstream. `tools/check_stack.py` validates it (5 of 5 offline, 31 of 31 `--online` against HF on 2026-10-01), and a test pins its sd-server line to `crow_core.image_server_command`. This is the data the installer and the boot script will read.
 - **`tools/te_rename.py` derives `text_encoder_sdcli/` from upstream Qwen-Image** (#196, 2026-10-01). It rewrites only the tensor names (`model.language_model.*`, `model.visual.*`, `lm_head.*` → `text_encoders.llm.*`). The payload is copied byte for byte, each shard is atomic and the run is resumable. Checked against the four upstream shard headers read by HTTP range: 750 tensors, 0 mismatches, and headers and index byte-identical to the copy the image stack was measured with.
 
