@@ -350,5 +350,30 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("bin\\server.log", out)
 
 
+class TheBootMenuManifestShipsTest(unittest.TestCase):
+    """#196 P1: cli/crow_boot.py starts every operating point from
+    manifests/stack.json and looks for it beside cli/, so the package carries it."""
+
+    def test_the_checkout_s_stack_json_is_staged_byte_for_byte(self):
+        files = rr.stage_from_checkout(rr.REPO)
+        self.assertIn("manifests\\stack.json", files)
+        with open(os.path.join(rr.REPO, "manifests", "stack.json"), "rb") as fh:
+            self.assertEqual(files["manifests\\stack.json"], fh.read())
+        self.assertEqual(rr.shipped_set_violations(["manifests\\stack.json"]), [])
+
+    def test_a_synthetic_checkout_with_one_ships_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_repo(d)
+            put(d, "manifests/stack.json", b'{"points": []}')
+            files = rr.stage_from_checkout(d)
+        self.assertEqual(files["manifests\\stack.json"], b'{"points": []}')
+
+    def test_it_names_no_builder_and_no_profile_path(self):
+        with open(os.path.join(rr.REPO, "manifests", "stack.json"), "rb") as fh:
+            files = {"manifests\\stack.json": fh.read()}
+        pats, _ = rr.private_patterns(profile=FAKE_PROFILE, user="fakebuilder", host=FAKE_HOST)
+        self.assertEqual(rr.scan_private(files, pats + ["\\Users\\", "/Users/", "/home/"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

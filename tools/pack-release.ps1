@@ -250,7 +250,7 @@ function Resolve-BuildDir {
 # ---------------------------------------------------------------------------
 $SHIP_ROOT_FILES   = @('LICENSE', 'NOTICE', 'README.md')
 $SHIP_TOP_DIRS     = @('bin', 'cli', 'kits')
-$SHIP_SINGLE_FILES = @('templates\0731-chat-template.jinja', 'manifests\operating-point.json')
+$SHIP_SINGLE_FILES = @('templates\0731-chat-template.jinja', 'manifests\operating-point.json', 'manifests\stack.json')
 $EXCLUDE_DIRS      = @('runs', '__pycache__', '.crow', 'digests', 'sessions')
 $EXCLUDE_FILES     = @('*.log', '*.pyc', '*.pyo', '*.jsonl', 'test_*.py', '.env*', 'secrets.json',
                        'session*.json', 'state*.json', 'settings.json', '*_tokens.json')
@@ -296,6 +296,27 @@ function Get-ShippedSetViolations {
         if ($why) { $bad += [pscustomobject]@{ Path = $rel; Reason = "excluded: $why" } }
     }
     return ,@($bad)
+}
+
+function Copy-ManifestFiles {
+    <#
+    Stages the two manifests that ship: manifests\operating-point.json (sampling
+    per model, read by the client) and manifests\stack.json (#196 P1: the boot
+    menu cli\crow_boot.py starts every operating point from it and looks for it
+    at ..\manifests\ beside cli\). Each is read back as JSON: a truncated copy
+    would install cleanly and fail only when used. Returns the staged paths.
+    #>
+    param([string] $Repo, [string] $Stage)
+    New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'manifests') | Out-Null
+    $out = @()
+    foreach ($name in @('operating-point.json', 'stack.json')) {
+        $dest = Join-Path $Stage "manifests\$name"
+        Copy-Item -LiteralPath (Join-Path $Repo "manifests\$name") -Destination $dest
+        try { Get-Content -LiteralPath $dest -Raw | ConvertFrom-Json | Out-Null }
+        catch { throw "manifests/$name did not survive staging as readable JSON: $_" }
+        $out += $dest
+    }
+    return ,@($out)
 }
 
 function Copy-ShippedTree {
@@ -883,6 +904,11 @@ function Invoke-Selftest {
         $badSet = @('docs\x.md', 'stray.txt', 'manifests\shared-core.json', 'templates\other.jinja',
                     'cli\runs\x.log', 'bin\a.log', 'cli\.env.local', 'kits\pathtracer\runs\y.log', 'cli\sessions\a.txt')
         Check "the declared shipped set accepts what ships"              ((Get-ShippedSetViolations -Paths $okSet).Count -eq 0)
+        $mfRepo = Join-Path $pkRoot 'mf-repo'
+        New-Item -ItemType Directory -Force -Path (Join-Path $mfRepo 'manifests') | Out-Null
+        foreach ($n in @('operating-point.json', 'stack.json')) { Set-Content -LiteralPath (Join-Path $mfRepo "manifests\$n") -Value '{"x": 1}' -Encoding ascii }
+        $mfStaged = Copy-ManifestFiles -Repo $mfRepo -Stage (Join-Path $pkRoot 'mf-stage')
+        Check "manifests\stack.json is staged and in the shipped set (#196 P1)" ((Test-Path -LiteralPath (Join-Path $pkRoot 'mf-stage\manifests\stack.json')) -and $mfStaged.Count -eq 2 -and (Get-ShippedSetViolations -Paths @('manifests\stack.json')).Count -eq 0)
         Check "NEGATIVE: anything outside it or on an exclude rule is named" ((Get-ShippedSetViolations -Paths $badSet).Count -eq $badSet.Count)
 
         # the gate, one spelling at a time
@@ -1246,14 +1272,12 @@ if ((Get-Item (Join-Path $stage 'templates\0731-chat-template.jinja')).Length -n
 # counts the places a default is written and allows exactly one. A table in the
 # core spelling min_p twice is the drift this project keeps finding, so the
 # numbers that differ per model live here.
-New-Item -ItemType Directory -Force -Path (Join-Path $stage 'manifests') | Out-Null
-Copy-Item -LiteralPath (Join-Path $repo 'manifests\operating-point.json') `
-          -Destination (Join-Path $stage 'manifests\operating-point.json')
 # Read back as JSON rather than checked for existence: this file is now product,
 # and a truncated copy would install cleanly and answer every sampling question
 # with the fallback -- which looks exactly like a correct old installation.
-try { Get-Content -LiteralPath (Join-Path $stage 'manifests\operating-point.json') -Raw | ConvertFrom-Json | Out-Null }
-catch { throw "manifests/operating-point.json did not survive staging as readable JSON: $_" }
+# manifests\stack.json rides along (#196 P1, the boot menu); Copy-ManifestFiles
+# stages and reads back both.
+Copy-ManifestFiles -Repo $repo -Stage $stage | Out-Null
 
 # The OFL is not a formality: without it, redistributing the typeface is a licence
 # violation. Refuse rather than ship a package that breaks it.
