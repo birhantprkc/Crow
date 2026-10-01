@@ -563,7 +563,7 @@
    "id": "27b",
    "menu": {
     "title": "Qwen3.8-27B",
-    "line": "Great speed — awesome for coding & vision"
+    "line": "200k context — great speed, awesome for coding & vision"
    },
    "files": [
     "27b-cnq",
@@ -592,7 +592,8 @@
      "CROW_CNQ": "${MODELS}/Qwen3.8-27B-CNQ4.5/Qwen3.8-27B-CNQ4.5.cnq",
      "CROW_TOKENIZER": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer.json",
      "CROW_TOKENIZER_CONFIG": "${MODELS}/Qwen3.8-27B-CNQ4.5/tokenizer_config.json",
-     "CROW_VIT_MMPROJ": "${MODELS}/Qwen3.8-27B-CNQ4.5/mmproj-F16.gguf"
+     "CROW_VIT_MMPROJ": "${MODELS}/Qwen3.8-27B-CNQ4.5/mmproj-F16.gguf",
+     "CROW_CONTEXT": "200000"
     },
     "env_engine_default": {
      "CROW_LOCK": "not set: the engine default; crow-nest#131 moves the lock to a per-user state dir"
@@ -607,8 +608,8 @@
      "${INSTALL}/session"
     ],
     "port": 8099,
-    "context": 65536,
-    "_context": "crow-nest geo.rs:205-208 DENSE_CONTEXT_FLOOR, the dense family's default; 200k on the 27B is not measured",
+    "context": 200000,
+    "_context": "owner decision 2026-10-01: the 27B alone runs at 200k; only the image stack keeps the dense default 65,536 (crow-nest geo.rs DENSE_CONTEXT_FLOOR). CROW_CONTEXT takes floor..=max_position_embeddings (262,144; boot.rs context_from_env). crow-nest CHANGELOG 2026-09-26, BF16 KV: 100,000 -> 21.22 GiB used, 131,072 -> 23.12 GiB, 262,144 refused by the planner; 200,000 measured through the boot menu, see #196",
     "readiness": {
      "method": "GET",
      "path": "/health",

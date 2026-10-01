@@ -139,7 +139,7 @@ class Wiring(Base):
         self.red("engine wiring", "identity")
 
     def test_menu_claims_more_context_than_served(self):
-        point(self.doc, "27b")["menu"]["line"] = "200k context \u2014 speed, coding, vision"
+        point(self.doc, "image-stack")["menu"]["line"] = "200k context \u2014 pictures"
         self.red("engine wiring", "claims 200k context")
 
     def test_slot_dir_not_created(self):

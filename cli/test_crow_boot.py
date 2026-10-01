@@ -187,14 +187,19 @@ class ThePlaceholdersResolveFromTheStackTests(BootCase):
         with self.assertRaises(crow_boot.SetupError):
             crow_boot.plan_point(STACK, "flash-later", self.install, self.models)
 
-    def test_the_menu_text_is_the_stack_s_and_the_27b_claims_no_200k(self):
+    def test_the_menu_text_is_the_stack_s_and_only_the_image_stack_has_no_200k(self):
+        # owner decision 2026-10-01: the 27B alone runs at 200k; the image stack keeps 65,536
         rows = self.boot().entries()
         titles = [r[2] for r in rows]
         for point in STACK["points"]:
             self.assertIn(point["menu"]["title"], titles)
             self.assertIn(point["menu"]["line"], [r[3] for r in rows])
         line_27b = next(r[3] for r in rows if r[4] == ("point", "27b"))
-        self.assertNotIn("200k", line_27b)
+        line_image = next(r[3] for r in rows if r[4] == ("point", "image-stack"))
+        self.assertIn("200k", line_27b)
+        self.assertNotIn("200k", line_image)
+        env = crow_boot.plan_point(STACK, "image-stack", self.install, self.models)
+        self.assertNotIn("CROW_CONTEXT", str(env), "the image stack inherits no 200k")
         self.assertEqual(titles[0], "Start Crow")
         self.assertEqual(titles[-2:], ["Stop the running point", "Quit"])
 
