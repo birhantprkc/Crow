@@ -15,7 +15,7 @@ Starts one operating point, then Crow. The three crow-nest points are the baseli
 
    1  🚀 Start Crow                     open the window on the running point
    2  🧠 Qwen3.8-Flash-Next             200k context — great for coding & vision
-   3  ⚡ Qwen3.8-27B                    200k context — great speed, awesome for coding & vision
+   3  ⚡ Qwen3.8-27B                    128k context — great speed, awesome for coding & vision
    4  🎨 Image Stack                    27B + Qwen-Image 2.1 — create AWESOME pictures
 
   Optional (llama.cpp)
@@ -30,7 +30,7 @@ Starts one operating point, then Crow. The three crow-nest points are the baseli
 |---|---|
 | Start Crow | opens the window with `--base-url` of what runs: a baseline point, or a llama-server (its port), and says which. Only when no model server runs it says so and starts nothing |
 | Qwen3.8-Flash-Next | starts crow-nest's `serve` with the Flash-Next container (200k context) |
-| Qwen3.8-27B | starts `serve` with the 27B container at 200,000 context (`CROW_CONTEXT`) |
+| Qwen3.8-27B | starts `serve` with the 27B container at 131,072 context (`CROW_CONTEXT`; 200k waits for an 8-bit KV cache in crow-nest) |
 | Image Stack | starts the 27B at 65,536 context (room for Qwen-Image beside it), then `sd-server` with Qwen-Image 2.1 once `serve` is ready |
 | *(optional)* lines | a llama.cpp line from `manifests/operating-point.json` (ports 8081/8082/8083), started like Crow's own `start_server`: ready when `/props` answers, 600 s. Drawn dimmed; plain consoles show only the tag |
 | Stop the running point | ends every model server the process scan sees (`serve`, `sd-server`, `llama-server`), waits until each is torn down, removes the contract file |
