@@ -11,6 +11,7 @@ Everything else is in this folder.
 |---|---|
 | [Overview](user-guide/overview.md) | start, the window part by part, features, tools, licences: what the front page used to carry |
 | [Install](user-guide/install.md) | requirements, both installers, the model download, updating, where everything lands; optional `--voice`, `--tailscale` / `-Tailscale`, `--pathtracer` / `-PathTracer` |
+| [Boot menu](user-guide/boot.md) | `cli\crow_boot.py`: start one of the three operating points, then Crow; one point at a time, stop, flags, the shortcut, where the logs go |
 | [Window](user-guide/window.md) | the client, panel by panel: pinned cards, selection and links, layout |
 | [Linux](user-guide/linux.md) | install, the paths table, the engine build, memory scopes for server, render and command, optional helpers, the window on Wayland, troubleshooting |
 | [Memory](user-guide/memory.md) | what is written, by whom, and the gate |
