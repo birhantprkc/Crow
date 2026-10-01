@@ -128,6 +128,9 @@ $HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/Qwen3.8-Flash-Next-UD-Q
 `python3 ~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl` builds that line from the
 manifest instead of repeating it. `CROW_MODELS` points one shell at a model tree;
 `<install>/models` is where the core looks with nothing set — see [Linux](user-guide/linux.md).
+A line whose manifest entry names its own `binary` takes it from `<install>/bin`; the
+per-line variable `CROW_LLAMA_SERVER_<KEY>` (the model key upper-cased, `-` as `_`, e.g.
+`CROW_LLAMA_SERVER_FLASH_NEXT_Q2_K_XL`) points that one line at another build.
 
 ---
 
