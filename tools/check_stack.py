@@ -20,7 +20,12 @@ OFFLINE (the default, no network):
   * wiring       - every env and argv path names a file or derived output the
                    SAME point installs; the identity is the CROW_CNQ file name;
                    the slot dir is created; ports agree with argv; a menu line
-                   never claims more context than the point serves.
+                   never claims more context than the point serves;
+  * crow files   - the Crow-wide group (crow_files: the dictation model) has every
+                   field, a pinned 40-hex revision, a status of published or
+                   upstream, a dest under ${INSTALL}/ that no other file uses, and
+                   holds model.bin under ${INSTALL}/models/whisper-small/, the
+                   directory cli/crow_voice.py loads.
 
 ONLINE (--online): bytes, sha256 and revision of every file re-read from the
 source - the tree API at the pinned revision (lfs oid for LFS files, a download
@@ -28,6 +33,8 @@ of at most 1 MiB for small ones), raw GitHub for a GitHub source. A mirror-pendi
 file is checked at its source, and the planned location in our repo is looked
 at: present and equal is a NOTE (flip it to published), present and different
 is a failure. A repo whose HEAD moved past the pin is a NOTE: the pin still holds.
+The crow_files group is re-read the same way at its pinned revision (a non-LFS
+file there may be up to CROW_SMALL, the dictation tokenizer is 2.2 MB).
 
 Usage:  check_stack.py [--manifest <file>] [--online]
 Exit 0 = every check holds.  1 = at least one does not.  2 = setup error.
@@ -62,6 +69,11 @@ PATH_ROOTS = ("${INSTALL}/", "${MODELS}/")
 # absolute or personal paths: a drive letter, a UNC root, a home directory
 PERSONAL = re.compile(r"(?i)(\b[a-z]:[\\/]|\\\\[a-z0-9]|(^|[\s\"'(=])~[\\/]|[\\/](users|home)[\\/])")
 SMALL = 1 << 20
+CROW_SMALL = 8 << 20
+CROW_FILE_FIELDS = ("id", "repo", "path", "revision", "bytes", "sha256", "dest", "status",
+                    "license", "role")
+CROW_STATUSES = ("published", "upstream")
+WHISPER_DIR = "${INSTALL}/models/whisper-small/"
 HF = "https://huggingface.co"
 
 
@@ -379,6 +391,51 @@ def check_wiring(doc) -> "list[str]":
     return p
 
 
+def check_crow_files(doc) -> "list[str]":
+    group = doc.get("crow_files")
+    if not isinstance(group, list) or not group:
+        return ["crow_files missing or empty (the dictation model every install gets)"]
+    p = []
+    file_ids = {f.get("id") for f in doc.get("files") or []}
+    dests = {f.get("dest"): f.get("id") for f in doc.get("files") or []}
+    seen = set()
+    for f in group:
+        if not isinstance(f, dict):
+            p.append("crow_files entry %r is not an object" % (f,))
+            continue
+        fid = f.get("id", "?")
+        missing = [k for k in CROW_FILE_FIELDS if k not in f]
+        if missing:
+            p.append("crow file %s lacks %s" % (fid, ", ".join(missing)))
+            continue
+        if fid in seen or fid in file_ids:
+            p.append("crow file id %s twice (crow_files and files share one id space)" % fid)
+        seen.add(fid)
+        if f["status"] not in CROW_STATUSES:
+            p.append("crow file %s status %r is not one of %s" % (fid, f["status"], ", ".join(CROW_STATUSES)))
+        if not isinstance(f["revision"], str) or not HEX40.match(f["revision"]):
+            p.append("crow file %s needs a 40-hex commit revision" % fid)
+        if not isinstance(f["bytes"], int) or isinstance(f["bytes"], bool) or f["bytes"] <= 0:
+            p.append("crow file %s bytes %r is not a positive integer" % (fid, f["bytes"]))
+        if not isinstance(f["sha256"], str) or not HEX64.match(f["sha256"]):
+            p.append("crow file %s sha256 is not 64 lowercase hex" % fid)
+        if not isinstance(f["repo"], str) or not REPO_ID.match(f["repo"]):
+            p.append("crow file %s repo %r is not owner/name" % (fid, f["repo"]))
+        if not isinstance(f["path"], str) or not f["path"] or f["path"].startswith("/"):
+            p.append("crow file %s path %r is not repo-relative" % (fid, f["path"]))
+        if not isinstance(f["license"], str) or not f["license"]:
+            p.append("crow file %s has no licence" % fid)
+        d = f["dest"]
+        if not str(d).startswith("${INSTALL}/"):
+            p.append("crow file %s dest %r does not start with ${INSTALL}/" % (fid, d))
+        if d in dests:
+            p.append("crow file %s and %s share dest %s" % (fid, dests[d], d))
+        dests[d] = fid
+    if WHISPER_DIR + "model.bin" not in {f.get("dest") for f in group if isinstance(f, dict)}:
+        p.append("crow_files holds no %smodel.bin, the file cli/crow_voice.py loads by" % WHISPER_DIR)
+    return p
+
+
 # ---- online ----
 
 def fetch(url: str, limit: int = 0, tries: int = 16):
@@ -430,14 +487,14 @@ class Hub:
             self.trees[key] = entries
         return self.trees[key]
 
-    def measure(self, repo, rev, path):
+    def measure(self, repo, rev, path, limit=SMALL):
         """(bytes, sha256) at the source, or raise."""
         e = self.tree(repo, rev).get(path)
         if e is None:
             raise LookupError("%s@%s has no %s" % (repo, rev[:12], path))
         if e.get("lfs"):
             return e["size"], e["lfs"]["oid"]
-        body, _ = fetch("%s/%s/resolve/%s/%s" % (HF, repo, rev, path), limit=SMALL)
+        body, _ = fetch("%s/%s/resolve/%s/%s" % (HF, repo, rev, path), limit=limit)
         return len(body), hashlib.sha256(body).hexdigest()
 
 
@@ -480,6 +537,24 @@ def check_online(doc, report: Report):
             problems.append("%s: %s" % (f["id"], e))
             where = "?"
         report.check("online " + f["id"], problems, "%d B at %s" % (f["bytes"], where))
+    check_online_crow(doc, report, hub)
+
+
+def check_online_crow(doc, report: Report, hub):
+    for f in doc.get("crow_files") or []:
+        problems = []
+        where = "%s@%s" % (f["repo"], f["revision"][:12])
+        try:
+            got = hub.measure(f["repo"], f["revision"], f["path"], limit=CROW_SMALL)
+            if got != (f["bytes"], f["sha256"]):
+                problems.append("%s: source has %d B %s, the manifest %d B %s"
+                                % (f["id"], got[0], got[1][:12], f["bytes"], f["sha256"][:12]))
+            if hub.head(f["repo"]) != f["revision"]:
+                report.note("%s: %s HEAD is %s, pinned %s"
+                            % (f["id"], f["repo"], hub.head(f["repo"])[:12], f["revision"][:12]))
+        except Exception as e:  # a failed fetch is a failed check, named
+            problems.append("%s: %s" % (f["id"], e))
+        report.check("online " + f["id"], problems, "%d B at %s" % (f["bytes"], where))
 
 
 def run(doc, online=False) -> Report:
@@ -498,6 +573,12 @@ def run(doc, online=False) -> Report:
         "%s %d files %s B" % (pt["id"], len(pt["files"]), format(pt["bytes"]["disk"], ","))
         for pt in doc["points"]))
     r.check("engine wiring", check_wiring(doc), "env/argv paths are files of their own point")
+    crow = [f for f in doc.get("crow_files") or [] if isinstance(f, dict)]
+    crow_problems = check_crow_files(doc)
+    r.check("crow files", crow_problems, "%d files %s B, dictation in %s"
+            % (len(crow), format(sum(f.get("bytes") or 0 for f in crow), ","), WHISPER_DIR))
+    if crow_problems:
+        return r  # the online half indexes the fields this check did not find
     if online:
         check_online(doc, r)
     return r

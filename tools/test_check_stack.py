@@ -8,6 +8,7 @@ manifest to be green. The --online half needs the network and is not run here.
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -200,6 +201,123 @@ class ImageServerArgvDrift(unittest.TestCase):
             want = [a.replace("${MODELS}", models).replace("/", os.sep) if "${MODELS}" in a else a
                     for a in server["argv"]] + list(extra)
             self.assertEqual(built, want)
+
+
+def crow_file(doc, fid):
+    return next(f for f in doc["crow_files"] if f["id"] == fid)
+
+
+class CrowFiles(Base):
+    """The Crow-wide group: the dictation model every install gets (#196 P2-T2)."""
+
+    def test_group_missing(self):
+        del self.doc["crow_files"]
+        self.red("crow files", "crow_files missing or empty")
+
+    def test_unpinned_revision(self):
+        crow_file(self.doc, "whisper-model")["revision"] = "main"
+        self.red("crow files", "whisper-model needs a 40-hex commit revision")
+
+    def test_mirror_pending_refused(self):
+        crow_file(self.doc, "whisper-config")["status"] = "mirror-pending"
+        self.red("crow files", "status 'mirror-pending'")
+
+    def test_dest_under_models(self):
+        f = crow_file(self.doc, "whisper-tokenizer")
+        f["dest"] = f["dest"].replace("${INSTALL}/models", "${MODELS}")
+        self.red("crow files", "does not start with ${INSTALL}/")
+
+    def test_no_model_bin(self):
+        self.doc["crow_files"] = [f for f in self.doc["crow_files"] if f["path"] != "model.bin"]
+        self.red("crow files", "holds no ${INSTALL}/models/whisper-small/model.bin")
+
+    def test_id_shared_with_files(self):
+        crow_file(self.doc, "whisper-config")["id"] = "fn-cnq"
+        self.red("crow files", "crow file id fn-cnq twice")
+
+    def test_bad_sha(self):
+        crow_file(self.doc, "whisper-vocabulary")["sha256"] = "XYZ"
+        self.red("crow files", "whisper-vocabulary sha256 is not 64 lowercase hex")
+
+    def test_field_missing(self):
+        del crow_file(self.doc, "whisper-model")["bytes"]
+        self.red("crow files", "whisper-model lacks bytes")
+
+    def test_real_group_values(self):
+        got = {f["path"]: f["bytes"] for f in REAL["crow_files"]}
+        self.assertEqual(got, {"config.json": 2370, "vocabulary.txt": 459861,
+                               "tokenizer.json": 2203239, "model.bin": 483546902})
+        self.assertEqual(sum(got.values()), 486212372)
+        self.assertEqual({f["repo"] for f in REAL["crow_files"]}, {"Systran/faster-whisper-small"})
+
+
+class CrowFilesOnline(unittest.TestCase):
+    """The online half of the group against a fake hub (no network)."""
+
+    class FakeHub:
+        def __init__(self, measured, head):
+            self.measured, self._head, self.limits = measured, head, []
+
+        def measure(self, repo, rev, path, limit=C.SMALL):
+            self.limits.append(limit)
+            return self.measured[path]
+
+        def head(self, repo):
+            return self._head
+
+    def run_online(self, measured, head=None):
+        doc = copy.deepcopy(REAL)
+        rev = doc["crow_files"][0]["revision"]
+        hub = self.FakeHub(measured, head or rev)
+        r = C.Report()
+        C.check_online_crow(doc, r, hub)
+        return r, hub
+
+    def truth(self):
+        return {f["path"]: (f["bytes"], f["sha256"]) for f in REAL["crow_files"]}
+
+    def test_matching_source_is_green_and_allows_the_2mb_tokenizer(self):
+        r, hub = self.run_online(self.truth())
+        self.assertEqual(r.failed, 0, "\n".join(r.lines))
+        self.assertEqual(r.total, 4)
+        self.assertGreater(C.CROW_SMALL, 2203239)
+        self.assertEqual(set(hub.limits), {C.CROW_SMALL})
+
+    def test_changed_source_fails(self):
+        m = self.truth()
+        m["model.bin"] = (m["model.bin"][0], "0" * 64)
+        r, _ = self.run_online(m)
+        self.assertEqual(r.failed, 1)
+        self.assertIn("whisper-model: source has 483546902 B 000000000000", "\n".join(r.lines))
+
+    def test_moved_head_is_a_note(self):
+        r, _ = self.run_online(self.truth(), head="f" * 40)
+        self.assertEqual(r.failed, 0)
+        self.assertIn("HEAD is ffffffffffff", "\n".join(r.lines))
+
+
+class DictationDrift(unittest.TestCase):
+    """crow_files holds what Crow loads: the directory cli/crow_voice.py reads and the
+    four files install.ps1 fetched into it."""
+
+    def test_manifest_matches_crow_voice_and_install_ps1(self):
+        root = os.path.dirname(HERE)
+        with open(os.path.join(root, "cli", "crow_voice.py"), encoding="utf-8") as f:
+            voice = f.read()
+        with open(os.path.join(root, "install.ps1"), encoding="utf-8") as f:
+            ps1 = f.read()
+        dirname = re.search(r'^MODEL_DIRNAME = "([^"]+)"', voice, re.M).group(1)
+        repo = re.search(r'^\$WHISPER_REPO\s*=\s*"([^"]+)"', ps1, re.M).group(1)
+        # the loop right after $whisperDir is made: the four files it fetches
+        after = ps1[ps1.index("$whisperDir = "):]
+        files = re.findall(r'"([^"]+)"', re.search(
+            r'foreach \(\$f in @\(([^)]*)\)\)', after).group(1))
+        group = REAL["crow_files"]
+        self.assertEqual(dirname, "whisper-small")
+        self.assertEqual({f["repo"] for f in group}, {repo})
+        self.assertEqual(sorted(f["path"] for f in group), sorted(files))
+        for f in group:
+            self.assertEqual(f["dest"], "${INSTALL}/models/%s/%s" % (dirname, f["path"]))
 
 
 if __name__ == "__main__":
