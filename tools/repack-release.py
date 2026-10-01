@@ -78,11 +78,16 @@ def previous_bin(path: str) -> dict[str, bytes]:
 
 
 def version_literal() -> str:
-    src = open(os.path.join(REPO, "cli", "crow.py"), encoding="utf-8").read()
-    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', src, re.M)
-    if not m:
-        raise SystemExit("no VERSION literal in cli/crow.py")
-    return m.group(1)
+    """cli/crow_core.py owns the literal since #187; cli/crow.py is the fallback
+    for a checkout from before, whose core carries none."""
+    for name in ("crow_core.py", "crow.py"):
+        path = os.path.join(REPO, "cli", name)
+        if not os.path.isfile(path):
+            continue
+        m = re.search(r'^VERSION\s*=\s*"([^"]+)"', open(path, encoding="utf-8").read(), re.M)
+        if m:
+            return m.group(1)
+    raise SystemExit("no VERSION literal in cli/crow_core.py (nor in an older cli/crow.py)")
 
 
 def stage_from_checkout() -> dict[str, bytes]:
@@ -143,12 +148,12 @@ def verify(out_zip: str) -> tuple[int, list[str]]:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--previous", required=True, help="the previous release's crow-*-win-x64.zip")
-    ap.add_argument("--version", default=None, help="defaults to cli/crow.py's VERSION")
+    ap.add_argument("--version", default=None, help="defaults to cli/crow_core.py's VERSION")
     ap.add_argument("--out", default=os.path.join(REPO, "dist"))
     a = ap.parse_args(argv)
     version = a.version or version_literal()
     if a.version and a.version != version_literal():
-        print("NOTE: --version %s but cli/crow.py says %s" % (a.version, version_literal()))
+        print("NOTE: --version %s but the checkout says %s" % (a.version, version_literal()))
     files = previous_bin(a.previous)
     print("bin/ reused from %s: %d files, every byte matched its manifest" % (a.previous, len(files)))
     staged = stage_from_checkout()

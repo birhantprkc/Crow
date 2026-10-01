@@ -178,6 +178,26 @@ function Get-NameClashes {
     return ,@($clash)
 }
 
+<#
+    The version the package is stamped with, read out of a cli\ directory.
+
+    cli\crow_core.py owns the literal since #187 (the terminal client cli\crow.py
+    no longer ships). cli\crow.py is the fallback for a tree from before that,
+    whose crow_core.py carries no literal. $null when neither has one. Same
+    pattern as install.ps1's Get-InstalledVersion, so the stamp and the reader
+    cannot disagree about where the number lives.
+#>
+function Get-VersionLiteral {
+    param([string] $CliDir)
+    foreach ($name in @('crow_core.py', 'crow.py')) {
+        $f = Join-Path $CliDir $name
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        $m = Select-String -LiteralPath $f -Pattern '^VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+        if ($m) { return $m.Matches[0].Groups[1].Value }
+    }
+    return $null
+}
+
 $script:selftestOk  = 0
 $script:selftestRed = 0
 
@@ -294,14 +314,32 @@ function Invoke-Selftest {
     # What ships and what does not. Both directions again, because a predicate
     # that says no to everything would quietly put the suite back in the package
     # and this check would still be green.
-    $cli = @('C:\r\cli\crow.py', 'C:\r\cli\test_crow.py', 'C:\r\cli\fonts\OFL.txt')
+    $cli = @('C:\r\cli\crow_gui.py', 'C:\r\cli\test_crow_gui.py', 'C:\r\cli\fonts\OFL.txt')
     $dev = Get-DevOnlyFiles -Paths $cli
-    Check "the unit suite is developer-only"        ($dev.Count -eq 1 -and $dev[0] -like '*test_crow.py')
-    Check "the client itself is NOT"                ($dev -notcontains 'C:\r\cli\crow.py')
+    Check "the unit suite is developer-only"        ($dev.Count -eq 1 -and $dev[0] -like '*test_crow_gui.py')
+    Check "the client itself is NOT"                ($dev -notcontains 'C:\r\cli\crow_gui.py')
     Check "and neither is the font licence"         ($dev -notcontains 'C:\r\cli\fonts\OFL.txt')
     # A nested copy must not slip past on its parent directory.
     Check "a suite in a subdirectory is caught too" ((Get-DevOnlyFiles -Paths @('C:\r\cli\sub\test_x.py')).Count -eq 1)
     Check "an empty list is not an error"           ((Get-DevOnlyFiles -Paths @()).Count -eq 0)
+
+    # The version stamp (#187): crow_core.py owns it, crow.py is the fallback
+    # for a tree from before, and a tree with neither gives no number.
+    $vDir = Join-Path ([IO.Path]::GetTempPath()) ("crow-ver-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $vDir | Out-Null
+    try {
+        Set-Content -LiteralPath (Join-Path $vDir 'crow_core.py') -Encoding utf8 -Value @('"""core"""', 'VERSION = "9.9.9"')
+        Check "the version is read from crow_core.py"      ((Get-VersionLiteral -CliDir $vDir) -eq '9.9.9')
+        Set-Content -LiteralPath (Join-Path $vDir 'crow_core.py') -Encoding utf8 -Value @('"""core"""')
+        Set-Content -LiteralPath (Join-Path $vDir 'crow.py') -Encoding utf8 -Value @('VERSION = "2.8.5"')
+        Check "an older tree falls back to crow.py"        ((Get-VersionLiteral -CliDir $vDir) -eq '2.8.5')
+        Set-Content -LiteralPath (Join-Path $vDir 'crow.py') -Encoding utf8 -Value @('VERSIONS = ["1.2.3"]')
+        Check "NEGATIVE: no literal in either reads as null" ($null -eq (Get-VersionLiteral -CliDir $vDir))
+    } finally {
+        Remove-Item $vDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $own = Get-VersionLiteral -CliDir (Join-Path $PSScriptRoot '..\cli')
+    Check "this checkout's own version is found ($own)" ($own -match '^\d+\.\d+\.\d+$')
 
     # The release gate, both directions. A gate that has only ever been seen
     # green is a gate nobody has watched refuse, and refusing is its whole job.
@@ -462,10 +500,9 @@ Write-Host ""
 # ---------------------------------------------------------------------------
 
 if (-not $Version) {
-    $cli = Join-Path $PSScriptRoot '..\cli\crow.py'
-    $m = Select-String -Path $cli -Pattern '^VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
-    if (-not $m) { throw "cannot read VERSION from $cli -- pass -Version" }
-    $Version = $m.Matches[0].Groups[1].Value
+    $cliDir  = Join-Path $PSScriptRoot '..\cli'
+    $Version = Get-VersionLiteral -CliDir $cliDir
+    if (-not $Version) { throw "cannot read VERSION from $cliDir\crow_core.py -- pass -Version" }
 }
 if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot "..\dist" }
 

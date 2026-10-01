@@ -106,7 +106,7 @@ function Get-SamplingDefault {
     .DESCRIPTION
         The temperature stood in six files. Five had it because somebody copied a
         working probe, and none of the five carried the reason -- that lived in a
-        comment in cli/crow.py which had not been copied along. When 0731 moves
+        comment in the client source which had not been copied along. When 0731 moves
         the value, six edits would have to agree or the probes measure something
         the client never does.
 
