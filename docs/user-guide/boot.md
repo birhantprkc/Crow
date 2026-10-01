@@ -2,11 +2,30 @@
 
 # Boot menu
 
+Starts one operating point, then Crow. The three crow-nest points are the baseline; everything they need (binary, env, argv, port, readiness, menu text) comes from `manifests/stack.json`. Crow's llama.cpp lines are optional and listed below them. The boot menu has two faces over the same steps: the operating-point window (what the shortcut and the installer's **Open boot menu** open) and the terminal menu.
+
+## Operating-point window
+
+```
+python cli\crow_boot.py --gui
+```
+
+Header **CROW · Operating points**. The shortcut runs it with `pythonw.exe`, so no console opens. On Windows it has its own taskbar button with the crow (AppUserModelID `Crow.OperatingPoints`), apart from Crow's chat window. Each point's line is `menu.gui` from `manifests/stack.json`; the terminal menu shows `menu.line`.
+
+| State | What it shows |
+|---|---|
+| Nothing runs | "Which model should Crow fly with?": the three points with a Start button each, the optional llama.cpp lines dimmed below them. **Open Crow window** is greyed |
+| Starting | "Flying to the nest. N s": the crow fills against the point's usual start time (the 27B and the Image Stack about 15 s, Flash-Next about 80 s; measured) and is full when the server answers. The other points are disabled. **Cancel** stops what was started. Closing the window hides it; the start finishes and the contract file is written |
+| Landed | the running point on top, blue, with its port, context and vision, and **Stop**. **Open Crow window** opens Crow's window on it (like **Start Crow** in the terminal menu) |
+| A second start | "One model at a time.": the point needs the card for itself; stop the running one first |
+
+A point that already runs when the window opens (started from the terminal, or by an earlier window) is shown as landed at once. A failed start shows its reason and the server log's path. If the window cannot open at all, the reason goes to `runs\crow-boot-gui.log`.
+
+## Terminal menu
+
 ```
 python cli\crow_boot.py
 ```
-
-Starts one operating point, then Crow. The three crow-nest points are the baseline; everything they need (binary, env, argv, port, readiness, menu text) comes from `manifests/stack.json`. Crow's llama.cpp lines are optional and listed below them.
 
 ```
   🐦  C R O W  boot menu
@@ -56,7 +75,9 @@ Starts one operating point, then Crow. The three crow-nest points are the baseli
 | `--start <point>` | `flash-next`, `27b`, `image-stack`, or an optional line's key (`qwen35-q4-k-xl`, `flash-next-q2-k-xl`, `operating-point`). No animation when the output is not a terminal |
 | `--stop` | stop the running point |
 | `--start-crow` | open the window on the running point |
-| `--create-shortcut <folder>` | write `<folder>\Crow.lnk` (Windows) |
+| `--gui` | the operating-point window instead of the terminal menu |
+| `--create-shortcut <folder>` | write `<folder>\Crow.lnk` (Windows) to the operating-point window |
+| `--terminal` | with `--create-shortcut`: the shortcut opens the terminal menu instead |
 | `--install-root <dir>` | the install root `${INSTALL}` (default `%LOCALAPPDATA%\Crow`) |
 | `--models <dir>` | the models root `${MODELS}` (default `%CROW_MODELS%`, else `<install>\models`); also handed to the optional lines as `CROW_MODELS` |
 | `--stack <file>` | another `stack.json` |
@@ -71,7 +92,8 @@ python cli\crow_boot.py --create-shortcut "%USERPROFILE%\Desktop"
 
 | | |
 |---|---|
-| Target | Windows Terminal (`wt.exe`) running this Python with `crow_boot.py`; plain `python.exe` when Windows Terminal is not installed |
+| Target | `pythonw.exe` beside this Python running `crow_boot.py --gui` (the operating-point window, no console); this Python itself when there is no `pythonw.exe`. `--install-root`, `--models` and `--stack` are carried along |
+| With `--terminal` | the terminal menu: Windows Terminal (`wt.exe`) running this Python with `crow_boot.py`; plain `python.exe` when Windows Terminal is not installed |
 | Working folder | the install root |
 | Icon | `cli\crow.ico` |
 | Other folders | any folder works: the Start menu is `%APPDATA%\Microsoft\Windows\Start Menu\Programs` |

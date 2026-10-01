@@ -320,5 +320,35 @@ class DictationDrift(unittest.TestCase):
             self.assertEqual(f["dest"], "${INSTALL}/models/%s/%s" % (dirname, f["path"]))
 
 
+class TheWindowsLine(Base):
+    """#196: menu.gui is the operating-point window's line (the terminal menu
+    keeps menu.line). Present for every point, no dash, its context claim held
+    to the engine, no user name."""
+
+    def test_the_real_texts_are_the_approved_ones(self):
+        self.assertEqual({p["id"]: p["menu"]["gui"] for p in REAL["points"]}, {
+            "flash-next": "200k context. Great for coding and vision.",
+            "27b": "128k context. Great speed, coding and vision.",
+            "image-stack": "27B with Qwen-Image 2.1. Create pictures.",
+        })
+
+    def test_a_point_without_one(self):
+        del point(self.doc, "27b")["menu"]["gui"]
+        self.red("engine wiring", "point 27b has no menu gui text")
+
+    def test_a_dash_in_it(self):
+        point(self.doc, "flash-next")["menu"]["gui"] = "200k context \u2014 great for coding."
+        self.red("engine wiring", "menu gui text has a dash")
+
+    def test_it_claims_more_context_than_served(self):
+        point(self.doc, "image-stack")["menu"]["gui"] = "200k context. Pictures."
+        self.red("engine wiring", "menu gui text claims 200k context")
+
+    def test_it_names_the_user(self):
+        with mock.patch.dict(os.environ, {"USERNAME": "zzqbuilder"}):
+            point(self.doc, "27b")["menu"]["gui"] = "Built by zzqbuilder."
+            self.red("placeholders and paths", "names the user")
+
+
 if __name__ == "__main__":
     unittest.main()

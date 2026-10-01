@@ -388,6 +388,19 @@ def check_wiring(doc) -> "list[str]":
             if int(k) * 1000 > int(eng.get("context") or 0):
                 p.append("point %s menu claims %sk context, the engine serves %r"
                          % (pid, k, eng.get("context")))
+        # #196: the operating-point window's own line (cli/crow_boot_gui.py shows
+        # it; the terminal menu keeps `line`). Sentences, no dash; its context
+        # claim is held to the engine like the menu's. A user name in it is the
+        # "placeholders and paths" check's, which walks every string.
+        gui = (pt.get("menu") or {}).get("gui", "")
+        if not gui:
+            p.append("point %s has no menu gui text (the operating-point window's line)" % pid)
+        if "\u2014" in gui or "\u2013" in gui:
+            p.append("point %s menu gui text has a dash; the window writes sentences" % pid)
+        for k in re.findall(r"(\d+)k context", gui):
+            if int(k) * 1000 > int(eng.get("context") or 0):
+                p.append("point %s menu gui text claims %sk context, the engine serves %r"
+                         % (pid, k, eng.get("context")))
     return p
 
 

@@ -1,0 +1,343 @@
+"""cli/crow_boot_gui.py: the operating-point window (#196).
+
+The controller is tested without a window: its view() is every word and
+button the page draws. Underneath runs the real crow_boot.Boot with
+test_crow_boot's fakes (Popen, the probe, the clock, the scan), so what is
+checked here is the window's state over the menu's own logic. Starts run
+synchronously (`run=` calls the worker in place); a probe hook looks at the
+view while a start is under way.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import crow_boot  # noqa: E402
+import crow_boot_gui  # noqa: E402
+import crow_core  # noqa: E402
+from test_crow_boot import (LLAMA_27B, NOTHING, OK_HEALTH, STACK, BootCase,  # noqa: E402
+                            FakeLlama, FakePopen)
+
+SERVE_LINE = ("7001", r"C:\x\bin\serve.exe --port 8099")
+
+
+def run_now(fn, *args):
+    fn(*args)
+
+
+class GuiCase(BootCase):
+    def controller(self, **kw):
+        boot = self.boot(**kw)
+        return crow_boot_gui.Controller(boot, clock=self.clock, run=run_now)
+
+    def running_27b(self):
+        crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1", {"serve": 5151, "image": None})
+
+
+class TheWindowShowsTheStacksGuiLineTests(GuiCase):
+    def test_the_rows_carry_menu_gui_and_the_terminal_keeps_menu_line(self):
+        ctl = self.controller()
+        ctl.refresh()
+        shown = {r["id"]: r["detail"] for r in ctl.view()["rows"]}
+        self.assertEqual(shown, {p["id"]: p["menu"]["gui"] for p in STACK["points"]})
+        self.assertEqual(shown["27b"], "128k context. Great speed, coding and vision.")
+        menu = {r[2]: r[3] for r in ctl.boot.entries()}
+        self.assertEqual(menu["Qwen3.8-27B"], next(p["menu"]["line"] for p in STACK["points"]
+                                                   if p["id"] == "27b"))
+
+    def test_without_a_gui_line_the_menu_line_is_shown(self):
+        self.assertEqual(crow_boot_gui.gui_line({"line": "plain"}), "plain")
+        self.assertEqual(crow_boot_gui.gui_line({"line": "plain", "gui": "Window."}), "Window.")
+
+    def test_the_refusal_names_a_point_without_its_family(self):
+        self.assertEqual(crow_boot_gui.short_title("Qwen3.8-Flash-Next"), "Flash-Next")
+        self.assertEqual(crow_boot_gui.short_title("Image Stack"), "Image Stack")
+
+
+class State1NothingRunsTests(GuiCase):
+    def test_three_points_then_the_optional_lines_and_a_greyed_open_button(self):
+        ctl = self.controller(llama=FakeLlama([LLAMA_27B]))
+        ctl.refresh()
+        v = ctl.view()
+        self.assertEqual(v["phase"], crow_boot_gui.IDLE)
+        self.assertEqual(v["say"], "Which model should Crow fly with?")
+        self.assertIsNone(v["fill"])
+        self.assertEqual([r["title"] for r in v["rows"]],
+                         ["Qwen3.8-Flash-Next", "Qwen3.8-27B", "Image Stack"])
+        self.assertTrue(all(r["enabled"] and not r["dim"] for r in v["rows"]))
+        self.assertEqual([(r["title"], r["detail"], r["cls"]) for r in v["optional"]],
+                         [("Qwen3.8-27B-UD-Q4_K_XL (optional)", "llama.cpp, port 8082", "opt")])
+        self.assertEqual(v["bar"]["text"], "Start a model, then open the Crow window.")
+        self.assertEqual(v["bar"]["button"]["label"], "Open Crow window")
+        self.assertFalse(v["bar"]["button"]["enabled"])
+
+
+class State2StartingTests(GuiCase):
+    def test_the_crow_fills_against_the_usual_time_then_lands(self):
+        self.layout("27b")
+        seen = []
+        probes = iter([NOTHING] * 70 + [OK_HEALTH])
+
+        def get(url, timeout):
+            seen.append(ctl.view())
+            return next(probes)
+        ctl = self.controller(get=get)
+        ctl.start("27b")
+        at7 = next(v for v in seen if v["say"] == "Flying to the nest. 7 s")
+        self.assertEqual(at7["phase"], crow_boot_gui.STARTING)
+        usual = crow_boot_gui.USUAL_START_S["27b"]
+        self.assertTrue(int(100 * 7 / usual) <= at7["fill"] <= int(100 * 8 / usual), at7["fill"])
+        first = at7["rows"][0]
+        self.assertEqual((first["title"], first["detail"], first["enabled"]),
+                         ("Qwen3.8-27B", "Loading the model. Usually ready in under 20 s.", False))
+        self.assertEqual([(r["title"], r["cls"], r["enabled"]) for r in at7["rows"][1:]],
+                         [("Qwen3.8-Flash-Next", "off", False), ("Image Stack", "off", False)])
+        self.assertEqual(at7["optional"], [])
+        self.assertEqual(at7["bar"]["text"], "You can close this window. The model keeps loading.")
+        self.assertEqual(at7["bar"]["button"]["label"], "Cancel")
+        self.assertTrue(all(v["fill"] <= crow_boot_gui.FILL_CAP for v in seen),
+                        "the crow is never full before the server answers")
+        self.assertEqual(seen[-1]["fill"], crow_boot_gui.FILL_CAP)
+        done = ctl.view()
+        self.assertEqual(done["phase"], crow_boot_gui.LANDED)
+        self.assertIsNone(done["fill"], "full on readiness")
+
+    def test_cancel_stops_what_was_started_and_writes_no_contract(self):
+        self.layout("27b")
+        probes = []
+
+        def get(url, timeout):
+            probes.append(url)
+            if len(probes) == 3:
+                ctl.cancel()
+            return NOTHING
+        popen = FakePopen()
+        ctl = self.controller(get=get, popen=popen)
+        ctl.start("27b")
+        self.assertEqual(self.terminated, [popen.procs[0]])
+        self.assertIsNone(self.contract())
+        v = ctl.view()
+        self.assertEqual(v["phase"], crow_boot_gui.IDLE)
+        self.assertIsNone(v["note"], "a cancel is not a failure")
+
+    def test_the_image_stack_says_when_it_fetches_the_paint_brushes(self):
+        self.layout("image-stack")
+        seen = []
+
+        def get(url, timeout):
+            seen.append(ctl.view())
+            return OK_HEALTH if url.endswith("/health") else (200, b"{}")
+        ctl = self.controller(get=get)
+        ctl.start("image-stack")
+        self.assertEqual(seen[0]["rows"][0]["detail"], "Loading the model. Usually ready in under 20 s.")
+        self.assertEqual(seen[-1]["rows"][0]["detail"], "Fetching the paint brushes (Qwen-Image).")
+
+    def test_a_failed_start_says_why_and_offers_every_point_again(self):
+        self.layout("27b")
+        ctl = self.controller(popen=FakePopen(exit_code=1, log_lines=["CUDA error"]))
+        ctl.start("27b")
+        v = ctl.view()
+        self.assertEqual(v["phase"], crow_boot_gui.IDLE)
+        self.assertIn("did not land: serve exited with code 1", v["note"]["title"])
+        self.assertIn("serve-8099.log", v["note"]["detail"])
+        self.assertTrue(all(r["enabled"] for r in v["rows"]))
+
+
+class State3LandedTests(GuiCase):
+    def test_the_running_point_sits_on_top_with_stop_and_open_is_live(self):
+        self.running_27b()
+        ctl = self.controller()
+        ctl.refresh()
+        v = ctl.view()
+        self.assertEqual(v["say"], "Landed.")
+        self.assertEqual(v["running"], {"title": "Qwen3.8-27B", "stop": True,
+                                        "detail": "Running on port 8099. 128k context, vision on."})
+        self.assertEqual([(r["title"], r["cls"], r["dim"]) for r in v["rows"]],
+                         [("Qwen3.8-Flash-Next", "off", True), ("Image Stack", "off", True)])
+        self.assertEqual(v["bar"]["text"], "The Crow window opens on Qwen3.8-27B.")
+        self.assertTrue(v["bar"]["button"]["enabled"])
+
+    def test_a_point_found_by_the_scan_shows_landed_when_the_window_opens(self):
+        ctl = self.controller(scan=lambda: [SERVE_LINE],
+                              point_for=lambda url, timeout=3.0: "flash-next")
+        ctl.refresh()
+        v = ctl.view()
+        self.assertEqual(v["phase"], crow_boot_gui.LANDED)
+        self.assertEqual(v["running"]["title"], "Qwen3.8-Flash-Next")
+        self.assertEqual(v["running"]["detail"], "Running on port 8099. 200k context, vision on.")
+
+    def test_open_crow_window_starts_crow_gui_on_the_running_point(self):
+        self.running_27b()
+        popen = FakePopen()
+        ctl = self.controller(popen=popen)
+        ctl.refresh()
+        ctl.open_crow()
+        argv, _kw = popen.calls[0]
+        self.assertTrue(argv[1].endswith("crow_gui.py"))
+        self.assertEqual(argv[2:], ["--base-url", "http://127.0.0.1:8099/v1"])
+        self.assertEqual(ctl.view()["bar"]["text"], "The Crow window is opening on Qwen3.8-27B.")
+
+    def test_stop_ends_the_point_and_the_window_goes_back_to_the_choice(self):
+        self.running_27b()
+        killed = []
+        ctl = self.controller(scan=lambda: [] if killed else [SERVE_LINE], kill=killed.append,
+                              alive=lambda pid: str(pid) not in killed)
+        ctl.refresh()
+        ctl.stop()
+        self.assertEqual(killed, ["7001"])
+        self.assertIsNone(self.contract())
+        v = ctl.view()
+        self.assertEqual(v["phase"], crow_boot_gui.IDLE)
+        self.assertIsNone(v["running"])
+
+    def test_a_llama_server_is_shown_as_its_line(self):
+        scan = lambda: [("6001", "llama-server.exe -m D:/m/Qwen3.8-27B-UD-Q4_K_XL.gguf --port 8082")]  # noqa: E731
+        ctl = self.controller(scan=scan, llama=FakeLlama([LLAMA_27B]))
+        ctl.refresh()
+        v = ctl.view()
+        self.assertEqual(v["running"]["title"], "Qwen3.8-27B-UD-Q4_K_XL (optional)")
+        self.assertEqual(v["running"]["detail"], "Running on port 8082. llama.cpp.")
+        self.assertEqual(len(v["rows"]), 3, "every baseline point is offered (and refused)")
+
+
+class State4OneModelAtATimeTests(GuiCase):
+    def test_a_second_start_is_refused_with_a_pointer_to_stop(self):
+        self.running_27b()
+        popen = FakePopen()
+        ctl = self.controller(popen=popen)
+        ctl.refresh()
+        ctl.start("flash-next")
+        v = ctl.view()
+        self.assertEqual(popen.calls, [], "nothing starts beside a running point")
+        self.assertEqual(v["say"], "One model at a time.")
+        self.assertEqual(v["warn"], {"title": "Flash-Next needs the card for itself.",
+                                     "detail": "Stop Qwen3.8-27B first, then start Flash-Next."})
+        self.assertEqual(v["running"]["title"], "Qwen3.8-27B")
+        self.assertEqual([r["title"] for r in v["rows"]], ["Qwen3.8-Flash-Next"])
+        self.assertTrue(v["bar"]["button"]["enabled"])
+
+    def test_boots_own_refusal_lands_in_the_same_state(self):
+        # Something started between the window's look and Boot's own check.
+        self.layout("27b")
+        looks = []
+
+        def scan():
+            looks.append(1)
+            return [] if len(looks) == 1 else [SERVE_LINE]
+        ctl = self.controller(scan=scan, point_for=lambda url, timeout=3.0: "image-stack")
+        ctl.start("27b")
+        v = ctl.view()
+        self.assertEqual(v["phase"], crow_boot_gui.REFUSED)
+        self.assertEqual(v["warn"]["detail"], "Stop Image Stack first, then start 27B.")
+
+
+class ThePageTests(unittest.TestCase):
+    def test_the_crow_is_inlined_and_the_page_draws_the_view(self):
+        with open(crow_boot_gui.PAGE_FILE, encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertIn(crow_boot_gui.LOGO_LINE, raw)
+        page = crow_boot_gui.page()
+        self.assertNotIn(crow_boot_gui.LOGO_LINE, page)
+        self.assertIn("var LOGO = 'data:image/svg+xml;base64,", page)
+        self.assertIn("CROW", page)
+        self.assertIn("Operating points", page)
+        self.assertIn("pywebview-drag-region", page)
+
+    def test_no_emoji_or_dash_in_what_the_window_says(self):
+        with open(crow_boot_gui.PAGE_FILE, encoding="utf-8") as fh:
+            raw = fh.read()
+        with open(crow_boot_gui.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        for text in (raw, src):
+            # ASCII only: no emoji, no em or en dash, in the page or its wording
+            self.assertEqual([c for c in text if ord(c) > 127], [])
+
+
+class FakeShell32:
+    def __init__(self):
+        self.ids = []
+
+    def SetCurrentProcessExplicitAppUserModelID(self, app_id):  # noqa: N802 - the Win32 name
+        self.ids.append(app_id)
+
+
+class TheCrowOnTheTaskbarTests(unittest.TestCase):
+    def test_the_window_has_its_own_id_not_the_chat_windows(self):
+        shell = FakeShell32()
+        self.assertTrue(crow_boot_gui.taskbar_identity(shell32=shell))
+        self.assertEqual(shell.ids, ["Crow.OperatingPoints"])
+        with open(os.path.join(str(HERE), "crow_gui.py"), encoding="utf-8") as fh:
+            self.assertIn('AppUserModelID("Crow.Window")', fh.read(),
+                          "the chat window's id, which this one must not share")
+
+    def test_the_icon_is_crow_guis(self):
+        import crow_gui
+        with mock.patch.object(crow_boot_gui.crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(crow_boot_gui.start_kwargs(crow_gui),
+                             {"gui": "gtk", "icon": crow_gui.icon_png(256) or None})
+            self.assertTrue(crow_gui.icon_png(256).endswith(os.path.join("icons", "crow-256.png")))
+            self.assertFalse(crow_boot_gui.dress_window(crow_gui))
+        with mock.patch.object(crow_boot_gui.crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(crow_boot_gui.start_kwargs(crow_gui), {})
+        self.assertTrue(os.path.isfile(crow_gui.ICON_FILE))
+
+    def test_dress_window_asks_shell_buttons_until_the_window_has_a_caption(self):
+        answers = iter([False, False, True])
+        asked = []
+        gui = mock.Mock(shell_buttons=lambda title: asked.append(title) or next(answers))
+        clock = iter(x * 0.2 for x in range(100))
+        with mock.patch.object(crow_boot_gui.crow_platform, "IS_WINDOWS", True):
+            done = crow_boot_gui.dress_window(gui, sleep=lambda s: None, clock=lambda: next(clock))
+        self.assertTrue(done)
+        self.assertEqual(asked, ["Crow", "Crow", "Crow"])
+
+
+class FakeWindow:
+    def __init__(self):
+        self.calls = []
+
+    def hide(self):
+        self.calls.append("hide")
+
+    def destroy(self):
+        self.calls.append("destroy")
+
+
+class ClosingTests(unittest.TestCase):
+    def test_closing_while_a_point_starts_hides_until_it_has_landed(self):
+        ctl = crow_boot_gui.Controller(crow_boot.Boot(STACK, "i", "m", llama=FakeLlama()))
+        api = crow_boot_gui.Api(ctl)
+        api._window = FakeWindow()
+        ctl.busy = True
+        api.close()
+        self.assertEqual(api._window.calls, ["hide"])
+        ctl.busy = False
+        for _ in range(40):
+            if "destroy" in api._window.calls:
+                break
+            crow_boot_gui.time.sleep(0.05)
+        self.assertEqual(api._window.calls, ["hide", "destroy"])
+
+    def test_closing_an_idle_window_closes_it(self):
+        ctl = crow_boot_gui.Controller(crow_boot.Boot(STACK, "i", "m", llama=FakeLlama()))
+        api = crow_boot_gui.Api(ctl)
+        api._window = FakeWindow()
+        api.close()
+        self.assertEqual(api._window.calls, ["destroy"])
+
+    def test_the_bridge_exposes_only_its_calls(self):
+        api = crow_boot_gui.Api(crow_boot_gui.Controller(
+            crow_boot.Boot(STACK, "i", "m", llama=FakeLlama())))
+        public = sorted(n for n in vars(api) if not n.startswith("_"))
+        self.assertEqual(public, [], "pywebview would expose these to the page")
+
+
+if __name__ == "__main__":
+    unittest.main()

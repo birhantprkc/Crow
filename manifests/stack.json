@@ -530,7 +530,8 @@
    "id": "flash-next",
    "menu": {
     "title": "Qwen3.8-Flash-Next",
-    "line": "200k context — great for coding & vision"
+    "line": "200k context — great for coding & vision",
+    "gui": "200k context. Great for coding and vision."
    },
    "files": [
     "fn-cnq",
@@ -614,7 +615,8 @@
    "id": "27b",
    "menu": {
     "title": "Qwen3.8-27B",
-    "line": "128k context — great speed, awesome for coding & vision"
+    "line": "128k context — great speed, awesome for coding & vision",
+    "gui": "128k context. Great speed, coding and vision."
    },
    "files": [
     "27b-cnq",
@@ -696,7 +698,8 @@
    "id": "image-stack",
    "menu": {
     "title": "Image Stack",
-    "line": "27B + Qwen-Image 2.1 — create AWESOME pictures"
+    "line": "27B + Qwen-Image 2.1 — create AWESOME pictures",
+    "gui": "27B with Qwen-Image 2.1. Create pictures."
    },
    "files": [
     "27b-cnq",
