@@ -3,13 +3,17 @@
 //! The shortcut is crow_boot's own (`crow_boot.py --create-shortcut DIR`: since
 //! #196's operating-point window, `pythonw.exe` beside the Python running
 //! `crow_boot.py --gui`, so no console opens; working folder the install root,
-//! cli/crow.ico), written once into each chosen folder and always into the Start
-//! menu (`%APPDATA%\Microsoft\Windows\Start Menu\Programs`).
+//! cli/crow.ico), written once into each folder the run passes -- the run adds
+//! the Start menu (`%APPDATA%\Microsoft\Windows\Start Menu\Programs`) when
+//! it is asked to, nothing here adds a folder behind its back (#196 P2-E2E).
 //! `--install-root <root>` is added only when the root is not the default
-//! `%LOCALAPPDATA%\Crow`; crow_boot then carries it into the shortcut's arguments.
+//! `%LOCALAPPDATA%\Crow`; `--models <root>\models` always, because the
+//! installer always puts the models there and `$CROW_MODELS` (a lab root for
+//! the llama.cpp lines) must not point the boot menu elsewhere. crow_boot
+//! carries both into the shortcut's arguments.
 //!
 //! `open_boot_menu` opens that window the way the shortcut does: `pythonw.exe
-//! <crow_boot.py> --gui [--install-root <root>]`, or the console Python without a
+//! <crow_boot.py> --gui [--install-root <root>] --models <root>\models`, or the console Python without a
 //! console window when no pythonw.exe sits beside it. The terminal menu stays
 //! `python cli\crow_boot.py`.
 
@@ -58,6 +62,11 @@ pub fn shortcut_args(script: &Path, install_root: &Path, dir: &Path, default_roo
     args
 }
 
+/// `--models <install>\models`: added to every crow_boot call the installer makes.
+pub fn models_flag(install_root: &Path) -> Vec<OsString> {
+    vec!["--models".into(), install_root.join("models").into_os_string()]
+}
+
 /// `pythonw.exe` beside `python` when it is there (the window needs no console), else `python`.
 pub fn windowed_python(python: &Path) -> PathBuf {
     match python.parent().map(|d| d.join("pythonw.exe")) {
@@ -86,9 +95,10 @@ pub fn shortcuts(py: &PythonInfo, install_root: &Path, dirs: &[PathBuf]) -> Resu
     let script = boot_script(install_root)?;
     let default = default_install_root();
     let mut failed = Vec::new();
-    for dir in shortcut_dirs(dirs, start_menu_dir()) {
+    for dir in shortcut_dirs(dirs, None) {
         let out = quiet(&py.exe)
             .args(shortcut_args(&script, install_root, &dir, default.as_deref()))
+            .args(models_flag(install_root))
             .current_dir(install_root)
             .output();
         match out {
@@ -108,7 +118,7 @@ pub fn open_boot_menu(py: &PythonInfo, install_root: &Path) -> Result<(), String
     let script = boot_script(install_root)?;
     let (program, args) = window_command(&py.exe, &script, install_root, default_install_root().as_deref());
     let mut cmd = Command::new(&program);
-    cmd.args(&args).current_dir(install_root);
+    cmd.args(&args).args(models_flag(install_root)).current_dir(install_root);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

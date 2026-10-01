@@ -135,10 +135,12 @@ fn js_event(e: &CoreEvent) -> String {
 fn spawn_worker(s: &Setup, proxy: EventLoopProxy<UserEvent>) -> Sender<Input> {
     let (tx, rx) = std::sync::mpsc::channel();
     let (source, packages, opts) = (s.source.clone(), s.packages.clone(), s.opts.clone());
+    let package_source = s.package_source.clone();
     std::thread::spawn(move || {
         let p2 = proxy.clone();
         let res = catch_unwind(AssertUnwindSafe(|| {
-            let mut steps = run::RealSteps::new(source, packages, crate::bundle::PYTHON_ZIP, crate::bundle::GET_PIP);
+            let mut steps = run::RealSteps::new(source, packages, crate::bundle::PYTHON_ZIP, crate::bundle::GET_PIP)
+                .with_package_source(package_source);
             run::run(&mut steps, &opts, &mut |e| {
                 let _ = p2.send_event(UserEvent::Js(js_event(&e)));
             }, rx)
@@ -364,6 +366,22 @@ mod tests {
     #[test]
     fn the_page_is_whole() {
         check_page().unwrap();
+    }
+
+    /// #196 P2-E2E fix 6: a JS error or an unhandled promise rejection reaches
+    /// the exe's stderr log, from a script of its own ahead of the page's, so a
+    /// syntax error in the page's script is reported too.
+    #[test]
+    fn errors_and_rejections_reach_the_log_before_the_main_script() {
+        let p = page();
+        let start = p.find("<script>").expect("a script");
+        let block = &p[start..start + p[start..].find("</script>").expect("its end")];
+        assert!(
+            block.contains("window.onerror") && block.contains("unhandledrejection") && block.contains("ipc.postMessage"),
+            "the first script does not forward errors: {}",
+            &block[..block.len().min(120)]
+        );
+        assert!(!block.contains("window.crow"), "the forwarder must stand before the page's script");
     }
 
     #[test]

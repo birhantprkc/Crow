@@ -106,3 +106,55 @@ fn the_default_root_opens_the_window_without_a_root_flag() {
     assert_eq!(prog, py);
     assert_eq!(strs(&args), vec![script.to_string_lossy().into_owned(), "--gui".into()]);
 }
+
+/// A stand-in Python: a batch file that appends its arguments to `args.txt`.
+fn recording_python(dir: &Path) -> (PathBuf, PathBuf) {
+    let log = dir.join("args.txt");
+    let bat = dir.join("python.bat");
+    fs::write(&bat, format!("@echo off\r\necho %*>>\"{}\"\r\n", log.display())).unwrap();
+    (bat, log)
+}
+
+fn fake_install(dir: &Path) -> PathBuf {
+    let root = dir.join("Crow Root");
+    fs::create_dir_all(root.join("cli")).unwrap();
+    fs::write(root.join("cli").join("crow_boot.py"), b"").unwrap();
+    root
+}
+
+/// #196 P2-E2E fixes 1 and 3: each shortcut is written with `--models
+/// <install>\models` (so `$CROW_MODELS` cannot point the boot menu elsewhere),
+/// and only into the folders the run asks for -- the Start menu is the run's
+/// choice (`RunOptions::start_menu_dir`), not added here behind its back.
+#[cfg(windows)]
+#[test]
+fn shortcuts_carry_the_models_root_and_go_only_where_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (bat, log) = recording_python(tmp.path());
+    let root = fake_install(tmp.path());
+    let links = tmp.path().join("links");
+    let py = crowsetup_core::python::PythonInfo { exe: bat, ..Default::default() };
+    finish::shortcuts(&py, &root, std::slice::from_ref(&links)).unwrap();
+    let calls: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
+    assert_eq!(calls.len(), 1, "one shortcut per asked folder, no Start menu added: {calls:?}");
+    let models = root.join("models").to_string_lossy().into_owned();
+    assert!(calls[0].contains("--models") && calls[0].contains(&models), "{calls:?}");
+}
+
+/// #196 P2-E2E fix 1: the boot menu button hands on the models root too.
+#[cfg(windows)]
+#[test]
+fn the_boot_menu_button_carries_the_models_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (bat, log) = recording_python(tmp.path());
+    let root = fake_install(tmp.path());
+    let py = crowsetup_core::python::PythonInfo { exe: bat, ..Default::default() };
+    finish::open_boot_menu(&py, &root).unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !log.exists() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let call = fs::read_to_string(&log).unwrap();
+    let models = root.join("models").to_string_lossy().into_owned();
+    assert!(call.contains("--gui") && call.contains("--models") && call.contains(&models), "{call}");
+}
