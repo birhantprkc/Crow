@@ -339,5 +339,38 @@ class ClosingTests(unittest.TestCase):
         self.assertEqual(public, [], "pywebview would expose these to the page")
 
 
+class TheWindowStartsNoConsoleTests(unittest.TestCase):
+    """robin's live test 2026-10-01: under pythonw every helper the window
+    polls (the process scan every 5 s, taskkill on Stop, nvidia-smi) opened its
+    own console window in the foreground. Each helper must ask for none."""
+
+    def test_the_process_scan_asks_windows_for_no_console(self):
+        import crow_platform
+        import subprocess
+        seen = {}
+
+        def run(argv, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True), \
+                mock.patch.object(crow_platform.subprocess, "run", run):
+            crow_platform._run_query(["powershell", "-Command", "x"])
+        flags = seen.get("creationflags", 0)
+        self.assertTrue(flags & 0x08000000, "the scan runs without CREATE_NO_WINDOW")
+
+    def test_every_helper_crow_platform_runs_passes_the_no_console_keywords(self):
+        import ast
+        import crow_platform
+        tree = ast.parse(Path(crow_platform.__file__).read_text(encoding="utf-8"))
+        bare = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "run" and getattr(node.func.value, "id", "") == "subprocess"):
+                kws = {k.arg for k in node.keywords}
+                if None not in kws and "creationflags" not in kws:
+                    bare.append(node.lineno)
+        self.assertEqual(bare, [], "subprocess.run without **no_console_kwargs() at these lines")
+
+
 if __name__ == "__main__":
     unittest.main()

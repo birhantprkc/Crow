@@ -421,7 +421,7 @@ def _run_query(argv: list[str]) -> str:
     # because listing the processes had already swallowed it.
     done = subprocess.run(argv, capture_output=True, text=True,
                           stdin=subprocess.DEVNULL,
-                          encoding="utf-8", errors="replace", timeout=60)
+                          encoding="utf-8", errors="replace", timeout=60, **no_console_kwargs())
     return done.stdout if done.returncode == 0 else ""
 
 
@@ -472,6 +472,20 @@ def find_servers(query=None, proc_root: str = "/proc") -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------- spawning and killing ---
+
+def no_console_kwargs() -> dict:
+    """The subprocess.run keywords for a short helper (a query, taskkill).
+
+    The owner's live test 2026-10-01: the operating-point window runs under
+    pythonw, which has no console, so every console program it started (the
+    process scan every 5 s, taskkill on Stop, nvidia-smi) opened a console
+    window of its own in the foreground. CREATE_NO_WINDOW starts it without one.
+    Linux: nothing to do.
+    """
+    if IS_WINDOWS:
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
 
 def spawn_kwargs(detached: bool = True) -> dict:
     r"""The Popen keywords that keep a server out of the console that bore it.
@@ -676,7 +690,7 @@ def _systemd_version(run: str) -> int:
     if run not in _SYSTEMD_VERSIONS:
         try:
             first = subprocess.run([run, "--version"], capture_output=True, text=True,
-                                   timeout=5, stdin=subprocess.DEVNULL).stdout.split()
+                                   timeout=5, stdin=subprocess.DEVNULL, **no_console_kwargs()).stdout.split()
             _SYSTEMD_VERSIONS[run] = int(first[1]) if first[:1] == ["systemd"] else 0
         except (OSError, subprocess.SubprocessError, ValueError, IndexError):
             _SYSTEMD_VERSIONS[run] = 0
@@ -821,7 +835,7 @@ def _systemctl_user(*args: str) -> str:
         return ""
     try:
         return subprocess.run([ctl, "--user", *args], capture_output=True, text=True,
-                              timeout=5, stdin=subprocess.DEVNULL).stdout
+                              timeout=5, stdin=subprocess.DEVNULL, **no_console_kwargs()).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -1019,7 +1033,7 @@ def kill_pid(pid) -> bool:
     if IS_WINDOWS:
         subprocess.run(["taskkill", "/PID", str(number), "/F"],
                        capture_output=True, stdin=subprocess.DEVNULL,
-                       timeout=30)
+                       timeout=30, **no_console_kwargs())
         return True
     import signal
     try:
@@ -1086,7 +1100,7 @@ def kill_tree(pid) -> bool:
     try:
         done = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
                               capture_output=True, stdin=subprocess.DEVNULL,
-                              timeout=30)
+                              timeout=30, **no_console_kwargs())
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return done.returncode == 0
@@ -1282,7 +1296,7 @@ def gpu_free_mib(query=None) -> "int | None":
                     [exe, "--query-gpu=memory.free",
                      "--format=csv,noheader,nounits"],
                     capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                    timeout=10)
+                    timeout=10, **no_console_kwargs())
             except (OSError, subprocess.SubprocessError):
                 return ""
             return done.stdout if done.returncode == 0 else ""
@@ -1317,7 +1331,7 @@ def gpu_card(query=None) -> "tuple[str, int] | None":
                     [exe, "--query-gpu=name,memory.total",
                      "--format=csv,noheader,nounits"],
                     capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                    timeout=10)
+                    timeout=10, **no_console_kwargs())
             except (OSError, subprocess.SubprocessError):
                 return ""
             return done.stdout if done.returncode == 0 else ""

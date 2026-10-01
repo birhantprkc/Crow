@@ -133,6 +133,16 @@ enum UserEvent {
     Ipc(String),
     WorkerDone,
     ForceExit,
+    /// The boot menu opened; Setup's job is done, so its window goes.
+    CloseAfterBootMenu,
+}
+
+/// The owner's live test 2026-10-01: after "Open boot menu" opened the
+/// operating-point window, Setup's "Landed" window stayed. Once the boot menu
+/// opened, Setup closes the way "X" does (the run saves and ends); a failed
+/// open keeps the window and its error row.
+pub(crate) fn closes_after(e: &CoreEvent) -> bool {
+    matches!(e, CoreEvent::Step { name, status: crowsetup_core::api::StepStatus::Ok, .. } if name == "boot_menu")
 }
 
 fn js_event(e: &CoreEvent) -> String {
@@ -150,6 +160,9 @@ fn spawn_worker(s: &Setup, proxy: EventLoopProxy<UserEvent>) -> Sender<Input> {
                 .with_package_source(package_source);
             run::run(&mut steps, &opts, &mut |e| {
                 let _ = p2.send_event(UserEvent::Js(js_event(&e)));
+                if closes_after(&e) {
+                    let _ = p2.send_event(UserEvent::CloseAfterBootMenu);
+                }
             }, rx)
         }));
         if let Err(p) = res {
@@ -364,6 +377,7 @@ pub fn main(s: Setup) -> ! {
                 }
             }
             Event::UserEvent(UserEvent::ForceExit) => app.exit(cf),
+            Event::UserEvent(UserEvent::CloseAfterBootMenu) => app.close(cf),
             _ => {}
         }
     })
@@ -413,5 +427,23 @@ mod tests {
     fn a_picked_drive_gets_a_crow_folder() {
         assert_eq!(install_dir(Path::new(r"D:\")), PathBuf::from(r"D:\Crow"));
         assert_eq!(install_dir(Path::new(r"D:\Apps\crow")), PathBuf::from(r"D:\Apps\crow"));
+    }
+}
+
+#[cfg(test)]
+mod close_after_boot_menu {
+    use super::closes_after;
+    use crowsetup_core::api::{Event, StepStatus};
+
+    fn step(name: &str, status: StepStatus) -> Event {
+        Event::Step { name: name.into(), status, detail: String::new() }
+    }
+
+    #[test]
+    fn setup_closes_once_the_boot_menu_opened_and_not_otherwise() {
+        assert!(closes_after(&step("boot_menu", StepStatus::Ok)));
+        assert!(!closes_after(&step("boot_menu", StepStatus::Failed)), "a failed open keeps the error visible");
+        assert!(!closes_after(&step("shortcuts", StepStatus::Ok)));
+        assert!(!closes_after(&Event::Done { installed: vec![], shortcut: None }));
     }
 }
