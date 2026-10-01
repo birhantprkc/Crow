@@ -17,8 +17,14 @@
 //! real one.
 //!
 //! RESUME: a file whose state says `verified` is not fetched again when its
-//! destination exists, or when the convert step is done (convert deletes the
-//! image stack's `text_encoder/`, which the state still lists as verified).
+//! destination exists, or, once the convert step is done, when it is one of
+//! the convert's INPUTS (convert deletes the image stack's `text_encoder/`,
+//! which the state still lists as verified). Any other verified file that is
+//! gone is fetched again.
+//!
+//! THE PACKAGE ZIPS are deleted after Done (an update fetches the new ones);
+//! a failed or interrupted install keeps them for the resume. A package whose
+//! install step (`crow:<sha256>`) is done is not fetched again.
 //! Install steps are recorded in `steps_done`: `crow:<sha256>` and
 //! `engine:<sha256>` (a new package re-installs), `convert`, `shortcuts`,
 //! `done`. Python and the check step always run: both are idempotent and the
@@ -50,6 +56,8 @@ pub trait Steps {
     fn save_state(&mut self, state: &StateStore) -> std::io::Result<()>;
     /// Whether a fetched file is still on disk (its final `dest`).
     fn present(&mut self, job: &FileJob) -> bool;
+    /// Delete a fetched file that is no longer needed (the package zips after Done).
+    fn discard(&mut self, job: &FileJob);
     /// Free bytes on the drive that holds `dir` (or its nearest existing
     /// ancestor); 0 when unknown.
     fn disk_free(&mut self, dir: &Path) -> u64;
@@ -113,12 +121,12 @@ pub fn state_path(launch_root: &Path) -> PathBuf {
     launch_root.join("setup").join("state.json")
 }
 
-/// `${MODELS}`: `$CROW_MODELS` when set, else `<install>/models` (stack.json).
+/// `${MODELS}` for the installer: always `<install>/models`. `$CROW_MODELS` is
+/// a lab root for Crow's optional llama.cpp lines and never redirects an
+/// install; the shortcuts and the boot menu button hand `--models` to
+/// crow_boot, so the boot menu finds these files whatever it says (#196 P2-E2E).
 pub fn models_root(install_root: &Path) -> PathBuf {
-    match std::env::var_os("CROW_MODELS") {
-        Some(m) if !m.is_empty() => PathBuf::from(m),
-        _ => install_root.join("models"),
-    }
+    install_root.join("models")
 }
 
 /// Decimal GB with one digit, MB below 1 GB (the UI's sizes).
@@ -249,6 +257,8 @@ struct Runner<'a> {
     opts: &'a RunOptions,
     ctl: Arc<Control>,
     state: StateStore,
+    /// Ids of the convert step's inputs (the files it deletes).
+    inputs: std::collections::BTreeSet<String>,
 }
 
 /// Run the whole install. Returns when Done was emitted and the input channel
@@ -257,7 +267,7 @@ pub fn run(steps: &mut dyn Steps, opts: &RunOptions, on: &mut dyn FnMut(Event), 
     let ctl = Arc::new(Control { cancel: AtomicBool::new(false), ctl: Mutex::default(), cv: Condvar::new() });
     ctl.listen(inputs);
     let state = StateStore { path: opts.state_path.clone(), ..StateStore::default() };
-    let mut r = Runner { steps, on, opts, ctl, state };
+    let mut r = Runner { steps, on, opts, ctl, state, inputs: Default::default() };
     match r.go() {
         Ok(()) => Outcome::Done,
         Err(Stop::Quit) => {
@@ -289,6 +299,18 @@ impl Runner<'_> {
 
     fn done(&self, step: &str) -> bool {
         self.state.steps_done.iter().any(|s| s == step)
+    }
+
+    /// A fetched file is had when it is on disk, or when it is a convert input
+    /// and the convert step (which deletes its inputs) is done.
+    fn have(&mut self, job: &FileJob) -> bool {
+        (self.done("convert") && self.inputs.contains(&job.id)) || self.steps.present(job)
+    }
+
+    /// `crow:<sha256>` / `engine:<sha256>`: the install step of a package job.
+    fn install_key(job: &FileJob) -> String {
+        let name = if job.kind == FileKind::CrowPackage { "crow" } else { "engine" };
+        format!("{name}:{}", job.sha256)
     }
 
     fn mark(&mut self, step: &str) {
@@ -348,20 +370,28 @@ impl Runner<'_> {
         self.save();
 
         let plan = self.steps.plan(&sel).map_err(Stop::Fatal)?;
+        self.inputs = plan.derived.iter().flat_map(|d| d.inputs.iter().cloned()).collect();
         self.emit(Event::Planned(plan.clone()));
         let root = sel.install_root.clone();
         let models = models_root(&root);
         self.disk_check(&plan, &root)?;
 
-        // The two packages, then Crow, then the engine.
-        let packages: Vec<&FileJob> =
-            plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::CrowPackage | FileKind::EnginePackage)).collect();
+        // The two packages, then Crow, then the engine. An installed package is
+        // not fetched again (its zip is deleted after Done).
+        let mut packages: Vec<&FileJob> = Vec::new();
+        for j in plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::CrowPackage | FileKind::EnginePackage)) {
+            if self.done(&Self::install_key(j)) {
+                self.emit(Event::FileVerified { id: j.id.clone() });
+            } else {
+                packages.push(j);
+            }
+        }
         self.fetch_all(&packages)?;
         for (kind, name) in [(FileKind::CrowPackage, "crow"), (FileKind::EnginePackage, "engine")] {
             let Some(job) = plan.jobs.iter().find(|j| j.kind == kind) else {
                 return Err(Stop::Fatal(format!("The plan carries no {name} package.")));
             };
-            let key = format!("{name}:{}", job.sha256);
+            let key = Self::install_key(job);
             if self.done(&key) {
                 self.step_event(name, StepStatus::Ok, "Installed.");
                 continue;
@@ -435,6 +465,9 @@ impl Runner<'_> {
         }
 
         self.mark("done");
+        for job in plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::CrowPackage | FileKind::EnginePackage)) {
+            self.steps.discard(job);
+        }
         self.emit(Event::Done { installed: sel.points.clone(), shortcut: shortcut.clone() });
         self.after_done(&py, &root, shortcut);
         Ok(())
@@ -450,7 +483,9 @@ impl Runner<'_> {
         let mut had: u64 = if converted { plan.derived.iter().map(|d| d.bytes).sum() } else { 0 };
         for job in &plan.jobs {
             let fs = self.state.files.get(&job.id).cloned().unwrap_or_default();
-            had += if fs.verified && (converted || self.steps.present(job)) { job.bytes } else { fs.bytes_done };
+            let installed = matches!(job.kind, FileKind::CrowPackage | FileKind::EnginePackage)
+                && self.done(&Self::install_key(job));
+            had += if installed || (fs.verified && self.have(job)) { job.bytes } else { fs.bytes_done };
         }
         let need = peak.saturating_sub(had);
         let free = self.steps.disk_free(root);
@@ -544,7 +579,7 @@ impl Runner<'_> {
 
     fn fetch_one(&mut self, job: &FileJob) -> Result<FileResult, Stop> {
         let known = self.state.files.get(&job.id).cloned().unwrap_or_default();
-        if known.verified && (self.steps.present(job) || self.done("convert")) {
+        if known.verified && self.have(job) {
             self.emit(Event::FileVerified { id: job.id.clone() });
             return Ok(FileResult::Ok);
         }
@@ -625,6 +660,9 @@ pub struct RealSteps {
     pub packages: Packages,
     pub python_zip: Option<&'static [u8]>,
     pub get_pip: Option<&'static [u8]>,
+    /// `--package-source`: Crow's package and the engine package come from
+    /// `<dir>/<asset>`, every other file from `source`.
+    pub package_source: Option<PathBuf>,
     stack: Option<crate::stack::Stack>,
 }
 
@@ -635,7 +673,12 @@ impl RealSteps {
         python_zip: Option<&'static [u8]>,
         get_pip: Option<&'static [u8]>,
     ) -> RealSteps {
-        RealSteps { source, packages, python_zip, get_pip, stack: None }
+        RealSteps { source, packages, python_zip, get_pip, package_source: None, stack: None }
+    }
+
+    pub fn with_package_source(mut self, dir: Option<PathBuf>) -> RealSteps {
+        self.package_source = dir;
+        self
     }
 
     fn stack(&mut self) -> &crate::stack::Stack {
@@ -670,6 +713,10 @@ impl Steps for RealSteps {
     fn present(&mut self, job: &FileJob) -> bool {
         job.dest.is_file()
     }
+    fn discard(&mut self, job: &FileJob) {
+        // a zip that cannot be deleted costs disk, not the install
+        let _ = std::fs::remove_file(&job.dest);
+    }
     fn disk_free(&mut self, dir: &Path) -> u64 {
         crate::preflight::disk_free(dir)
     }
@@ -680,6 +727,12 @@ impl Steps for RealSteps {
         on: &mut dyn FnMut(Event),
         cancel: &AtomicBool,
     ) -> Result<(), FetchError> {
+        if let (FileKind::CrowPackage | FileKind::EnginePackage, Some(dir)) = (job.kind, &self.package_source) {
+            // same .part, resume and sha256 rules, from <dir>/<asset>
+            let mut local = job.clone();
+            local.local_rel = job.dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return crate::fetch::download(&local, state, &FetchOptions::production(Source::Local(dir.clone())), on, cancel);
+        }
         crate::fetch::download(job, state, &self.fetch_options(), on, cancel)
     }
     fn install_crow(&mut self, zip: &Path, install_root: &Path) -> Result<String, String> {
@@ -801,6 +854,9 @@ pub mod testing {
         }
         if has("image-stack") {
             jobs.push(job("qi-transformer", FileKind::Model, 1400, &["image-stack"], root));
+            // The convert input (upstream text_encoder/); size 0 keeps the
+            // tests' disk arithmetic as it was before the fake had one.
+            jobs.push(job("qi-text-encoder", FileKind::Model, 0, &["image-stack"], root));
         }
         if has("flash-next") {
             jobs.push(job("fn-cnq", FileKind::Model, 10560, &["flash-next"], root));
@@ -811,6 +867,7 @@ pub mod testing {
                 dest: root.join("fake").join("sdcli"),
                 bytes: 1750,
                 points: vec!["image-stack".into()],
+                inputs: vec!["qi-text-encoder".into()],
             }]
         } else {
             vec![]
@@ -876,6 +933,9 @@ pub mod testing {
         fn present(&mut self, job: &FileJob) -> bool {
             self.shared.lock().unwrap().present.contains(&job.id)
         }
+        fn discard(&mut self, job: &FileJob) {
+            self.shared.lock().unwrap().present.remove(&job.id);
+        }
         fn disk_free(&mut self, _dir: &Path) -> u64 {
             self.shared.lock().unwrap().disk_free.unwrap_or(1 << 40)
         }
@@ -940,7 +1000,10 @@ pub mod testing {
             self.step("python", "python").map(|_| python())
         }
         fn convert(&mut self, _py: &PythonInfo, _root: &Path, _models: &Path) -> Result<(), String> {
-            self.step("convert", "convert")
+            self.step("convert", "convert")?;
+            // like te_rename + the delete: the input is gone, its state stays verified
+            self.shared.lock().unwrap().present.remove("qi-text-encoder");
+            Ok(())
         }
         fn check_point(&mut self, _py: &PythonInfo, _root: &Path, _models: &Path, point: &str) -> Result<(), String> {
             self.step(&format!("check {point}"), "check")

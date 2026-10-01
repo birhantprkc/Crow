@@ -101,6 +101,20 @@ button.sec:hover{color:var(--soft)}
   <div class="center" id="center"></div>
 </div>
 <script>
+// Ahead of the page's script, so its syntax errors are reported too: every
+// error and unhandled promise rejection goes to the exe's stderr log (ui: ...).
+(function () {
+  function log(msg) { try { window.ipc.postMessage(JSON.stringify({ type: 'log', msg: msg })); } catch (e) { /* no bridge */ } }
+  window.onerror = function (msg, src, line, col, err) {
+    log('error: ' + msg + ' @' + (src || 'page') + ':' + line + ':' + col + (err && err.stack ? ' ' + err.stack : ''));
+  };
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    log('unhandled rejection: ' + (r && r.stack ? r.stack : String(r)));
+  });
+})();
+</script>
+<script>
 (function () {
   'use strict';
   var LOGO = '../../cli/mark-on-dark.svg';
@@ -119,7 +133,6 @@ button.sec:hover{color:var(--soft)}
   };
 
   function send(o) { try { window.ipc.postMessage(JSON.stringify(o)); } catch (e) { /* no bridge */ } }
-  window.addEventListener('error', function (e) { send({ type: 'log', msg: String(e.message) + ' @' + e.lineno + ':' + e.colno }); });
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {

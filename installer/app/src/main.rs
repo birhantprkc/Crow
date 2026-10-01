@@ -21,6 +21,8 @@ use std::path::PathBuf;
 /// Everything a real run needs, from the command line and the bundle.
 pub struct Setup {
     pub source: Source,
+    /// `--package-source`: the two release zips from this folder.
+    pub package_source: Option<PathBuf>,
     pub packages: Packages,
     pub opts: RunOptions,
     pub desktop: Option<PathBuf>,
@@ -29,6 +31,7 @@ pub struct Setup {
 impl Setup {
     pub fn steps(&self) -> RealSteps {
         RealSteps::new(self.source.clone(), self.packages.clone(), bundle::PYTHON_ZIP, bundle::GET_PIP)
+            .with_package_source(self.package_source.clone())
     }
 }
 
@@ -57,13 +60,17 @@ fn setup(args: &cli::Args) -> Result<Setup, String> {
         Some(d) => return Err(format!("--source {}: not a folder", d.display())),
         None => Source::Remote,
     };
-    let launch_root = args.install_root.clone().unwrap_or_else(default_install_root);
-    let opts = RunOptions {
-        state_path: state_path(&launch_root),
-        launch_root,
-        start_menu_dir: folders::start_menu_programs(),
+    let package_source = match &args.package_source {
+        Some(d) if d.is_dir() => Some(d.clone()),
+        Some(d) => return Err(format!("--package-source {}: not a folder", d.display())),
+        None => None,
     };
-    Ok(Setup { source, packages, opts, desktop: folders::desktop() })
+    let launch_root = args.install_root.clone().unwrap_or_else(default_install_root);
+    let root_is_default = crowsetup_core::finish::same_path(&launch_root, &default_install_root());
+    let (desktop, start_menu_dir) =
+        cli::shortcut_targets(args, root_is_default, folders::desktop(), folders::start_menu_programs());
+    let opts = RunOptions { state_path: state_path(&launch_root), launch_root, start_menu_dir };
+    Ok(Setup { source, package_source, packages, opts, desktop })
 }
 
 fn fail(msg: &str) -> i32 {

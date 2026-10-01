@@ -708,6 +708,39 @@ class ThePlanAsJsonTests(BootCase):
             self.assertEqual(cm.exception.code, 2)
 
 
+class TheModelsFlagLeavesALabRootAloneTests(BootCase):
+    """#196 P2-E2E: CrowSetup always installs into <install>/models and hands
+    `--models` to every call. A CROW_MODELS the user set (a lab root for the
+    llama.cpp lines) stays theirs; without one, `--models` serves both kinds."""
+
+    def run_main(self, argv, crow_models):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ), mock.patch.object(sys, "stdout", out), \
+                mock.patch.object(sys, "stderr", io.StringIO()):
+            os.environ.pop("CROW_MODELS", None)
+            if crow_models:
+                os.environ["CROW_MODELS"] = crow_models
+            code = crow_boot.main(argv)
+            after = os.environ.get("CROW_MODELS")
+        return code, json.loads(out.getvalue()), after
+
+    def argv(self):
+        return ["--install-root", self.install, "--models", self.models, "--plan", "27b", "--json"]
+
+    def test_a_lab_root_stays_for_the_llama_lines(self):
+        lab = os.path.join(self.tmp, "lab-models")
+        code, doc, after = self.run_main(self.argv(), lab)
+        self.assertEqual(code, 0)
+        self.assertEqual(doc["models_root"], self.models, "the baseline points use --models")
+        self.assertEqual(after, lab, "--models overwrote the user's CROW_MODELS")
+
+    def test_without_one_the_models_root_serves_both(self):
+        code, doc, after = self.run_main(self.argv(), None)
+        self.assertEqual(code, 0)
+        self.assertEqual(doc["models_root"], self.models)
+        self.assertEqual(after, self.models)
+
+
 class TheWindowsHooksTests(BootCase):
     """#196, the operating-point window: its Cancel button and its stage line
     reach Boot through `cancelled` and `on_stage`; the menu passes neither."""

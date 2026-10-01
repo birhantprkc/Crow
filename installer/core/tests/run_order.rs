@@ -158,7 +158,8 @@ fn resume_skips_done_steps_and_files() {
     assert_eq!(out, Outcome::Done);
     let log = f.log();
     let downloads: Vec<&String> = log.iter().filter(|l| l.starts_with("download")).collect();
-    assert!(downloads.is_empty(), "convert done: verified inputs count as consumed, got {downloads:?}");
+    // Convert done: its verified inputs count as consumed, the 27B container does not (#196 P2-E2E fix 4).
+    assert_eq!(downloads, vec!["download 27b-cnq from 1880"], "only the missing container is fetched again");
     assert!(!log.iter().any(|l| l.starts_with("install") || l == "convert"), "{log:?}");
     assert!(log.iter().any(|l| l == "python"), "python always runs: {log:?}");
     assert!(log.iter().any(|l| l == "check 27b") && log.iter().any(|l| l == "check image-stack"));
@@ -417,4 +418,54 @@ fn package_steps_show_the_summary_as_it_is() {
     };
     assert_eq!(ok("crow").as_deref(), Some("Crow 3.0.0 installed (60 files)."));
     assert_eq!(ok("engine").as_deref(), Some("Engine 0.9.0 installed (4 files)."));
+}
+
+/// #196 P2-E2E fix 4: after convert only the convert INPUTS count as consumed
+/// when missing; any other verified file that is gone is fetched again.
+#[test]
+fn after_convert_a_missing_non_input_file_is_fetched_again() {
+    let f = FakeSteps::default();
+    let sel = selection(&["image-stack"], &root());
+    run_once(&mut f.clone(), &sel);
+    {
+        let mut sh = f.shared.lock().unwrap();
+        sh.log.clear();
+        sh.saved.as_mut().unwrap().steps_done.retain(|x| x != "done");
+        sh.present.remove("qi-transformer");
+    }
+    let (out, _) = run_once(&mut f.clone(), &sel);
+    assert_eq!(out, Outcome::Done);
+    let log = f.log();
+    let dl: Vec<&String> = log.iter().filter(|l| l.starts_with("download")).collect();
+    assert_eq!(dl, vec!["download qi-transformer from 1400"], "{log:?}");
+}
+
+/// #196 P2-E2E fix 5: after a successful install the two package zips are
+/// deleted (an update fetches the new ones); a finished install does not
+/// fetch them again for a re-run.
+#[test]
+fn a_successful_install_deletes_the_package_zips() {
+    let f = FakeSteps::default();
+    let sel = selection(&["27b"], &root());
+    assert_eq!(run_once(&mut f.clone(), &sel).0, Outcome::Done);
+    {
+        let sh = f.shared.lock().unwrap();
+        assert!(!sh.present.contains("crow-package") && !sh.present.contains("engine-package"), "{:?}", sh.present);
+        assert!(sh.present.contains("27b-cnq"));
+    }
+    f.shared.lock().unwrap().log.clear();
+    assert_eq!(run_once(&mut f.clone(), &sel).0, Outcome::Done);
+    let log = f.log();
+    assert!(!log.iter().any(|l| l.starts_with("download") || l.starts_with("install")), "{log:?}");
+}
+
+/// #196 P2-E2E fix 5: a failed install keeps the zips for the resume.
+#[test]
+fn a_failed_install_keeps_the_package_zips() {
+    let f = FakeSteps::default();
+    f.shared.lock().unwrap().fail_step.insert("check".into(), 1);
+    let (out, _) = run_once(&mut f.clone(), &selection(&["27b"], &root()));
+    assert!(matches!(out, Outcome::Fatal(_)), "{out:?}");
+    let sh = f.shared.lock().unwrap();
+    assert!(sh.present.contains("crow-package") && sh.present.contains("engine-package"), "{:?}", sh.present);
 }

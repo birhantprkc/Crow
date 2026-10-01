@@ -7,6 +7,15 @@
 //! ureq has no per-read timeout (`timeout_recv_body` is a total budget), so each
 //! attempt runs in a worker thread and the caller watches the channel for
 //! stalls and `cancel`.
+//!
+//! IP FAMILY (#196 P2-E2E): on the owner's machine Hugging Face over IPv6
+//! accepts the TCP connection and then resets it (os error 10054, 15 of 15
+//! attempts) while IPv4 answers. ureq moves to the next resolved address only
+//! when a connect fails, not when an accepted connection is reset, so a request
+//! that fails before any response flips the family for the next attempt:
+//! any -> IPv4 only (ureq `IpFamily::Ipv4Only`) -> any. The family that got a
+//! response is kept, for the rest of this download and for the later files of
+//! the same run (a process-wide flag). IPv4-only is never the starting default.
 
 use crate::api::{Event, FileJob, Source};
 use crate::state::StateStore;
@@ -15,6 +24,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The family the next request uses: false = any (IPv6 first where the
+/// resolver says so), true = IPv4 only. See the module docs.
+static IPV4_ONLY: AtomicBool = AtomicBool::new(false);
+
+fn family_name(v4: bool) -> &'static str {
+    if v4 { "IPv4" } else { "IPv4/IPv6" }
+}
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
@@ -316,12 +333,14 @@ impl Cx<'_> {
     /// Unbounded retries with backoff 1, 2, 4, ... s capped at
     /// `max_backoff_secs`; the backoff restarts after an attempt that moved.
     fn remote(&mut self, part: &mut Part) -> Result<(), FetchError> {
-        let agent = agent(self.opts);
+        // one agent per family; the attempt picks by IPV4_ONLY
+        let agents = [agent(self.opts, false), agent(self.opts, true)];
         let mut fails: u32 = 0;
         loop {
             cancelled(self.cancel)?;
             let before = part.done;
-            match self.attempt(&agent, part) {
+            let v4 = IPV4_ONLY.load(Ordering::SeqCst);
+            match self.attempt(&agents[usize::from(v4)], part) {
                 Ok(()) => return Ok(()),
                 Err(Stop::Fatal(e)) => return Err(e),
                 Err(Stop::Retry(reason)) => {
@@ -415,6 +434,16 @@ impl Cx<'_> {
                 }
                 Msg::End => return Ok(()),
                 Msg::Fail(reason) => return Err(Stop::Retry(reason)),
+                Msg::NoResponse(reason) => {
+                    // flip only if no other download flipped it meanwhile
+                    let was = IPV4_ONLY.load(Ordering::SeqCst);
+                    let _ = IPV4_ONLY.compare_exchange(was, !was, Ordering::SeqCst, Ordering::SeqCst);
+                    return Err(Stop::Retry(format!(
+                        "{reason} (over {}); next attempt over {}",
+                        family_name(was),
+                        family_name(!was)
+                    )));
+                }
             }
         }
     }
@@ -477,7 +506,7 @@ impl Part {
     }
 }
 
-fn agent(opts: &FetchOptions) -> ureq::Agent {
+fn agent(opts: &FetchOptions, ipv4_only: bool) -> ureq::Agent {
     let t = Some(Duration::from_secs(opts.stall_secs.max(1)));
     ureq::Agent::config_builder()
         .max_redirects(0)
@@ -487,6 +516,7 @@ fn agent(opts: &FetchOptions) -> ureq::Agent {
         .timeout_connect(t)
         .timeout_send_request(t)
         .timeout_recv_response(t)
+        .ip_family(if ipv4_only { ureq::config::IpFamily::Ipv4Only } else { ureq::config::IpFamily::Any })
         .build()
         .new_agent()
 }
@@ -501,6 +531,9 @@ enum Msg {
     Data(Vec<u8>),
     End,
     Fail(String),
+    /// The request failed before any response (connect, TLS, reset): the
+    /// next attempt tries the other IP family.
+    NoResponse(String),
 }
 
 fn spawn_request(
@@ -534,7 +567,7 @@ fn request_worker(
         let resp = match req.call() {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.send(Msg::Fail(e.to_string()));
+                let _ = tx.send(Msg::NoResponse(e.to_string()));
                 return;
             }
         };

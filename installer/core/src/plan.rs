@@ -73,7 +73,13 @@ pub fn plan(stack: &Stack, sel: &Selection, models_root: &Path, packages: &Packa
             }
             let d = stack.derived_entry(did).ok_or_else(|| format!("derived {did} is not declared"))?;
             let points = selected.iter().filter(|q| q.derived.contains(did)).map(|q| q.id.clone()).collect();
-            derived.push(DerivedJob { id: d.id.clone(), dest: resolve_path(&d.dest, install, models_root)?, bytes: d.bytes, points });
+            derived.push(DerivedJob {
+                id: d.id.clone(),
+                dest: resolve_path(&d.dest, install, models_root)?,
+                bytes: d.bytes,
+                points,
+                inputs: d.inputs.clone(),
+            });
             deleted.extend(d.inputs.iter().map(String::as_str));
         }
     }

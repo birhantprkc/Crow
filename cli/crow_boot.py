@@ -78,7 +78,9 @@ THE DECISIONS, and why each is this way:
   `llama-server-<port>.out/.err.log`, with this menu's spawn, animation and
   wait (`/props` answers 200, 600 s). No contract file is written for it: its
   `point` is one of the three baseline ids. `--models` is handed on as
-  `CROW_MODELS` so both kinds resolve under one root.
+  `CROW_MODELS` so both kinds resolve under one root -- unless `CROW_MODELS` is
+  already set: a lab root for these lines stays theirs (CrowSetup always passes
+  `--models <install>/models` for the three points).
 * STOP ends every model server the process scan sees (crow_core.stop_servers'
   set: serve, sd-server, llama-server), waits until each is torn down
   (`process_exists`: the process handle, not the exit code -- Windows tears
@@ -1294,7 +1296,8 @@ class Boot:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Crow's boot menu: start an operating point, then Crow.")
     ap.add_argument("--install-root", help="Crow's install root (default: the installer's)")
-    ap.add_argument("--models", help="the models root (default: $CROW_MODELS, else <install>/models)")
+    ap.add_argument("--models", help="the models root of the three points (default: $CROW_MODELS, "
+                                     "else <install>/models); the llama.cpp lines keep $CROW_MODELS when set")
     ap.add_argument("--stack", help="manifests/stack.json (default: beside cli/)")
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--status", action="store_true", help="say what runs (exit 0) or not (exit 1)")
@@ -1318,9 +1321,11 @@ def main(argv=None) -> int:
     install = os.path.abspath(args.install_root) if args.install_root else crow_platform.install_dir()
     models = os.path.abspath(args.models) if args.models else crow_platform.models_dir(install)
     if args.models:
-        # One models root for everything this run starts: the optional llama.cpp
-        # lines resolve through crow_platform.models_dir, which reads it here.
-        os.environ["CROW_MODELS"] = models
+        # The optional llama.cpp lines resolve through crow_platform.models_dir,
+        # which reads CROW_MODELS: without one, --models serves them too; one the
+        # user set (a lab root for those lines) stays theirs. CrowSetup always
+        # passes --models <install>/models, so it never moves either (#196 P2-E2E).
+        os.environ.setdefault("CROW_MODELS", models)
     forwarded = []
     for flag, value in (("--install-root", args.install_root and install),
                         ("--models", args.models and models),
