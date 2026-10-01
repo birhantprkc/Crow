@@ -23,17 +23,45 @@ generate_image/edit_image (#314). Their DLLs are resolved exactly like
 llama-server's, so cublas64_13.dll and cublasLt64_13.dll ship once. Without it the
 package has no image server and says so when it is packed.
 
+.PARAMETER BuildDir
+The bin directory of the llama.cpp Windows build to pack. Required to pack; it
+has no default, because a default is somebody's machine (it used to be the
+author's lab tree). The environment variable CROW_BUILD_DIR stands in for it.
+
+.PARAMETER PrivatePattern
+Optional, repeatable. Further text that must not appear in any packed file, on
+top of what the gate derives from this machine (see the privacy gate below).
+
 .PARAMETER Selftest
 Run the checks against synthetic cases, including ones that must fail, and exit.
+
+.NOTES
+WHAT MAY SHIP (#196 C2). One declared set, the same in tools/repack-release.py:
+$SHIP_* say where a file may live, $EXCLUDE_* say what never ships (runs\, *.log,
+__pycache__, *.pyc, test_*.py, .env*, secrets.json, session and state files).
+The package is refused if it would hold anything else. 2.8.5 shipped ten
+cli\runs\llama-server-*.log because this script filtered only __pycache__, *.pyc
+and test_*.py while the other packer filtered runs\ -- tools/test_repack_release.py
+now compares the two lists.
+
+THE PRIVACY GATE. After staging and before MANIFEST.json or the zip exist, every
+staged file is searched as raw bytes, in UTF-8 and in UTF-16LE, ignoring ASCII
+case, for: $env:USERPROFILE (backslash, slash and JSON-escaped spellings), the
+user name as a path segment (\Users\<name>\, /home/<name>/), $env:COMPUTERNAME,
+and every -PrivatePattern. A hit prints file, pattern and count, removes the
+stage and exits 1. THERE IS NO OVERRIDE SWITCH, on purpose: a switch that ships
+private data on request is a switch somebody passes at 23:00 on release night.
+Fix the source, or rebuild with path remapping, and pack again.
 #>
 [CmdletBinding()]
 param(
-    [string] $BuildDir  = "C:\Users\robin\dev\crow-lab\wt-25\build-25\bin\Release",
-    [string] $CudaBin   = "",
-    [string] $OutDir    = "",
-    [string] $Version   = "",
-    [string] $SdBuildDir = "",
-    [switch] $Selftest
+    [string]   $BuildDir  = $env:CROW_BUILD_DIR,
+    [string]   $CudaBin   = "",
+    [string]   $OutDir    = "",
+    [string]   $Version   = "",
+    [string]   $SdBuildDir = "",
+    [string[]] $PrivatePattern = @(),
+    [switch]   $Selftest
 )
 
 $ErrorActionPreference = "Stop"
@@ -196,6 +224,262 @@ function Get-VersionLiteral {
         if ($m) { return $m.Matches[0].Groups[1].Value }
     }
     return $null
+}
+
+function Resolve-BuildDir {
+    <#
+    The build directory, or a refusal. There is no default (#196 C2): the one this
+    replaces was a path inside the author's home, and a script that quietly packs
+    "the build that happens to be on that disk" is how a stale tree gets shipped.
+    #>
+    param([string] $Value)
+    if (-not $Value) {
+        throw "-BuildDir is required (the bin directory of the llama.cpp Windows build), or set CROW_BUILD_DIR"
+    }
+    return $Value
+}
+
+# ---------------------------------------------------------------------------
+# What may ship (#196 C2). Keep identical to SHIP_* / EXCLUDE_* in
+# tools/repack-release.py; tools/test_repack_release.py fails when they differ.
+# The lists are plain literals because that test reads them as text.
+# ---------------------------------------------------------------------------
+$SHIP_ROOT_FILES   = @('LICENSE', 'NOTICE', 'README.md')
+$SHIP_TOP_DIRS     = @('bin', 'cli', 'kits')
+$SHIP_SINGLE_FILES = @('templates\0731-chat-template.jinja', 'manifests\operating-point.json')
+$EXCLUDE_DIRS      = @('runs', '__pycache__', '.crow', 'digests', 'sessions')
+$EXCLUDE_FILES     = @('*.log', '*.pyc', '*.pyo', '*.jsonl', 'test_*.py', '.env*', 'secrets.json',
+                       'session*.json', 'state*.json', 'settings.json', '*_tokens.json')
+$KIT_REQUIRED      = @('crow-pathtracer.js', 'kit.json', 'voxel-kit.js', 'SKILL.md', 'check_diorama.py',
+                       'scaffold\index.html', 'scaffold\scene.js',
+                       'LICENSE.three', 'LICENSE.three-mesh-bvh', 'LICENSE.three-gpu-pathtracer')
+
+function Get-ExcludeRule {
+    # The rule that keeps this relative path out of a package, or $null.
+    # -contains and -like are case-insensitive, as the file system is.
+    param([string] $RelPath)
+    $parts = $RelPath.Replace('/', '\').Split('\')
+    for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+        if ($EXCLUDE_DIRS -contains $parts[$i]) { return "directory $($parts[$i])\" }
+    }
+    $name = $parts[$parts.Count - 1]
+    foreach ($pat in $EXCLUDE_FILES) {
+        if ($name -like $pat) { return "file pattern $pat" }
+    }
+    return $null
+}
+
+function Get-ShippedSetViolations {
+    # Every relative path that is not in the declared shipped set, with the reason.
+    param([string[]] $Paths)
+    $bad = @()
+    $singles = @($SHIP_SINGLE_FILES | ForEach-Object { $_.ToLowerInvariant() })
+    foreach ($p in $Paths) {
+        $rel   = $p.Replace('/', '\')
+        $low   = $rel.ToLowerInvariant()
+        if ($low -eq 'manifest.json') { continue }
+        $parts = $low.Split('\')
+        if ($parts.Count -eq 1) {
+            if ($SHIP_ROOT_FILES -cnotcontains $rel) {
+                $bad += [pscustomobject]@{ Path = $rel; Reason = 'top-level file outside the shipped set' }
+                continue
+            }
+        } elseif (($singles -notcontains $low) -and ($SHIP_TOP_DIRS -notcontains $parts[0])) {
+            $bad += [pscustomobject]@{ Path = $rel; Reason = "outside the shipped set (top level $($parts[0])\)" }
+            continue
+        }
+        $why = Get-ExcludeRule -RelPath $rel
+        if ($why) { $bad += [pscustomobject]@{ Path = $rel; Reason = "excluded: $why" } }
+    }
+    return ,@($bad)
+}
+
+function Copy-ShippedTree {
+    <#
+    Copies a source tree file by file and leaves out what Get-ExcludeRule names.
+    This replaces `Copy-Item -Recurse` plus a clean-up pass: a recursive copy that
+    removes the unwanted afterwards ships whatever the clean-up forgot, which is how
+    cli\runs\*.log reached the 2.8.5 package.
+    #>
+    param([string] $Source, [string] $Dest)
+    $src = (Resolve-Path -LiteralPath $Source).Path.TrimEnd('\')
+    New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+    $copied = 0
+    $left   = @()
+    foreach ($f in Get-ChildItem -LiteralPath $src -Recurse -File -Force) {
+        $rel = $f.FullName.Substring($src.Length + 1)
+        if (Get-ExcludeRule -RelPath $rel) { $left += $rel; continue }
+        $target = Join-Path $Dest $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $f.FullName -Destination $target
+        $copied++
+    }
+    return [pscustomobject]@{ Copied = $copied; Left = @($left) }
+}
+
+# ---------------------------------------------------------------------------
+# The privacy gate (#196 C2)
+# ---------------------------------------------------------------------------
+
+# A byte search compiled once. Streams the file in 4 MB blocks (the DLLs are
+# hundreds of MB), folds ASCII A-Z so the match ignores case, and counts each
+# needle without counting a match twice across a block boundary.
+$CROW_BYTE_SCAN_SOURCE = @'
+using System;
+using System.IO;
+public static class CrowByteScan {
+    public static int[] Count(string path, byte[][] needles) {
+        int[] counts = new int[needles.Length];
+        int maxLen = 1;
+        bool[] first = new bool[256];
+        for (int k = 0; k < needles.Length; k++) {
+            if (needles[k].Length == 0) continue;
+            if (needles[k].Length > maxLen) maxLen = needles[k].Length;
+            first[needles[k][0]] = true;
+        }
+        const int CH = 4 * 1024 * 1024;
+        byte[] buf = new byte[CH + maxLen];
+        int keep = 0;
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 65536)) {
+            bool eof = false;
+            while (!eof) {
+                int read = fs.Read(buf, keep, CH);
+                if (read <= 0) { eof = true; read = 0; }
+                int total = keep + read;
+                for (int i = keep; i < total; i++) {
+                    byte b = buf[i];
+                    if (b >= 65 && b <= 90) buf[i] = (byte)(b + 32);
+                }
+                int limit = eof ? total : Math.Max(0, total - (maxLen - 1));
+                for (int i = 0; i < limit; i++) {
+                    if (!first[buf[i]]) continue;
+                    for (int k = 0; k < needles.Length; k++) {
+                        byte[] nd = needles[k];
+                        int len = nd.Length;
+                        if (len == 0 || nd[0] != buf[i] || i + len > total) continue;
+                        int j = 1;
+                        while (j < len && buf[i + j] == nd[j]) j++;
+                        if (j == len) counts[k]++;
+                    }
+                }
+                if (!eof) {
+                    keep = total - limit;
+                    if (keep > 0) Buffer.BlockCopy(buf, limit, buf, 0, keep);
+                }
+            }
+        }
+        return counts;
+    }
+}
+'@
+
+function Get-PrivatePatterns {
+    <#
+    What must not appear in a package, derived from THIS machine unless the
+    parameters say otherwise (the selftest stands in for another machine that way).
+    Returns Patterns (strings; each is searched in UTF-8 and UTF-16LE) and Notes.
+    #>
+    param(
+        [string[]] $Extra = @(),
+        [string]   $ProfilePath,
+        [string]   $User,
+        [string[]] $Hosts
+    )
+    if (-not $PSBoundParameters.ContainsKey('ProfilePath')) { $ProfilePath = $env:USERPROFILE }
+    if (-not $PSBoundParameters.ContainsKey('User'))        { $User        = $env:USERNAME }
+    if (-not $PSBoundParameters.ContainsKey('Hosts'))       { $Hosts       = @($env:COMPUTERNAME, [Environment]::MachineName) }
+
+    $pats  = @()
+    $notes = @()
+    $ProfilePath = ([string]$ProfilePath).TrimEnd('\', '/')
+    if ($ProfilePath) {
+        $bs    = $ProfilePath.Replace('/', '\')
+        $pats += $bs
+        $pats += $ProfilePath.Replace('\', '/')
+        $pats += $bs.Replace('\', '\\')
+    }
+    if ($User) {
+        $pats += "\Users\$User\"
+        $pats += "/Users/$User/"
+        $pats += "\\Users\\$User\\"
+        $pats += "/home/$User/"
+    }
+    foreach ($h in $Hosts) {
+        if (-not $h) { continue }
+        if ($h.Length -lt 4) { $notes += "host name '$h' is shorter than 4 characters and is not searched"; continue }
+        $pats += $h
+    }
+    foreach ($e in $Extra) { if ($e) { $pats += $e } }
+    $seen = @{}
+    $uniq = @()
+    foreach ($p in $pats) {
+        $k = $p.ToLowerInvariant()
+        if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $uniq += $p }
+    }
+    return [pscustomobject]@{ Patterns = [string[]]$uniq; Notes = [string[]]$notes }
+}
+
+function Find-PrivateData {
+    # Path, Pattern, Encoding and Count for every pattern found in any file under Root.
+    param([string] $Root, [string[]] $Patterns)
+    if (-not ('CrowByteScan' -as [type])) { Add-Type -TypeDefinition $CROW_BYTE_SCAN_SOURCE -Language CSharp }
+    $meta    = @()
+    $needles = @()
+    foreach ($p in $Patterns) {
+        foreach ($enc in @(@{ N = 'utf-8'; E = [Text.Encoding]::UTF8 }, @{ N = 'utf-16le'; E = [Text.Encoding]::Unicode })) {
+            $meta    += [pscustomobject]@{ Pattern = $p; Encoding = $enc.N }
+            $needles += ,([byte[]]$enc.E.GetBytes($p.ToLowerInvariant()))
+        }
+    }
+    $arr = New-Object 'byte[][]' $needles.Count
+    for ($i = 0; $i -lt $needles.Count; $i++) { $arr[$i] = $needles[$i] }
+    $root = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
+    $hits = @()
+    foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -File -Force) {
+        $counts = [CrowByteScan]::Count($f.FullName, $arr)
+        for ($i = 0; $i -lt $counts.Length; $i++) {
+            if ($counts[$i] -gt 0) {
+                $hits += [pscustomobject]@{
+                    Path = $f.FullName.Substring($root.Length + 1); Pattern = $meta[$i].Pattern
+                    Encoding = $meta[$i].Encoding; Count = $counts[$i] }
+            }
+        }
+    }
+    return ,@($hits)
+}
+
+function Invoke-PrivacyGate {
+    # $true when the tree is clean. Prints every hit; the caller has to refuse.
+    param([string] $Root, [string[]] $Patterns, [string[]] $Notes = @())
+    foreach ($n in $Notes) { Write-Host "  privacy gate note: $n" }
+    $nFiles = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force).Count
+    Write-Host ("privacy gate: $nFiles files, $($Patterns.Count) patterns, UTF-8 and UTF-16LE")
+    $hits = Find-PrivateData -Root $Root -Patterns $Patterns
+    if ($hits.Count -eq 0) { Write-Host "  privacy gate: clean"; return $true }
+    $nHit = @($hits | ForEach-Object { $_.Path } | Sort-Object -Unique).Count
+    Write-Host "PRIVACY GATE: REFUSING TO PACK -- $($hits.Count) hits in $nHit files" -ForegroundColor Red
+    foreach ($h in $hits) { Write-Host ("  {0}  pattern '{1}'  {2}  x{3}" -f $h.Path, $h.Pattern, $h.Encoding, $h.Count) }
+    Write-Host "  nothing was written. Remove the data from the source (or rebuild with path remapping); there is no override." -ForegroundColor Red
+    return $false
+}
+
+function Invoke-StageGate {
+    <#
+    Both checks on a finished stage, before MANIFEST.json or the zip exist: nothing
+    outside the shipped set, then the privacy scan. $true means the stage may be
+    packed. One function so the packing path calls ONE thing and the selftest can
+    call the same thing.
+    #>
+    param([string] $Stage, [string[]] $Patterns, [string[]] $Notes = @())
+    $root  = (Resolve-Path -LiteralPath $Stage).Path.TrimEnd('\')
+    $rels  = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($root.Length + 1) })
+    $bad   = Get-ShippedSetViolations -Paths $rels
+    if ($bad.Count -gt 0) {
+        Write-Host "REFUSING TO PACK -- $($bad.Count) files are not in the shipped set:" -ForegroundColor Red
+        foreach ($b in $bad) { Write-Host "  $($b.Path)  ($($b.Reason))" }
+        return $false
+    }
+    return (Invoke-PrivacyGate -Root $root -Patterns $Patterns -Notes $Notes)
 }
 
 $script:selftestOk  = 0
@@ -399,13 +683,115 @@ function Invoke-Selftest {
         Remove-Item $sdDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    # What may ship, and the privacy gate (#196 C2). Synthetic trees only: a fake
+    # builder, so no check depends on who runs this. The first tree has the shape of
+    # the 2.8.5 mistake -- a cli\runs\*.log -- and a binary that carries the
+    # builder's profile path as UTF-16LE, which is how a DLL stores a __FILE__.
+    $fakeProfile = 'C:\Users\crow-selftest-fake'
+    $fakeHost    = 'FAKEHOST-SELFTEST'
+    $fake = Get-PrivatePatterns -Extra @('lab-secret-name') -ProfilePath $fakeProfile -User 'crow-selftest-fake' -Hosts @($fakeHost)
+    $pkRoot = Join-Path ([IO.Path]::GetTempPath()) ("crow-pack-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $src = Join-Path $pkRoot 'src'
+        foreach ($rel in @('cli\crow_core.py', 'cli\fonts\OFL.txt', 'cli\runs\x.log', 'cli\runs\llama-server-8080.log',
+                           'cli\sub\notes.log', 'cli\__pycache__\a.pyc', 'cli\test_a.py', 'cli\.env', 'cli\secrets.json',
+                           'cli\session.json', 'kits\pathtracer\runs\y.log')) {
+            $p = Join-Path $src $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p) | Out-Null
+            Set-Content -LiteralPath $p -Value 'synthetic'
+        }
+        $cliCopy = Copy-ShippedTree -Source (Join-Path $src 'cli') -Dest (Join-Path $pkRoot 'stage\cli')
+        $kitCopy = Copy-ShippedTree -Source (Join-Path $src 'kits') -Dest (Join-Path $pkRoot 'stage\kits')
+        $has = { param($r) Test-Path -LiteralPath (Join-Path $pkRoot "stage\$r") }
+        Check "cli\runs\x.log is not copied (the 2.8.5 finding)" (-not (& $has 'cli\runs\x.log') -and -not (& $has 'cli\runs\llama-server-8080.log'))
+        Check "a *.log anywhere under cli is not copied"          (-not (& $has 'cli\sub\notes.log'))
+        Check "__pycache__, *.pyc and test_*.py are not copied"   (-not (& $has 'cli\__pycache__\a.pyc') -and -not (& $has 'cli\test_a.py'))
+        Check ".env, secrets.json and session files are not copied" (-not (& $has 'cli\.env') -and -not (& $has 'cli\secrets.json') -and -not (& $has 'cli\session.json'))
+        Check "a runs\ directory inside kits is not copied"       (-not (& $has 'kits\pathtracer\runs\y.log'))
+        Check "the client and the font licence ARE copied"        ((& $has 'cli\crow_core.py') -and (& $has 'cli\fonts\OFL.txt') -and $cliCopy.Copied -eq 2)
+
+        $okSet  = @('LICENSE', 'cli\crow_core.py', 'bin\llama-server.exe', 'kits\pathtracer\kit.json',
+                    'templates\0731-chat-template.jinja', 'manifests\operating-point.json', 'MANIFEST.json')
+        $badSet = @('docs\x.md', 'stray.txt', 'manifests\shared-core.json', 'templates\other.jinja',
+                    'cli\runs\x.log', 'bin\a.log', 'cli\.env.local', 'kits\pathtracer\runs\y.log', 'cli\sessions\a.txt')
+        Check "the declared shipped set accepts what ships"              ((Get-ShippedSetViolations -Paths $okSet).Count -eq 0)
+        Check "NEGATIVE: anything outside it or on an exclude rule is named" ((Get-ShippedSetViolations -Paths $badSet).Count -eq $badSet.Count)
+
+        # the gate, one spelling at a time
+        $scan = Join-Path $pkRoot 'scan'
+        New-Item -ItemType Directory -Force -Path (Join-Path $scan 'bin') | Out-Null
+        $dll = Join-Path $scan 'bin\fake.dll'
+        $bytes = [byte[]]@(0x4D, 0x5A, 0x00, 0x90) + [Text.Encoding]::Unicode.GetBytes($fakeProfile + '\dev\llama.cpp\ggml.c') + [byte[]]@(0, 0, 0)
+        [IO.File]::WriteAllBytes($dll, $bytes)
+        $h = Find-PrivateData -Root $scan -Patterns $fake.Patterns
+        Check "the profile path as UTF-16LE inside a binary is found" ($h.Count -ge 1 -and @($h | Where-Object { $_.Encoding -eq 'utf-16le' -and $_.Path -eq 'bin\fake.dll' }).Count -ge 1)
+        [IO.File]::WriteAllBytes($dll, [Text.Encoding]::UTF8.GetBytes(($fakeProfile + '\a ') * 3))
+        $h = Find-PrivateData -Root $scan -Patterns $fake.Patterns
+        Check "the same path as UTF-8 is found, and counted per occurrence" (@($h | Where-Object { $_.Encoding -eq 'utf-8' -and $_.Pattern -eq $fakeProfile -and $_.Count -eq 3 }).Count -eq 1)
+        $spellings = @('c:/USERS/Crow-Selftest-Fake/dev', 'see /home/crow-selftest-fake/.cache',
+                       'C:\\Users\\crow-selftest-fake\\x', "built on $($fakeHost.ToLowerInvariant())", 'a lab-secret-name b')
+        $missed = @()
+        foreach ($t in $spellings) {
+            [IO.File]::WriteAllBytes($dll, [Text.Encoding]::UTF8.GetBytes($t))
+            if ((Find-PrivateData -Root $scan -Patterns $fake.Patterns).Count -eq 0) { $missed += $t }
+        }
+        Check "slash spelling and case, JSON-escaped, /home/<user>/, host name, extra pattern are all found" ($missed.Count -eq 0)
+        if ($missed.Count -gt 0) { Write-Host ("       missed: " + ($missed -join ' | ')) -ForegroundColor Red }
+        # The needle starts 4 bytes before the end of the first 4 MB read block, so a
+        # scanner that forgets to carry bytes across blocks misses it, and one that
+        # carries them carelessly counts it twice.
+        $fs = [IO.File]::Open($dll, 'Create')
+        $fs.Write([byte[]]@(0x4D, 0x5A), 0, 2)
+        $zeros = New-Object byte[] (4194304 - 4 - 2)
+        $fs.Write($zeros, 0, $zeros.Length)
+        $u = [Text.Encoding]::Unicode.GetBytes($fakeProfile)
+        $fs.Write($u, 0, $u.Length)
+        $fs.Close()
+        Check "a hit straddling the 4 MB read block is found, once" (@(Find-PrivateData -Root $scan -Patterns $fake.Patterns | Where-Object { $_.Encoding -eq 'utf-16le' -and $_.Pattern -eq $fakeProfile -and $_.Count -eq 1 }).Count -eq 1)
+        [IO.File]::WriteAllBytes($dll, [byte[]]@(0x4D, 0x5A) + [Text.Encoding]::Unicode.GetBytes('C:\Windows\System32\kernel32.dll') + [Text.Encoding]::UTF8.GetBytes('/usr/lib/x'))
+        Check "NEGATIVE: a clean binary has no hits" ((Find-PrivateData -Root $scan -Patterns $fake.Patterns).Count -eq 0)
+        $mine = Get-PrivatePatterns
+        Check "by default the gate searches THIS machine's profile path" ((-not $env:USERPROFILE) -or ($mine.Patterns -contains $env:USERPROFILE.TrimEnd('\')))
+        $short = Get-PrivatePatterns -ProfilePath $fakeProfile -User 'crow-selftest-fake' -Hosts @('pc')
+        Check "a host name under 4 characters is noted, not searched" ($short.Patterns -notcontains 'pc' -and $short.Notes.Count -eq 1)
+
+        # the stage, end to end: the log is out AND the gate refuses on the DLL
+        $stage = Join-Path $pkRoot 'stage'
+        New-Item -ItemType Directory -Force -Path (Join-Path $stage 'bin') | Out-Null
+        [IO.File]::WriteAllBytes((Join-Path $stage 'bin\fake.dll'), $bytes)
+        $refused = Invoke-StageGate -Stage $stage -Patterns $fake.Patterns -Notes $fake.Notes 6>$null
+        Check "a stage with a profile path in a DLL is refused, its log already out" ((-not $refused) -and -not (& $has 'cli\runs\x.log'))
+        [IO.File]::WriteAllBytes((Join-Path $stage 'bin\fake.dll'), [byte[]]@(0x4D, 0x5A, 0, 0))
+        $passed = Invoke-StageGate -Stage $stage -Patterns $fake.Patterns -Notes $fake.Notes 6>$null
+        Check "the same stage with a clean DLL passes" ([bool]$passed)
+        Set-Content -LiteralPath (Join-Path $stage 'cli\runs-copy.log') -Value 'x'
+        $leaked = Invoke-StageGate -Stage $stage -Patterns $fake.Patterns -Notes $fake.Notes 6>$null
+        Check "NEGATIVE: a *.log that reached the stage anyway is refused" (-not $leaked)
+    } finally {
+        Remove-Item $pkRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # No personal default, and the packing path really calls the gate. The second
+    # reads the script itself: the packing code sits below the selftest exit,
+    # where no check can run it (the shape the comment on Get-DevOnlyFiles warns of).
+    $ast  = [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$null, [ref]$null)
+    $bdp  = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'BuildDir' }
+    Check "-BuildDir has no path as its default"       ($bdp.DefaultValue.Extent.Text -eq '$env:CROW_BUILD_DIR')
+    $threw = $false
+    try { Resolve-BuildDir -Value '' | Out-Null } catch { $threw = $_.Exception.Message -like '*-BuildDir is required*CROW_BUILD_DIR*' }
+    Check "NEGATIVE: no -BuildDir and no CROW_BUILD_DIR is refused, and says how" $threw
+    Check "-BuildDir is returned when given"           ((Resolve-BuildDir -Value 'D:\x') -eq 'D:\x')
+    $self = Get-Content -LiteralPath $PSCommandPath -Raw
+    Check "the packing path calls Invoke-StageGate before the manifest" ($self -match '(?s)Invoke-StageGate -Stage \$stage -Patterns \$pp\.Patterns.*# 5 - manifest')
+    Check "and copies cli and kits through Copy-ShippedTree" (([regex]::Matches($self, 'Copy-ShippedTree -Source \(Join-Path \$repo')).Count -eq 2)
+
     $dumpbin = Find-Dumpbin
     Check "dumpbin located" ([bool]$dumpbin)
 
     # Against the real build tree: the package must be INCOMPLETE, because that is
     # exactly the finding this tool exists for. A green result here would mean the
     # check cannot see the problem it was built to catch.
-    if (Test-Path $BuildDir) {
+    if ($BuildDir -and (Test-Path $BuildDir)) {
         $built  = (Get-ChildItem $BuildDir -File | Where-Object { $_.Extension -in '.dll', '.exe' }).FullName
         # With -SdBuildDir the image server is part of the set from the start, so
         # the closure below is the one the real package gets.
@@ -458,7 +844,7 @@ function Invoke-Selftest {
             Write-Host "  skip image-server closure -- no -SdBuildDir" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "  skip build-tree cases -- $BuildDir not present" -ForegroundColor Yellow
+        Write-Host "  skip build-tree cases -- no -BuildDir/CROW_BUILD_DIR, or $BuildDir not present" -ForegroundColor Yellow
     }
 
     Write-Host ""
@@ -486,6 +872,8 @@ if ($Selftest) { exit (Invoke-Selftest) }
 # release, and manifests/shared-core.json is hand-written, so that file now
 # stands between robin and a package. The alternative is a criterion that is met
 # on paper.
+$BuildDir = Resolve-BuildDir -Value $BuildDir
+
 Write-Host "checking the repository before packing"
 $redCheckers = Invoke-RepoCheckers
 if ($redCheckers.Count -gt 0) {
@@ -527,11 +915,13 @@ $dumpbin = Find-Dumpbin
 $binOut = Join-Path $stage 'bin'
 New-Item -ItemType Directory -Force -Path $binOut | Out-Null
 $built = @()
-foreach ($f in Get-ChildItem $BuildDir -File) {
+$binLeft = @()
+foreach ($f in Get-ChildItem $BuildDir -File -Force) {
+    if (Get-ExcludeRule -RelPath $f.Name) { $binLeft += $f.Name; continue }
     Copy-Item -LiteralPath $f.FullName -Destination $binOut
     $built += (Join-Path $binOut $f.Name)
 }
-Write-Host ("  copied $($built.Count) build files")
+Write-Host ("  copied $($built.Count) build files" + $(if ($binLeft.Count -gt 0) { ", left out $($binLeft.Count) ($($binLeft -join ', '))" } else { "" }))
 
 # 1b - the image server (#314), two executables beside llama-server.exe. Step 2
 #      resolves their DLLs with llama-server's: a name already staged is not
@@ -569,26 +959,19 @@ while ($true) {
 Write-Host ("  added $($extra.Count) runtime libraries in $rounds rounds")
 
 # 3 - the client, and the terms it must ship under.
-#     Copy-Item -Recurse takes __pycache__ with it, which shipped a
-#     crow.cpython-313.pyc into the first package built here -- a compiled
-#     artefact of this machine's Python version, useless to anyone else.
-Copy-Item -LiteralPath (Join-Path $repo 'cli') -Destination (Join-Path $stage 'cli') -Recurse
-Get-ChildItem (Join-Path $stage 'cli') -Recurse -Directory -Filter '__pycache__' |
-    ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
+#     Copied file by file through Get-ExcludeRule, not recursively and cleaned up
+#     after: a recursive copy shipped crow.cpython-313.pyc into the first package
+#     built here, the unit suite (73,792 bytes nobody runs) into every later one,
+#     and ten cli\runs\llama-server-*.log into 2.8.5. The rule list leaves out
+#     __pycache__, *.pyc, test_*.py, runs\, *.log, .env*, secrets.json and the
+#     session and state files, and Invoke-StageGate below checks the result.
+$cliCopy = Copy-ShippedTree -Source (Join-Path $repo 'cli') -Dest (Join-Path $stage 'cli')
+Write-Host ("  cli/: $($cliCopy.Copied) files copied, $($cliCopy.Left.Count) left out by the exclude rules")
 $stray = Get-ChildItem (Join-Path $stage 'cli') -Recurse -File -Include '*.pyc', '*.pyo'
 if ($stray) { throw ("compiled Python left in the package: " + ($stray.Name -join ', ')) }
-
-# The unit suite is developer equipment, and -Recurse above takes it along: 73,792
-# bytes shipped to every user, in a package whose own installer never runs it and
-# whose README never mentions it. Nothing outside this repository refers to it.
-# It is also the first file the removal path in install.ps1 has to deal with --
-# every install from 0.0.1 on has a copy sitting in cli/.
-$cliFiles = @(Get-ChildItem (Join-Path $stage 'cli') -Recurse -File | ForEach-Object { $_.FullName })
-$devFiles = Get-DevOnlyFiles -Paths $cliFiles
-foreach ($p in $devFiles) { Remove-Item -LiteralPath $p -Force }
-Write-Host ("  dropped $($devFiles.Count) developer files of $($cliFiles.Count) under cli/")
-# Looked at again rather than trusted: a file that failed to delete leaves the
-# count above saying it went.
+# Looked at again rather than trusted. The unit suite is also the first file the
+# removal path in install.ps1 has to deal with -- every install from 0.0.1 on has
+# a copy sitting in cli/.
 $devLeft = Get-DevOnlyFiles -Paths @(Get-ChildItem (Join-Path $stage 'cli') -Recurse -File | ForEach-Object { $_.FullName })
 if ($devLeft.Count -gt 0) { throw ("test code left in the package: " + (($devLeft | Split-Path -Leaf) -join ', ')) }
 foreach ($f in @('LICENSE', 'NOTICE', 'README.md')) {
@@ -639,16 +1022,14 @@ if (-not (Test-Path (Join-Path $stage 'cli\fonts\OFL.txt'))) {
 # because crow_core resolves it as <install>\kits\pathtracer -- the same step as
 # the manifests above. install.ps1 -PathTracer only switches its skill on. The
 # three MIT notices travel with the bundle or the bundle does not travel.
-# check_diorama.py (#299) runs from the kit folder, so -Recurse can bring its
-# __pycache__ along exactly as cli\ did; install.sh's payload drops it too.
-Copy-Item -LiteralPath (Join-Path $repo 'kits') -Destination (Join-Path $stage 'kits') -Recurse
-Get-ChildItem (Join-Path $stage 'kits') -Recurse -Directory -Filter '__pycache__' |
-    ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
+# check_diorama.py (#299) runs from the kit folder and leaves its __pycache__
+# there; the same exclude rules as cli\ keep it out. tools/repack-release.py
+# ships kits\ the same way (it did not until #196 C2).
+$kitCopy = Copy-ShippedTree -Source (Join-Path $repo 'kits') -Dest (Join-Path $stage 'kits')
+Write-Host ("  kits/: $($kitCopy.Copied) files copied, $($kitCopy.Left.Count) left out by the exclude rules")
 $stray = Get-ChildItem (Join-Path $stage 'kits') -Recurse -File -Include '*.pyc', '*.pyo'
 if ($stray) { throw ("compiled Python left in the kits: " + ($stray.Name -join ', ')) }
-foreach ($f in @('crow-pathtracer.js', 'kit.json', 'voxel-kit.js', 'SKILL.md', 'check_diorama.py',
-                 'scaffold\index.html', 'scaffold\scene.js',
-                 'LICENSE.three', 'LICENSE.three-mesh-bvh', 'LICENSE.three-gpu-pathtracer')) {
+foreach ($f in $KIT_REQUIRED) {
     if (-not (Test-Path -LiteralPath (Join-Path $stage "kits\pathtracer\$f"))) {
         throw "kits/pathtracer/$f missing from the package -- the kit or its licence notice would ship incomplete"
     }
@@ -663,6 +1044,16 @@ if ($final.Count -gt 0) {
     throw ("package is incomplete: " + (($final.Needs | Sort-Object -Unique) -join ', '))
 }
 Write-Host "  completeness: OK"
+
+# 4b - the shipped set and the privacy gate (#196 C2), on the finished stage and
+#      BEFORE the manifest or the zip exist. A refusal removes the stage so no
+#      directory holding private data is left in dist\ to be zipped by hand.
+$pp = Get-PrivatePatterns -Extra $PrivatePattern
+if (-not (Invoke-StageGate -Stage $stage -Patterns $pp.Patterns -Notes $pp.Notes)) {
+    Remove-Item $stage -Recurse -Force
+    Write-Host "  stage removed; no manifest, no zip" -ForegroundColor Red
+    exit 1
+}
 
 # 5 - manifest, then archive. The manifest is written before the zip so a crash
 #     leaves a staging folder without one, rather than an archive nobody can verify.
