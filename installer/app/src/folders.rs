@@ -1,5 +1,8 @@
 //! Known folders: the Desktop (the default shortcut folder, OneDrive-redirected
 //! or not) and the Start menu's Programs folder, from the shell itself.
+//! Linux (#342): the Desktop is `$XDG_DESKTOP_DIR` or `~/Desktop` when that
+//! folder exists (none otherwise: the launcher entry is written either way), and
+//! the Start menu is `$XDG_DATA_HOME/applications`.
 
 use std::path::PathBuf;
 
@@ -28,21 +31,34 @@ pub fn desktop() -> Option<PathBuf> {
     #[cfg(windows)]
     return known(&windows_sys::Win32::UI::Shell::FOLDERID_Desktop);
     #[cfg(not(windows))]
-    return std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Desktop"));
+    return std::env::var_os("XDG_DESKTOP_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Desktop")))
+        .filter(|p| p.is_dir());
 }
 
 pub fn start_menu_programs() -> Option<PathBuf> {
     #[cfg(windows)]
     return known(&windows_sys::Win32::UI::Shell::FOLDERID_Programs);
     #[cfg(not(windows))]
-    return None;
+    return crowsetup_core::finish::start_menu_dir();
 }
+
+/// What the "Landed" screen calls the launcher entry.
+pub const LAUNCHER_LABEL: &str = if cfg!(windows) { "Start menu entry" } else { "App launcher entry" };
 
 /// A path as the window shows it: `%LOCALAPPDATA%\...` and `Desktop` read
 /// better than the full profile path.
 pub fn label(path: &std::path::Path) -> String {
     if desktop().is_some_and(|d| d == path) {
         return "Desktop".into();
+    }
+    #[cfg(not(windows))]
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(rest) = path.strip_prefix(PathBuf::from(home))
+    {
+        return format!("~/{}", rest.display());
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA")
         && let Ok(rest) = path.strip_prefix(PathBuf::from(local))

@@ -30,6 +30,15 @@
 //! `done`. Python and the check step always run: both are idempotent and the
 //! check is the guarantee behind "Landed".
 //!
+//! A LOCAL SOURCE (`--source`, #342): a file is taken from `<dir>/<repo>/<path>`
+//! (the remote layout) or, when that is not there, from `<dir>/<path under the
+//! models root>` (a models tree such as `crow-stack/` or another install's
+//! `models/`). On Linux, files on the same file system are hard-linked (see
+//! fetch.rs) and cost no disk, which preflight and the disk check account for;
+//! a source that already holds a derived output in full (the Image Stack's
+//! `text_encoder_sdcli/`) is linked into place and the convert step counts as
+//! done, so its inputs are not fetched.
+//!
 //! COMMANDS: Pause and Quit set the cancel flag, so a download stops inside
 //! (the fetcher polls it) and the run stops between steps. Resume clears the
 //! pause and, before Start, continues the saved selection (the welcome-back
@@ -78,6 +87,15 @@ pub trait Steps {
     -> Result<(), String>;
     fn shortcuts(&mut self, py: &PythonInfo, install_root: &Path, dirs: &[PathBuf]) -> Result<(), String>;
     fn open_boot_menu(&mut self, py: &PythonInfo, install_root: &Path) -> Result<(), String>;
+    /// A local source that holds every derived output: put them in place and
+    /// answer true (the convert step is then done). Default: never.
+    fn prefill_derived(&mut self, _plan: &Plan, _models_root: &Path) -> bool {
+        false
+    }
+    /// The job will take no space where it lands (a hard link). Default: never.
+    fn costs_no_disk(&mut self, _job: &FileJob) -> bool {
+        false
+    }
 }
 
 /// What reaches the run from outside: the contract's [`Command`]s, plus the
@@ -112,8 +130,15 @@ pub enum Outcome {
 }
 
 /// `%LOCALAPPDATA%\Crow`, the default install root.
+#[cfg(windows)]
 pub fn default_install_root() -> PathBuf {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Crow")
+}
+
+/// `$XDG_DATA_HOME/crow` (default `~/.local/share/crow`), install.sh's `CROW_HOME` (#342).
+#[cfg(not(windows))]
+pub fn default_install_root() -> PathBuf {
+    crate::finish::default_install_root().unwrap_or_else(|| std::env::temp_dir().join("crow"))
 }
 
 /// `<launch root>\setup\state.json` (see the module docs).
@@ -148,9 +173,10 @@ fn sentence(s: &str) -> String {
     }
 }
 
-/// The shortcut file `crow_boot.py --create-shortcut DIR` writes.
+/// The shortcut file `crow_boot.py --create-shortcut DIR` writes (Linux: the
+/// operating-point window's desktop entry, #342).
 pub fn shortcut_file(dir: &Path) -> PathBuf {
-    dir.join("Crow.lnk")
+    dir.join(crate::finish::BOOT_SHORTCUT)
 }
 
 // ------------------------------------------------------------------ control
@@ -374,6 +400,9 @@ impl Runner<'_> {
         self.emit(Event::Planned(plan.clone()));
         let root = sel.install_root.clone();
         let models = models_root(&root);
+        if !plan.derived.is_empty() && !self.done("convert") && self.steps.prefill_derived(&plan, &models) {
+            self.mark("convert");
+        }
         self.disk_check(&plan, &root)?;
 
         // The two packages, then Crow, then the engine. An installed package is
@@ -414,7 +443,14 @@ impl Runner<'_> {
         self.step("python", &mut |s| {
             let p = s.ensure_python(&root2)?;
             let how = if p.bundled { "installed" } else { "found" };
-            let d = format!("Python {} {how}.", p.version);
+            let mut d = format!("Python {} {how}.", p.version);
+            // Linux (#342): what the venv could not get (voice, PyGObject) is shown
+            if cfg!(not(windows)) {
+                for w in &p.warnings {
+                    d.push(' ');
+                    d.push_str(&sentence(w));
+                }
+            }
             py = Some(p);
             Ok(d)
         })?;
@@ -485,7 +521,13 @@ impl Runner<'_> {
             let fs = self.state.files.get(&job.id).cloned().unwrap_or_default();
             let installed = matches!(job.kind, FileKind::CrowPackage | FileKind::EnginePackage)
                 && self.done(&Self::install_key(job));
-            had += if installed || (fs.verified && self.have(job)) { job.bytes } else { fs.bytes_done };
+            // a convert input is never fetched once the convert is done
+            let consumed = converted && self.inputs.contains(&job.id);
+            had += if installed || consumed || (fs.verified && self.have(job)) || self.steps.costs_no_disk(job) {
+                job.bytes
+            } else {
+                fs.bytes_done
+            };
         }
         let need = peak.saturating_sub(had);
         let free = self.steps.disk_free(root);
@@ -579,7 +621,10 @@ impl Runner<'_> {
 
     fn fetch_one(&mut self, job: &FileJob) -> Result<FileResult, Stop> {
         let known = self.state.files.get(&job.id).cloned().unwrap_or_default();
-        if known.verified && self.have(job) {
+        // a convert input is never needed once the convert is done (a source
+        // that held the converted output never had the input at all, #342)
+        let consumed = self.done("convert") && self.inputs.contains(&job.id);
+        if consumed || (known.verified && self.have(job)) {
             self.emit(Event::FileVerified { id: job.id.clone() });
             return Ok(FileResult::Ok);
         }
@@ -654,6 +699,19 @@ impl Runner<'_> {
 
 // --------------------------------------------------------------- real steps
 
+/// The same file (one inode), so nothing needs linking.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return x.dev() == y.dev() && x.ino() == y.ino();
+        }
+    }
+    let _ = (a, b);
+    false
+}
+
 /// The steps on the real modules (T1-T3).
 pub struct RealSteps {
     pub source: Source,
@@ -664,6 +722,42 @@ pub struct RealSteps {
     /// `<dir>/<asset>`, every other file from `source`.
     pub package_source: Option<PathBuf>,
     stack: Option<crate::stack::Stack>,
+    /// `${MODELS}` of the last planned selection (for a local source's models layout).
+    models: Option<PathBuf>,
+}
+
+/// The path of `job` inside a local source: `<repo>/<path>` when the folder
+/// has it, else its path under `models_root` when the folder has that (a
+/// models tree), else `<repo>/<path>` (the error names the remote layout).
+pub fn local_rel_for(src: &Path, job: &FileJob, models_root: &Path) -> String {
+    if src.join(&job.local_rel).is_file() {
+        return job.local_rel.clone();
+    }
+    if let Ok(rel) = job.dest.strip_prefix(models_root) {
+        let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        let rel = parts.join("/");
+        if !rel.is_empty() && src.join(&rel).is_file() {
+            return rel;
+        }
+    }
+    job.local_rel.clone()
+}
+
+/// Linux: the device of `path`'s nearest existing ancestor.
+#[cfg(unix)]
+fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let p = crate::preflight::nearest_existing(path)?;
+    std::fs::metadata(p).ok().map(|m| m.dev())
+}
+
+/// Linux: `src` resolves to a regular file of `bytes` on the device `dest` lands on.
+#[cfg(unix)]
+fn linkable_file(src: &Path, bytes: u64, dest: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let real = std::fs::canonicalize(src).ok()?;
+    let m = std::fs::metadata(&real).ok()?;
+    (m.is_file() && m.len() == bytes && Some(m.dev()) == device_of(dest)).then_some(real)
 }
 
 impl RealSteps {
@@ -673,11 +767,17 @@ impl RealSteps {
         python_zip: Option<&'static [u8]>,
         get_pip: Option<&'static [u8]>,
     ) -> RealSteps {
-        RealSteps { source, packages, python_zip, get_pip, package_source: None, stack: None }
+        RealSteps { source, packages, python_zip, get_pip, package_source: None, stack: None, models: None }
     }
 
     pub fn with_package_source(mut self, dir: Option<PathBuf>) -> RealSteps {
         self.package_source = dir;
+        self
+    }
+
+    /// A stack other than the embedded one (tests).
+    pub fn with_stack(mut self, stack: crate::stack::Stack) -> RealSteps {
+        self.stack = Some(stack);
         self
     }
 
@@ -688,17 +788,127 @@ impl RealSteps {
     fn fetch_options(&self) -> FetchOptions {
         FetchOptions::production(self.source.clone())
     }
+
+    /// The local file a job would come from, when the job comes from a folder.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn local_file(&self, job: &FileJob, models_root: &Path) -> Option<PathBuf> {
+        match (job.kind, &self.package_source, &self.source) {
+            (FileKind::CrowPackage | FileKind::EnginePackage, Some(dir), _) => Some(dir.join(job.dest.file_name()?)),
+            (_, _, Source::Local(dir)) => Some(dir.join(local_rel_for(dir, job, models_root))),
+            _ => None,
+        }
+    }
+
+    /// Every output of `d` in the local source, as (source file, destination),
+    /// when all are there with their size (and sha256 where pinned) on the
+    /// device they land on. Linux only: elsewhere this is never a link.
+    fn derived_from_source(&mut self, d: &crate::api::DerivedJob, models_root: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
+        #[cfg(unix)]
+        {
+            let Source::Local(dir) = self.source.clone() else { return None };
+            let entry = self.stack().derived_entry(&d.id)?.clone();
+            let src_dir = dir.join(d.dest.strip_prefix(models_root).ok()?);
+            let mut out = Vec::new();
+            for o in &entry.outputs {
+                let dest = d.dest.join(&o.path);
+                let real = linkable_file(&src_dir.join(&o.path), o.bytes, &d.dest)?;
+                if let Some(want) = &o.sha256
+                    && !crate::layout::sha256_file_hex(&real).ok()?.eq_ignore_ascii_case(want)
+                {
+                    return None;
+                }
+                out.push((real, dest));
+            }
+            return (!out.is_empty()).then_some(out);
+        }
+        #[allow(unreachable_code)]
+        {
+            let _ = (d, models_root);
+            None
+        }
+    }
+
+    /// A point's disk need with a local source: what cannot be linked.
+    #[cfg(unix)]
+    fn point_disk_need(&mut self, stack: &crate::stack::Stack, p: &crate::stack::Point, root: &Path) -> u64 {
+        let models = models_root(root);
+        let sel = Selection { points: vec![p.id.clone()], install_root: root.to_path_buf(), shortcut_dir: None };
+        let Ok(plan) = crate::plan::plan(stack, &sel, &models, &self.packages) else { return p.preflight.disk_bytes };
+        let mut need = 0;
+        let mut prefilled = std::collections::BTreeSet::new();
+        for d in &plan.derived {
+            if self.derived_from_source(d, &models).is_some() {
+                prefilled.extend(d.inputs.iter().cloned());
+            } else {
+                need += d.bytes;
+            }
+        }
+        for j in plan.jobs.iter().filter(|j| j.points.contains(&p.id) && !prefilled.contains(&j.id)) {
+            let linked = self.local_file(j, &models).and_then(|f| linkable_file(&f, j.bytes, &j.dest)).is_some();
+            if !linked {
+                need += j.bytes;
+            }
+        }
+        need
+    }
 }
 
 impl Steps for RealSteps {
     fn preflight(&mut self, install_root: &Path) -> PreflightReport {
         let stack = self.stack().clone();
+        #[cfg(unix)]
+        if matches!(self.source, Source::Local(_)) {
+            let facts = crate::preflight::probe(install_root);
+            let needs: std::collections::BTreeMap<String, u64> =
+                stack.points.iter().map(|p| (p.id.clone(), self.point_disk_need(&stack, p, install_root))).collect();
+            let need = |p: &crate::stack::Point| needs.get(&p.id).copied().unwrap_or(p.preflight.disk_bytes);
+            return crate::preflight::verdicts_with_disk(&facts, &stack, &need);
+        }
         crate::preflight::run(&stack, install_root)
     }
     fn plan(&mut self, sel: &Selection) -> Result<Plan, String> {
         let packages = self.packages.clone();
         let models = models_root(&sel.install_root);
+        self.models = Some(models.clone());
         crate::plan::plan(self.stack(), sel, &models, &packages)
+    }
+    fn prefill_derived(&mut self, plan: &Plan, models_root: &Path) -> bool {
+        let mut pairs = Vec::new();
+        for d in &plan.derived {
+            match self.derived_from_source(d, models_root) {
+                Some(p) => pairs.extend(p),
+                None => return false,
+            }
+        }
+        let mut made = Vec::new();
+        for (src, dest) in &pairs {
+            if same_file(src, dest) {
+                continue;
+            }
+            let ok = dest.parent().is_some_and(|p| std::fs::create_dir_all(p).is_ok())
+                && { let _ = std::fs::remove_file(dest); std::fs::hard_link(src, dest).is_ok() };
+            if !ok {
+                // all or nothing: the convert step runs on a clean folder
+                for m in &made {
+                    let _ = std::fs::remove_file(m);
+                }
+                return false;
+            }
+            made.push(dest.clone());
+        }
+        !pairs.is_empty()
+    }
+    fn costs_no_disk(&mut self, job: &FileJob) -> bool {
+        #[cfg(unix)]
+        {
+            let Some(models) = self.models.clone() else { return false };
+            return self.local_file(job, &models).and_then(|f| linkable_file(&f, job.bytes, &job.dest)).is_some();
+        }
+        #[allow(unreachable_code)]
+        {
+            let _ = job;
+            false
+        }
     }
     fn load_state(&mut self, path: &Path) -> std::io::Result<StateStore> {
         if path.exists() {
@@ -732,6 +942,14 @@ impl Steps for RealSteps {
             let mut local = job.clone();
             local.local_rel = job.dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             return crate::fetch::download(&local, state, &FetchOptions::production(Source::Local(dir.clone())), on, cancel);
+        }
+        if let (Source::Local(dir), Some(models)) = (&self.source, &self.models) {
+            let rel = local_rel_for(dir, job, models);
+            if rel != job.local_rel {
+                let mut local = job.clone();
+                local.local_rel = rel;
+                return crate::fetch::download(&local, state, &self.fetch_options(), on, cancel);
+            }
         }
         crate::fetch::download(job, state, &self.fetch_options(), on, cancel)
     }

@@ -68,6 +68,24 @@
 #   SD_SRC_DIR=<tree> tools/build-sd-server.sh # build an existing checkout of
 #                                              # the pin; it is verified, and
 #                                              # left alone when it matches
+#   SD_RELEASE=1 tools/build-sd-server.sh      # the binary Crow's Linux package
+#                                              # ships (#342): see RELEASE BUILD
+#
+# RELEASE BUILD (SD_RELEASE=1, #342)
+#   The local build is for this machine: GGML_NATIVE, and a DT_RPATH to the
+#   absolute $CROW_HOME/cuda/lib -- 236 builder-path hits in the 2026-09-27
+#   binary, which tools/pack-release.sh refuses. The release build differs in
+#   exactly three ways and lands in its own build dir and $SD_OUT_DIR (default
+#   $CROW_HOME/build/sd-release), never in bin/:
+#   * RPATH $ORIGIN/../cuda/lib -- the installed layout <root>/bin/sd-server
+#     beside <root>/cuda/lib. $SD_OUT_DIR/cuda links to $CROW_HOME/cuda so the
+#     verification resolves the libraries the same way.
+#   * -ffile-prefix-map for $HOME, the source and the build dir (C, C++ and
+#     nvcc's host compiler), so __FILE__ and debug paths carry no home.
+#   * GGML_NATIVE off with AVX, AVX2, FMA and F16C on (x86-64-v3, Haswell and
+#     later): -march=native would bake the build CPU into a binary that runs
+#     elsewhere. The text encoder runs on the CPU (te=cpu), so the floor is
+#     v3 and not baseline x86-64.
 #
 # Idempotent: a re-run after a completed build fetches nothing, lets ninja find
 # nothing to do, leaves identical binaries in bin/ untouched and re-runs the
@@ -100,6 +118,12 @@ SD_SRC_DIR="${SD_SRC_DIR:-$CROW_HOME/src/stable-diffusion.cpp-${SD_PIN:0:7}}"
 # source dir, and CMake refuses a cache made for another source.
 SD_BUILD_DIR="$CROW_HOME/build/sd-cuda-${SD_PIN:0:7}"
 SD_TARGETS="sd-cli sd-server"
+SD_RELEASE="${SD_RELEASE:-0}"
+if [ "$SD_RELEASE" = "1" ]; then
+    SD_BUILD_DIR="$SD_BUILD_DIR-release"
+    SD_OUT_DIR="${SD_OUT_DIR:-$CROW_HOME/build/sd-release}"
+    BIN_DIR="$SD_OUT_DIR/bin"
+fi
 
 # Disk, in MB. Measured on the 2026-09-26 build: build dir 513 MB, the two
 # binaries 110 MB each, the source tree with submodules ~290 MB. A fresh CUDA
@@ -217,6 +241,19 @@ verify_src() {
 configure_build() {
     say "configure"
     [ "$CLEAN" = "1" ] && rm -rf "$SD_BUILD_DIR"
+    local native="-DGGML_NATIVE=ON" rpath="$CUDA_ROOT/lib" cflags="" cudaflags="-allow-unsupported-compiler"
+    local -a cpu=()
+    if [ "$SD_RELEASE" = "1" ]; then
+        native="-DGGML_NATIVE=OFF"
+        cpu=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
+        # shellcheck disable=SC2016  # $ORIGIN is for the dynamic loader, not the shell
+        rpath='$ORIGIN/../cuda/lib'
+        # the more specific prefixes last: GCC applies the last one that matches
+        cflags="-ffile-prefix-map=$HOME=~ -ffile-prefix-map=$SD_SRC_DIR=. -ffile-prefix-map=$SD_BUILD_DIR=build"
+        cudaflags="$cudaflags -Xcompiler=-ffile-prefix-map=$HOME=~ -Xcompiler=-ffile-prefix-map=$SD_SRC_DIR=. -Xcompiler=-ffile-prefix-map=$SD_BUILD_DIR=build"
+        mkdir -p "$SD_OUT_DIR"
+        ln -sfn "$CUDA_ROOT" "$SD_OUT_DIR/cuda"
+    fi
     run "$CMAKE" -S "$SD_SRC_DIR" -B "$SD_BUILD_DIR" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DSD_CUDA=ON \
@@ -224,11 +261,13 @@ configure_build() {
         -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" \
         -DCMAKE_CUDA_COMPILER="$NVCC" \
         -DCUDAToolkit_ROOT="$CUDA_ROOT" \
-        -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" \
-        -DGGML_NATIVE=ON \
+        -DCMAKE_CUDA_FLAGS="$cudaflags" \
+        -DCMAKE_C_FLAGS="$cflags" \
+        -DCMAKE_CXX_FLAGS="$cflags" \
+        "$native" "${cpu[@]}" \
         -DSD_BUILD_SHARED_LIBS=OFF \
         -DCMAKE_MAKE_PROGRAM="$NINJA" \
-        -DCMAKE_INSTALL_RPATH="$CUDA_ROOT/lib" \
+        -DCMAKE_INSTALL_RPATH="$rpath" \
         -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,--disable-new-dtags"
 

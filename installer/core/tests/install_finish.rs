@@ -10,12 +10,14 @@ fn strs(v: &[OsString]) -> Vec<String> {
     v.iter().map(|s| s.to_string_lossy().into_owned()).collect()
 }
 
+#[cfg(windows)]
 #[test]
 fn paths_compare_like_ntfs() {
     assert!(finish::same_path(Path::new("C:\\Users\\U\\AppData\\Local\\Crow"), Path::new("c:/users/u/appdata/local/crow/")));
     assert!(!finish::same_path(Path::new("C:\\Crow"), Path::new("D:\\Crow")));
 }
 
+#[cfg(windows)]
 #[test]
 fn the_default_root_is_localappdata_crow_and_the_start_menu_is_under_appdata() {
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
@@ -59,6 +61,7 @@ fn a_custom_root_is_handed_on() {
     assert!(strs(&args).contains(&"--install-root".to_string()));
 }
 
+#[cfg(windows)]
 #[test]
 fn the_start_menu_is_always_added_once() {
     let sm = PathBuf::from("C:\\Users\\u\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs");
@@ -108,6 +111,7 @@ fn the_default_root_opens_the_window_without_a_root_flag() {
 }
 
 /// A stand-in Python: a batch file that appends its arguments to `args.txt`.
+#[cfg(windows)]
 fn recording_python(dir: &Path) -> (PathBuf, PathBuf) {
     let log = dir.join("args.txt");
     let bat = dir.join("python.bat");
@@ -115,6 +119,7 @@ fn recording_python(dir: &Path) -> (PathBuf, PathBuf) {
     (bat, log)
 }
 
+#[cfg(windows)]
 fn fake_install(dir: &Path) -> PathBuf {
     let root = dir.join("Crow Root");
     fs::create_dir_all(root.join("cli")).unwrap();
@@ -157,4 +162,59 @@ fn the_boot_menu_button_carries_the_models_root() {
     let call = fs::read_to_string(&log).unwrap();
     let models = root.join("models").to_string_lossy().into_owned();
     assert!(call.contains("--gui") && call.contains("--models") && call.contains(&models), "{call}");
+}
+
+// ------------------------------------------------------------------ Linux (#342)
+
+#[cfg(not(windows))]
+#[test]
+fn the_xdg_data_home_rules() {
+    let x = |a: Option<&str>, h: Option<&str>| finish::xdg_data_home_from(a.map(Into::into), h.map(Into::into));
+    assert_eq!(x(Some("/x/data"), Some("/home/u")), Some(PathBuf::from("/x/data")));
+    // the spec ignores a relative XDG_DATA_HOME
+    assert_eq!(x(Some("rel/data"), Some("/home/u")), Some(PathBuf::from("/home/u/.local/share")));
+    assert_eq!(x(None, Some("/home/u")), Some(PathBuf::from("/home/u/.local/share")));
+    assert_eq!(x(None, None), None);
+    // the default root is install.sh's CROW_HOME, the launchers sit beside it
+    let data = finish::xdg_data_home();
+    assert_eq!(finish::default_install_root(), data.as_ref().map(|d| d.join("crow")));
+    assert_eq!(finish::start_menu_dir(), data.map(|d| d.join("applications")));
+    assert!(finish::same_path(Path::new("/a/crow/"), Path::new("/a/crow")));
+    assert!(!finish::same_path(Path::new("/a/Crow"), Path::new("/a/crow")), "Linux paths are case-sensitive");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn exec_arguments_are_quoted_and_escaped_like_the_spec_says() {
+    assert_eq!(finish::desktop_quote("/opt/crow/venv/bin/python"), "/opt/crow/venv/bin/python");
+    assert_eq!(finish::desktop_quote("--gui"), "--gui");
+    assert_eq!(finish::desktop_quote("/home/u/My Crow"), "\"/home/u/My Crow\"");
+    assert_eq!(finish::desktop_quote("a$b`c\"d"), "\"a\\$b\\`c\\\"d\"");
+    assert_eq!(finish::desktop_quote(""), "\"\"");
+    let argv: Vec<OsString> = vec!["/p y/python".into(), "a\\b".into(), "100%".into()];
+    // one backslash: \\ inside the quotes, doubled again as a string value
+    assert_eq!(finish::desktop_exec(&argv).unwrap(), "\"/p y/python\" \"a\\\\\\\\b\" 100%%");
+    assert!(finish::desktop_exec(&["a\nb".into()]).is_err());
+}
+
+#[cfg(not(windows))]
+#[test]
+fn the_boot_entry_starts_the_window_with_the_root_and_the_models() {
+    let root = Path::new("/srv/My Crow");
+    let py = root.join("venv/bin/python");
+    let e = finish::boot_entry(&py, root, Some(Path::new("/home/u/.local/share/crow"))).unwrap();
+    assert!(e.starts_with("[Desktop Entry]\nType=Application\n"), "{e}");
+    assert!(e.contains("Name=Crow Operating Points\n"), "{e}");
+    assert!(e.contains(
+        "Exec=\"/srv/My Crow/venv/bin/python\" \"/srv/My Crow/cli/crow_boot.py\" --gui \
+         --install-root \"/srv/My Crow\" --models \"/srv/My Crow/models\"\n"
+    ), "{e}");
+    assert!(e.contains("Path=/srv/My Crow\n") && e.contains("Terminal=false\n"), "{e}");
+    // the default root carries no --install-root, as on Windows
+    let d = Path::new("/home/u/.local/share/crow");
+    let e = finish::boot_entry(&d.join("venv/bin/python"), d, Some(d)).unwrap();
+    assert!(e.contains("crow_boot.py --gui --models /home/u/.local/share/crow/models\n"), "{e}");
+    let c = finish::crow_entry(&d.join("venv/bin/python"), d).unwrap();
+    assert!(c.contains("Name=Crow\n") && c.contains("StartupWMClass=crow\n"), "{c}");
+    assert!(c.contains("Exec=/home/u/.local/share/crow/venv/bin/python /home/u/.local/share/crow/cli/crow_gui.py\n"), "{c}");
 }

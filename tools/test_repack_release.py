@@ -303,6 +303,40 @@ class PrivacyAllowlistTest(unittest.TestCase):
             self.assertIn("INFO", out)
 
 
+class HostNameAndNamespaceTest(unittest.TestCase):
+    """2026-10-02, v3.1.0 repack on the Linux box 'aios': three 'aios' hits inside the
+    v3.0.0 bin\\ (compressed CUDA data "\\xcfaioSse", a base64 run "LAiosc8p") refused
+    the package, and so did the public namespace, which repack had no allowlist for."""
+    HOST = "aios"
+
+    def scan(self, blob):
+        pats = rr.private_patterns(profile=FAKE_PROFILE, user="fakebuilder", host=self.HOST)[0]
+        return [h for h in rr.scan_private({"bin\\x.dll": blob}, pats, hosts=rr.host_names(self.HOST))
+                if h[1] == self.HOST]
+
+    def test_a_host_name_inside_a_word_or_binary_data_is_not_one(self):
+        self.assertEqual(self.scan(b"\x9a\xcfaioSse\x97 bWwhzgRS4A8LAiosc8pfFKS4 \xbc\x9aaioS\r\x92"), [])
+
+    def test_a_host_name_between_separators_is_found_in_both_encodings(self):
+        for s in ("\\\\AIOS\\share", "aios.local", "user@aios:", "C:/build/aios/x", "\x00aios\x00"):
+            for enc in ("utf-8", "utf-16le"):
+                self.assertTrue(self.scan(b"\x00" + s.encode(enc) + b"\x00"), (s, enc))
+
+    def test_the_gate_takes_the_namespace_in_a_windows_package(self):
+        user = "nibor1896"
+        files = {"README.md": b'<a href="https://github.com/nibor1896/Crow">x</a>',
+                 "manifests\\stack.json": b'{"repo": "nibor1896/Qwen3.8-27B-CNQ4.5"}'}
+        pats = rr.private_patterns(profile="/home/" + user, user=user, host=self.HOST)[0]
+        hits = rr.scan_private(files, pats, hosts=rr.host_names(self.HOST))
+        refused, allowed = rr.split_allowed(files, hits, pats, allow=rr.PRIVACY_ALLOW + rr.NAMESPACE_ALLOW)
+        self.assertEqual(refused, [])
+        self.assertEqual(len(allowed), 2)
+        files["cli\\notes.py"] = b"# ask nibor1896 first"
+        hits = rr.scan_private(files, pats, hosts=rr.host_names(self.HOST))
+        refused, _ = rr.split_allowed(files, hits, pats, allow=rr.PRIVACY_ALLOW + rr.NAMESPACE_ALLOW)
+        self.assertEqual([r[0] for r in refused], ["cli\\notes.py"])
+
+
 class EndToEndTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -340,9 +374,11 @@ class EndToEndTest(unittest.TestCase):
         zpath = os.path.join(self.out, "crow-9.9.9-win-x64.zip")
         with zipfile.ZipFile(zpath) as z:
             names = z.namelist()
-        self.assertIn("cli/crow_core.py", names)
-        self.assertIn("kits/pathtracer/kit.json", names)
-        self.assertFalse([n for n in names if n.endswith(".log") or "/runs/" in n or ".pyc" in n], names)
+        # Backslash names, the shape pack-release.ps1 writes and v3.0.0 shipped.
+        self.assertIn("cli\\crow_core.py", names)
+        self.assertIn("kits\\pathtracer\\kit.json", names)
+        self.assertFalse([n for n in names if n.endswith(".log") or "\\runs\\" in n.replace("/", "\\")
+                          or ".pyc" in n], names)
 
     def test_a_previous_bin_with_a_log_in_it_is_refused(self):
         rr.write_package(os.path.join(self.tmp, "prev.zip"),

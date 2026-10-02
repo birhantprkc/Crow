@@ -94,7 +94,8 @@ fn full_order_for_one_point() {
     match events.last() {
         Some(Event::Done { installed, shortcut }) => {
             assert_eq!(installed, &vec!["27b".to_string()]);
-            assert_eq!(shortcut.as_deref(), Some(root().join("Desktop").join("Crow.lnk").as_path()));
+            let file = crowsetup_core::finish::BOOT_SHORTCUT;
+            assert_eq!(shortcut.as_deref(), Some(root().join("Desktop").join(file).as_path()));
         }
         e => panic!("last event {e:?}"),
     }

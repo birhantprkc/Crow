@@ -82,7 +82,12 @@ fn hard_blocks() {
     let mut f = robins_machine();
     f.os_64bit = false;
     let r = verdicts(&f, &s);
-    assert_eq!(r.hard_block.as_deref(), Some("Crow needs 64-bit Windows, and this machine runs 32-bit Windows."));
+    let want = if cfg!(windows) {
+        "Crow needs 64-bit Windows, and this machine runs 32-bit Windows."
+    } else {
+        "Crow needs 64-bit Linux, and this machine runs 32-bit Linux."
+    };
+    assert_eq!(r.hard_block.as_deref(), Some(want));
     assert_eq!(r.blocked, vec![], "a hard block says it once, not per point");
 
     let mut f = robins_machine();
@@ -213,4 +218,23 @@ fn live_probe_reads_this_machine() {
     assert!(r.os_64bit);
     assert!(r.ram_bytes > 1 << 30, "{}", r.ram_bytes);
     assert!(r.disk_free_bytes > 0);
+}
+
+/// #342: with a linking `--source` a point's disk need is what cannot be linked.
+#[test]
+fn the_disk_need_can_be_handed_in() {
+    let s = Stack::embedded();
+    let mut f = robins_machine();
+    f.disk_free_bytes = 57 * GIB;
+    let r = verdicts(&f, &s);
+    assert!(r.blocked.iter().any(|b| b.point == "image-stack" && b.reason.contains("free disk")), "{:?}", r.blocked);
+    let r = crowsetup_core::preflight::verdicts_with_disk(&f, &s, &|_p| GIB);
+    assert!(r.blocked.is_empty(), "{:?}", r.blocked);
+}
+
+#[test]
+fn ram_comes_from_proc_meminfo() {
+    let text = "MemTotal:       65536000 kB\nMemFree:         1000 kB\n";
+    assert_eq!(crowsetup_core::preflight::parse_meminfo(text), 65_536_000 * 1024);
+    assert_eq!(crowsetup_core::preflight::parse_meminfo("nothing"), 0);
 }

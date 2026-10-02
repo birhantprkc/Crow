@@ -99,6 +99,25 @@ class Paths(Base):
             self.doc["files"][0]["role"] = "container of zzqbuilder"
             self.red("placeholders and paths", "names the user")
 
+    def test_repo_owner_is_not_the_user(self):
+        # #343: a Hugging Face repo id's namespace is the public owner the installer
+        # downloads from, not a leak, even when it equals the builder's login.
+        owner = REAL["files"][0]["repo"].split("/")[0]
+        with mock.patch.dict(os.environ, {"USER": owner, "LOGNAME": owner}):
+            r = C.run(self.doc)
+            self.assertFalse([ln for ln in r.lines if "names the user" in ln], "\n".join(r.lines))
+
+    def test_user_name_in_the_repo_name_part(self):
+        with mock.patch.dict(os.environ, {"USERNAME": "zzqbuilder"}):
+            self.doc["files"][0]["repo"] = "someorg/zzqbuilder-model"
+            self.red("placeholders and paths", "names the user")
+
+    def test_user_name_in_a_dest_beside_a_repo_owner(self):
+        owner = REAL["files"][0]["repo"].split("/")[0]
+        with mock.patch.dict(os.environ, {"USER": owner}):
+            self.doc["files"][0]["dest"] = "${MODELS}/%s/x.cnq" % owner
+            self.red("placeholders and paths", "names the user")
+
 
 class References(Base):
     def test_unused_file(self):
@@ -156,6 +175,34 @@ class Wiring(Base):
     def test_port_mismatch(self):
         point(self.doc, "image-stack")["image_server"]["port"] = 8098
         self.red("engine wiring", "--listen-port")
+
+
+class Platforms(Base):
+    """#341: both platforms start every point; the real manifest named Windows only."""
+
+    def test_engine_without_a_linux_binary(self):
+        del point(self.doc, "27b")["engine"]["binary"]["linux"]
+        self.red("platforms", "point 27b engine.binary names ['windows']")
+
+    def test_image_server_without_a_linux_binary(self):
+        del point(self.doc, "image-stack")["image_server"]["binary"]["linux"]
+        self.red("platforms", "point image-stack image_server.binary names ['windows']")
+
+    def test_linux_binary_is_another_program(self):
+        point(self.doc, "flash-next")["engine"]["binary"]["linux"] = "${INSTALL}/bin/serve.exe"
+        self.red("platforms", "are not one program")
+
+    def test_lib_path_missing(self):
+        del self.doc["lib_path"]
+        self.red("platforms", "lib_path must map windows / linux")
+
+    def test_lib_path_without_the_engine_folder(self):
+        self.doc["lib_path"]["linux"] = ["${INSTALL}/cuda/lib"]
+        self.red("platforms", "lib_path.linux lacks ${INSTALL}/bin")
+
+    def test_lib_path_outside_the_install(self):
+        self.doc["lib_path"]["linux"].append("${MODELS}/lib")
+        self.red("platforms", "is not a list of ${INSTALL}/ folders")
 
 
 class Cli(unittest.TestCase):

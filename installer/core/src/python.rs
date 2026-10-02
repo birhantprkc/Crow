@@ -16,9 +16,20 @@
 //! required (no window without it): its failure is an `Err`. The two voice
 //! packages only warn, in `PythonInfo::warnings` (install.ps1: "typing is
 //! unaffected").
+//!
+//! LINUX (#342, install.sh `install_venv`): no embeddable Python. `find()` asks
+//! `python3`, then `python`, on PATH for 3.10 or newer; `ensure()` makes
+//! `<root>/venv` with `--system-site-packages` (PyGObject and WebKitGTK come
+//! from the distribution; a venv that cannot see them cannot draw the window),
+//! upgrades pip (a failure there is ignored, as install.sh does), installs
+//! `pywebview` plain (never `pywebview[gtk]`: that extra pulls a PyGObject wheel
+//! without typelibs) when it is not importable, and the voice packages when
+//! `faster_whisper` is not. The venv's Python is the one the shortcuts and the
+//! check step use.
 
 use std::ffi::OsStr;
 use std::fs;
+#[cfg(windows)]
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -80,16 +91,26 @@ pub fn is_windows_apps(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
 }
 
-/// Every `python.exe` on `path_var`, in order, without the Store stub.
+/// The interpreter names looked for on PATH: `python.exe` on Windows,
+/// `python3` then `python` elsewhere (install.sh: `command -v python3 || command -v python`).
+#[cfg(windows)]
+pub const PATH_NAMES: &[&str] = &["python.exe"];
+#[cfg(not(windows))]
+pub const PATH_NAMES: &[&str] = &["python3", "python"];
+
+/// Every interpreter ([`PATH_NAMES`]) on `path_var`, in order, without the Store stub.
+/// Every directory is asked for the first name before any is asked for the next.
 pub fn path_candidates(path_var: &OsStr) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    for dir in std::env::split_paths(path_var) {
-        if dir.as_os_str().is_empty() || is_windows_apps(&dir) {
-            continue;
-        }
-        let exe = dir.join("python.exe");
-        if exe.is_file() && !out.contains(&exe) {
-            out.push(exe);
+    for name in PATH_NAMES {
+        for dir in std::env::split_paths(path_var) {
+            if dir.as_os_str().is_empty() || is_windows_apps(&dir) {
+                continue;
+            }
+            let exe = dir.join(name);
+            if exe.is_file() && !out.contains(&exe) {
+                out.push(exe);
+            }
         }
     }
     out
@@ -102,7 +123,10 @@ pub fn find_with(run: &mut dyn FnMut(&OsStr, &[&str]) -> Option<String>, path_va
         let (exe, version) = parse_probe(&out?)?;
         version_at_least(&version, 3, 10).then_some(PythonInfo { exe, version, bundled: false, warnings: vec![] })
     };
-    if let Some(found) = accept(run(OsStr::new("py"), &["-3", "-c", PROBE_CODE])) {
+    // the `py` launcher exists on Windows only
+    if cfg!(windows)
+        && let Some(found) = accept(run(OsStr::new("py"), &["-3", "-c", PROBE_CODE]))
+    {
         return Some(found);
     }
     for exe in path_candidates(path_var) {
@@ -203,6 +227,7 @@ fn pip_install(py: &Path, packages: &[&str]) -> Result<(), String> {
 
 /// pywebview (required) and the voice packages (warning only), when pywebview
 /// is not importable yet.
+#[cfg(windows)]
 fn ensure_packages(py: &mut PythonInfo) -> Result<(), String> {
     if has_module(&py.exe, "webview") {
         return Ok(());
@@ -214,6 +239,7 @@ fn ensure_packages(py: &mut PythonInfo) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn unpack(zip_bytes: &[u8], dest: &Path) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).map_err(|e| format!("the embedded Python zip: {e}"))?;
     for i in 0..archive.len() {
@@ -233,7 +259,61 @@ fn unpack(zip_bytes: &[u8], dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `<root>/venv/bin/python` (Linux).
+pub fn venv_python(install_root: &Path) -> PathBuf {
+    install_root.join("venv").join("bin").join("python")
+}
+
+/// Linux: the system Python makes `<root>/venv`; the window's packages go into it.
+#[cfg(not(windows))]
+pub fn ensure(install_root: &Path, _embedded_zip: Option<&[u8]>, _get_pip: Option<&[u8]>) -> Result<PythonInfo, String> {
+    let exe = venv_python(install_root);
+    if probe(&exe).is_none() {
+        let base = find().ok_or(
+            "no Python 3.10 or newer was found (python3 on PATH); install python3 with its venv module, \
+             python-gobject and webkit2gtk-4.1 from your distribution",
+        )?;
+        let venv = install_root.join("venv");
+        let out = quiet(&base.exe)
+            .args(["-m", "venv", "--system-site-packages"])
+            .arg(&venv)
+            .output()
+            .map_err(|e| format!("cannot run {}: {e}", base.exe.display()))?;
+        if !out.status.success() {
+            return Err(format!(
+                "could not create the venv at {} ({}): {} -- Debian/Ubuntu: install python3-venv",
+                venv.display(),
+                out.status,
+                output_tail(&out, 3)
+            ));
+        }
+    }
+    let mut py = probe(&exe).ok_or_else(|| format!("the venv Python at {} does not start", exe.display()))?;
+    if !version_at_least(&py.version, 3, 10) {
+        return Err(format!("the venv at {} has Python {}; Crow needs 3.10 or newer", exe.display(), py.version));
+    }
+    // install.sh: `pip install --upgrade pip || true`
+    let _ = quiet(&exe)
+        .args(["-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--upgrade", "pip"])
+        .output();
+    if !has_module(&exe, "webview") {
+        pip_install(&exe, REQUIRED).map_err(|e| format!("the window needs pywebview: {e}"))?;
+    }
+    if !has_module(&exe, "faster_whisper")
+        && let Err(e) = pip_install(&exe, VOICE)
+    {
+        py.warnings.push(format!("dictation will not work (typing is unaffected): {e}"));
+    }
+    if !has_module(&exe, "gi") {
+        py.warnings.push(
+            "the window needs PyGObject from the distribution (python-gobject / python3-gi) and WebKitGTK 4.1".into(),
+        );
+    }
+    Ok(py)
+}
+
 /// `embedded_zip` / `get_pip` are the bytes the exe carries (None in tests/selftest).
+#[cfg(windows)]
 pub fn ensure(install_root: &Path, embedded_zip: Option<&[u8]>, get_pip: Option<&[u8]>) -> Result<PythonInfo, String> {
     if let Some(mut py) = find() {
         ensure_packages(&mut py)?;

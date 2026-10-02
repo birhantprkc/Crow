@@ -40,7 +40,7 @@ THE PRIVACY GATE. Before the archive or its manifest is written, every file
 that would be packed -- bin/ reused from the previous package included -- is
 searched as raw bytes, in UTF-8 and in UTF-16LE, ignoring ASCII case, for:
 the builder's profile path (both slash spellings and the JSON-escaped one), the
-user name (as a path segment, \Users\<name>\ and /home/<name>/, and bare), the host name,
+user name (as a path segment, \Users\<name>\ and /home/<name>/, and bare), the host name (only between separators: a NUL, punctuation or a line end on both sides),
 and every --private-pattern. A hit prints file, pattern and count, and the
 tool exits 1. There is no override switch. ONE scoped allowlist exists (PRIVACY_ALLOW):
 upstream words that merely contain the owner's bare name (the "round-robin" of the llama
@@ -94,6 +94,17 @@ KIT_REQUIRED = ("crow-pathtracer.js", "kit.json", "voxel-kit.js", "SKILL.md", "c
 PRIVACY_ALLOW = (
     r'bin\llama-server-impl.dll @@ robin @@ 2 @@ round-robin (embedded web UI) @@ round-robin',
     r'bin\sd-*.exe @@ robin @@ 29 @@ tokenizer vocabulary (BPE merges, vocab JSON) @@ (?:\n(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24} (?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}(?:</w>)?\n|"(?:[a-z]|\xe2\x96\x81|\xc4\xa0){0,24}"(?:: ?[0-9]+,|,))',
+)
+# The owner's public namespace (GitHub, Hugging Face, Ko-fi) is the same word as the Linux
+# login on robin's box, so on that box the bare name is also allowed in exactly these
+# contexts (robin, 2026-10-02). Globs match either separator. On a machine with another
+# user name these entries match nothing.
+NAMESPACE_ALLOW = (
+    r'* @@ nibor1896 @@ 64 @@ public namespace URL @@ (?:github\.com|githubusercontent\.com|huggingface\.co|ko-fi\.com)/nibor1896(?![a-z0-9_-])',
+    r'manifests/stack.json @@ nibor1896 @@ 32 @@ model repo id @@ "repo": "nibor1896/',
+    r'cli/crow_core.py @@ nibor1896 @@ 1 @@ the GitHub repo constant @@ repo = "nibor1896/crow"',
+    r'readme.md @@ nibor1896 @@ 1 @@ the repo link text @@ >nibor1896/crow<',
+    r'license @@ nibor1896 @@ 1 @@ the copyright line @@ copyright \(c\) 20[0-9][0-9] nibor1896\n',
 )
 ALLOW_WINDOW = 64  # bytes of context read on each side of a hit
 
@@ -177,8 +188,7 @@ def private_patterns(extra=(), profile=None, user=None, host=None) -> tuple[list
             notes.append("user name '%s' is shorter than 4 characters and is not searched bare" % user)
         else:
             pats.append(user)
-    hosts = [host] if host is not None else [os.environ.get("COMPUTERNAME"), socket.gethostname()]
-    for h in _dedupe(hosts):
+    for h in _dedupe(_hosts(host)):
         if len(h) < 4:
             notes.append("host name %r is shorter than 4 characters and is not searched" % h)
         else:
@@ -187,14 +197,52 @@ def private_patterns(extra=(), profile=None, user=None, host=None) -> tuple[list
     return _dedupe(pats), notes
 
 
-def scan_private(files: dict[str, bytes], patterns) -> list[tuple[str, str, str, int]]:
-    """(path, pattern, encoding, count) for every pattern found in any file."""
+def _hosts(host=None) -> list:
+    return [host] if host is not None else [os.environ.get("COMPUTERNAME"), socket.gethostname()]
+
+
+def host_names(host=None) -> list[str]:
+    """The host-name patterns private_patterns() searches, for scan_private(hosts=...)."""
+    return [h for h in _dedupe(_hosts(host)) if len(h) >= 4]
+
+
+# What may stand right beside a host name: printable ASCII that is not a letter or digit
+# (separators, quotes, punctuation), NUL (a C string), tab and line ends, or the file edge.
+_SEP = frozenset(c for c in range(0x20, 0x7F) if not chr(c).isalnum()) | {0, 9, 10, 13}
+
+
+def _count_bounded(low: bytes, needle: bytes, enc: str) -> int:
+    """Occurrences of needle with a separator (_SEP) or the file edge on both sides.
+    A host name sits between separators ("\\aios\\", "aios.local", "@aios", "aios\\0");
+    four letters inside compressed CUDA data or a base64 run are not one (measured
+    2026-10-02: the v3.0.0 bin\\ had 4 such hits for 'aios': "\\xcfaioSse",
+    "\\x9aaioS\\r", "LAiosc8p")."""
+    step = 2 if enc == "utf-16le" else 1
+
+    def sep(k: int) -> bool:
+        if k < 0 or k + step > len(low):
+            return True
+        return low[k] in _SEP and (step == 1 or low[k + 1] == 0)
+
+    n, i = 0, low.find(needle)
+    while i != -1:
+        if sep(i - step) and sep(i + len(needle)):
+            n += 1
+        i = low.find(needle, i + 1)
+    return n
+
+
+def scan_private(files: dict[str, bytes], patterns, hosts=()) -> list[tuple[str, str, str, int]]:
+    """(path, pattern, encoding, count) for every pattern found in any file. A pattern in
+    `hosts` counts only where no ASCII letter or digit touches it (_count_bounded)."""
+    bounded = {h.lower() for h in hosts}
     hits = []
     for path in sorted(files):
         low = files[path].lower()  # bytes.lower folds ASCII only, which is what paths are
         for pat in patterns:
             for enc in ("utf-8", "utf-16le"):
-                n = low.count(pat.lower().encode(enc))
+                needle = pat.lower().encode(enc)
+                n = _count_bounded(low, needle, enc) if pat.lower() in bounded else low.count(needle)
                 if n:
                     hits.append((path, pat, enc, n))
     return hits
@@ -241,7 +289,8 @@ def split_allowed(files: dict[str, bytes], hits, patterns, allow=PRIVACY_ALLOW):
     for path, pat, enc, n in hits:
         mine = []
         if bare and enc == "utf-8" and pat.lower() == bare:
-            mine = [e for e in entries if e["name"] == bare and fnmatch.fnmatchcase(path.lower(), e["glob"])]
+            where = path.lower().replace("\\", "/")
+            mine = [e for e in entries if e["name"] == bare and fnmatch.fnmatchcase(where, e["glob"].replace("\\", "/"))]
         if not mine:
             refused.append((path, pat, enc, n, ""))
             continue
@@ -278,10 +327,10 @@ def privacy_gate(files: dict[str, bytes], extra=()) -> bool:
     pats, notes = private_patterns(extra)
     for n in notes:
         print("  privacy gate note: " + n)
-    hits = scan_private(files, pats)
+    hits = scan_private(files, pats, hosts=host_names())
     print("privacy gate: %d files, %d patterns (profile path x3 spellings, user name, host, %d extra), UTF-8 and UTF-16LE"
           % (len(files), len(pats), len([e for e in extra if e])))
-    refused, allowed = split_allowed(files, hits, pats)
+    refused, allowed = split_allowed(files, hits, pats, allow=PRIVACY_ALLOW + NAMESPACE_ALLOW)
     for path, label, n, mx in allowed:
         print("  privacy gate INFO: allowed %s  %s  x%d (maximum %d)" % (path, label, n, mx))
     if not refused:
