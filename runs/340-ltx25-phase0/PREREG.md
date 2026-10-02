@@ -98,3 +98,18 @@ and frame count read back from the MP4, flagged gray frames (index, luma std), C
 
 Results go to #340 as a comment and to the vault; raw files stay in this folder (git-ignored), this PREREG is
 committed (forced past the `runs/` ignore rule) so its time and content are fixed in git before the first clip.
+
+## Addendum 1 — 2026-10-02T19:34:13+0200, before any criterion-5 clip
+
+State when written: criteria 1, 2 and 4 met by measurement (results.md), criterion 3 met by robin's blind rating
+(rating-answers.json, unblinded with rating-key.json written 19:26:30: identity 5/5 and motion 5/5 for both the
+5 s and the 10 s set). So criterion 5 is due. Its settings were not fixed above; they are fixed here:
+
+- Rungs via the template's own `ResolutionSelector` (16:9): **2560x1408** = megapixels 3.515625, multiple 64;
+  **3840x2176** = megapixels 7.91015625, multiple 128. Stage 1 then runs at 1280x704 and 1920x1088.
+  Everything else as in *Runtime and settings*, incl. the template's 1536 px resize of the input still.
+- Clips: stills **A** (face) and **D** (photoreal), 5 s (121 frames), the seeds and prompts above, n=1 per still and
+  rung; order A-1440, D-1440, A-2176, D-2176. Same metrics, same /free before each clip, same 30 min timeout.
+- Reported, not gated (criterion 5). A failure (OOM, timeout) is the result for that rung, no retry with other settings.
+- Correction of the header: the PREREG was committed at 2026-10-02 18:40:26 +0200 (4be3203); "18:45" in the first
+  line was an estimate. The first clip started at 18:43:01.
