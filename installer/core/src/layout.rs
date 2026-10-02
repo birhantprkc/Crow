@@ -32,6 +32,16 @@
 //! `<root>\bin\`, its MANIFEST.json as `bin\MANIFEST.json`. It carries no version
 //! inside; the version in the summary comes from the zip's name and "up to date"
 //! means every engine file on disk already matches.
+//!
+//! LINUX (#342): the packages are `crow-<v>-linux-x64.tar.gz` and
+//! `crow-nest-engine-<v>-linux-x64.tar.gz`, read in two streamed passes (verify,
+//! then write) because a gzip stream has no index. Tar names may carry `./`;
+//! absolute names, `..`, links and device entries refuse the package. The engine
+//! MANIFEST.json is an object `{"glibc_min", "files": [...]}`; a host glibc older
+//! than `glibc_min` refuses the engine before a byte is written. A file is
+//! written beside its target and renamed over it, so a running serve or
+//! sd-server keeps its old inode and nothing is moved aside; the tar entry's
+//! mode is kept (serve and sd-server are executables).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -56,17 +66,28 @@ pub enum Action {
 
 /// Top-level folders of the install root that belong to the installer, not to
 /// a package: they never make a root "occupied" and are never removed.
-const INSTALLER_OWN: [&str; 4] = ["setup", "models", "python", "session"];
+#[cfg(not(unix))]
+const INSTALLER_OWN: &[&str] = &["setup", "models", "python", "session"];
+/// Linux adds the venv the installer creates under the root (#342).
+#[cfg(unix)]
+const INSTALLER_OWN: &[&str] = &["setup", "models", "python", "session", "venv"];
+
+fn manifest_value(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("MANIFEST.json is not UTF-8: {e}"))?;
+    let text = text.trim_start_matches('\u{feff}');
+    serde_json::from_str(text).map_err(|e| format!("MANIFEST.json is not valid JSON: {e}"))
+}
 
 /// MANIFEST.json as the packers write it: a JSON array of {path, bytes, sha256},
 /// usually with a UTF-8 BOM; PowerShell writes a one-entry list as an object.
+/// crow-nest's Linux pack (#342) writes an object `{"glibc_min", "files": [...]}`.
 pub fn parse_manifest(bytes: &[u8]) -> Result<Vec<ManifestEntry>, String> {
-    let text = std::str::from_utf8(bytes).map_err(|e| format!("MANIFEST.json is not UTF-8: {e}"))?;
-    let text = text.trim_start_matches('\u{feff}');
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("MANIFEST.json is not valid JSON: {e}"))?;
-    let list = match value {
+    let list = match manifest_value(bytes)? {
         serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(mut o) if o.contains_key("files") => match o.remove("files") {
+            Some(serde_json::Value::Array(a)) => a,
+            _ => return Err("MANIFEST.json: \"files\" is not a list".into()),
+        },
         obj @ serde_json::Value::Object(_) => vec![obj],
         _ => return Err("MANIFEST.json is neither a list nor an entry".into()),
     };
@@ -143,11 +164,50 @@ pub fn find_dropped(previous: &[String], current: &[String]) -> Vec<String> {
     out
 }
 
-/// `crow-nest-engine-<version>-win-x64.zip` -> `<version>`.
+/// `glibc_min` of an object MANIFEST.json (crow-nest's Linux pack), if any.
+pub fn manifest_glibc_min(bytes: &[u8]) -> Option<String> {
+    manifest_value(bytes).ok()?.get("glibc_min")?.as_str().map(str::to_string)
+}
+
+/// `crow-nest-engine-<version>-win-x64.zip` / `...-linux-x64.tar.gz` -> `<version>`.
 pub fn engine_version_from_name(zip: &Path) -> Option<String> {
     let name = zip.file_name()?.to_str()?;
-    let v = name.strip_prefix("crow-nest-engine-")?.strip_suffix("-win-x64.zip")?;
+    let rest = name.strip_prefix("crow-nest-engine-")?;
+    let v = rest.strip_suffix("-win-x64.zip").or_else(|| rest.strip_suffix("-linux-x64.tar.gz"))?;
     (!v.is_empty()).then(|| v.to_string())
+}
+
+/// `a.b.c` against `a.b`: true when `have` is at least `need` (missing parts are 0).
+pub fn version_at_least(have: &str, need: &str) -> bool {
+    let nums = |v: &str| -> Vec<u64> {
+        v.split('.').map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0)).collect()
+    };
+    let (a, b) = (nums(have), nums(need));
+    let n = a.len().max(b.len());
+    let pad = |v: &Vec<u64>| (0..n).map(|i| v.get(i).copied().unwrap_or(0)).collect::<Vec<_>>();
+    pad(&a) >= pad(&b)
+}
+
+/// The C library version this process runs on (`gnu_get_libc_version`); None off glibc.
+pub fn host_glibc() -> Option<String> {
+    #[cfg(all(unix, target_env = "gnu"))]
+    {
+        // SAFETY: returns a pointer to a static NUL-terminated string.
+        let p = unsafe { libc::gnu_get_libc_version() };
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: p is non-null and points at a static C string.
+        return Some(unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned());
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Is `path` a `.tar.gz` package (Linux) rather than a zip (Windows)?
+pub fn is_tar_gz(path: &Path) -> bool {
+    let n = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    n.ends_with(".tar.gz") || n.ends_with(".tgz")
 }
 
 fn sha256_reader(mut r: impl Read) -> io::Result<(u64, String)> {
@@ -180,18 +240,32 @@ pub(crate) fn safe_rel(name: &str) -> Option<PathBuf> {
     }
 }
 
-type Archive = zip::ZipArchive<fs::File>;
+enum Archive {
+    Zip(zip::ZipArchive<fs::File>),
+    /// The `.tar.gz`, opened again for each streamed pass.
+    #[cfg(unix)]
+    TarGz(PathBuf),
+}
 
 /// The package, checked against its own manifest before anything is written.
 struct Package {
     archive: Archive,
     manifest: Vec<ManifestEntry>,
     manifest_bytes: Vec<u8>,
-    /// normalised manifest key -> zip index
+    /// normalised manifest key -> zip index (tar: 0, presence only)
     index: BTreeMap<String, usize>,
+    /// tar: the few entries read back before the write pass (the version files)
+    #[cfg_attr(not(unix), allow(dead_code))]
+    small: BTreeMap<String, Vec<u8>>,
 }
 
 fn open_package(zip_path: &Path) -> Result<Package, String> {
+    if is_tar_gz(zip_path) {
+        #[cfg(unix)]
+        return open_tar(zip_path);
+        #[cfg(not(unix))]
+        return Err(format!("{} is a Linux package", zip_path.display()));
+    }
     let file = fs::File::open(zip_path).map_err(|e| format!("cannot open {}: {e}", zip_path.display()))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("{} is not a readable zip: {e}", zip_path.display()))?;
@@ -253,15 +327,150 @@ fn open_package(zip_path: &Path) -> Result<Package, String> {
             problems.join("; ")
         ));
     }
-    Ok(Package { archive, manifest, manifest_bytes, index })
+    Ok(Package { archive: Archive::Zip(archive), manifest, manifest_bytes, index, small: BTreeMap::new() })
+}
+
+/// Entries the tar pass keeps in memory for [`Package::read_entry`].
+#[cfg(unix)]
+const TAR_SMALL: [&str; 2] = ["cli/crow_core.py", "cli/crow.py"];
+
+#[cfg(unix)]
+fn tar_archive(path: &Path) -> Result<tar::Archive<flate2::read::GzDecoder<io::BufReader<fs::File>>>, String> {
+    let file = fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    Ok(tar::Archive::new(flate2::read::GzDecoder::new(io::BufReader::new(file))))
+}
+
+/// The manifest key of a tar entry; None for what carries no file (directories,
+/// pax headers). Links, devices, absolute names and `..` refuse the package.
+#[cfg(unix)]
+pub(crate) fn tar_entry_key(kind: tar::EntryType, name: &[u8]) -> Result<Option<String>, String> {
+    use tar::EntryType as T;
+    let name = std::str::from_utf8(name).map_err(|_| format!("the package holds a non-UTF-8 name: {}", String::from_utf8_lossy(name)))?;
+    if kind.is_dir() || matches!(kind, T::XHeader | T::XGlobalHeader | T::GNULongName | T::GNULongLink) {
+        return Ok(None);
+    }
+    if !(kind.is_file() || kind == T::Continuous) {
+        return Err(format!("the package holds a link or special file: {name}"));
+    }
+    if name.starts_with('/') {
+        return Err(format!("the package holds an absolute path: {name}"));
+    }
+    let rel = safe_rel(name).ok_or_else(|| format!("the package holds an unsafe path: {name}"))?;
+    let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    Ok(Some(norm_key(&parts.join("/"))))
+}
+
+/// Pass 1 over a `.tar.gz`: hash every file, read MANIFEST.json, compare.
+#[cfg(unix)]
+fn open_tar(path: &Path) -> Result<Package, String> {
+    let shown = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let mut archive = tar_archive(path)?;
+    let mut seen: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    let mut small = BTreeMap::new();
+    let mut manifest_bytes = None;
+    let entries = archive.entries().map_err(|e| format!("{shown} is not a readable tar.gz: {e}"))?;
+    for entry in entries {
+        let mut e = entry.map_err(|err| format!("{shown} is not a readable tar.gz: {err}"))?;
+        let Some(key) = tar_entry_key(e.header().entry_type(), &e.path_bytes())? else { continue };
+        if key == "manifest.json" {
+            let mut b = Vec::new();
+            e.read_to_end(&mut b).map_err(|err| format!("cannot read MANIFEST.json: {err}"))?;
+            manifest_bytes = Some(b);
+            continue;
+        }
+        if seen.contains_key(&key) {
+            return Err(format!("refusing {shown}: {key} is in the package twice"));
+        }
+        let got = if TAR_SMALL.contains(&key.as_str()) {
+            let mut b = Vec::new();
+            e.read_to_end(&mut b).map_err(|err| format!("{key}: {err}"))?;
+            let r = sha256_reader(&b[..]);
+            small.insert(key.clone(), b);
+            r
+        } else {
+            sha256_reader(&mut e)
+        };
+        let got = got.map_err(|err| format!("refusing {shown}: unreadable in the package: {key} ({err})"))?;
+        seen.insert(key, got);
+    }
+    let manifest_bytes = manifest_bytes.ok_or_else(|| format!("{} has no MANIFEST.json, nothing to verify against", path.display()))?;
+    let manifest = parse_manifest(&manifest_bytes)?;
+    let mut problems = Vec::new();
+    let mut index = BTreeMap::new();
+    for e in &manifest {
+        let key = norm_key(&e.path);
+        if safe_rel(&e.path).is_none() {
+            problems.push(format!("unsafe path in MANIFEST.json: {}", e.path));
+            continue;
+        }
+        match seen.get(&key) {
+            None => problems.push(format!("missing from the package: {}", e.path)),
+            Some((n, sha)) if *n == e.bytes && sha.eq_ignore_ascii_case(&e.sha256) => {}
+            Some(_) => problems.push(format!("does not match MANIFEST.json: {}", e.path)),
+        }
+        index.insert(key, 0);
+    }
+    for key in seen.keys() {
+        if !index.contains_key(key) {
+            problems.push(format!("not listed in MANIFEST.json: {key}"));
+        }
+    }
+    if !problems.is_empty() {
+        return Err(format!("refusing {shown}: {}", problems.join("; ")));
+    }
+    Ok(Package { archive: Archive::TarGz(path.to_path_buf()), manifest, manifest_bytes, index, small })
 }
 
 impl Package {
     fn read_entry(&mut self, path: &str) -> Option<Vec<u8>> {
-        let i = *self.index.get(&norm_key(path))?;
-        let mut out = Vec::new();
-        self.archive.by_index(i).ok()?.read_to_end(&mut out).ok()?;
-        Some(out)
+        let key = norm_key(path);
+        let i = *self.index.get(&key)?;
+        match &mut self.archive {
+            Archive::Zip(z) => {
+                let mut out = Vec::new();
+                z.by_index(i).ok()?.read_to_end(&mut out).ok()?;
+                Some(out)
+            }
+            #[cfg(unix)]
+            Archive::TarGz(_) => self.small.get(&key).cloned(),
+        }
+    }
+
+    /// Write every manifest file under `dest`; returns how many were written.
+    fn write_all(&mut self, dest: &Path, in_bin: &dyn Fn(&Path) -> bool, moved: &mut Vec<String>) -> Result<usize, String> {
+        let entries = self.manifest.clone();
+        #[cfg(unix)]
+        if let Archive::TarGz(path) = &self.archive {
+            let by_key: BTreeMap<String, &ManifestEntry> = entries.iter().map(|e| (norm_key(&e.path), e)).collect();
+            let mut written = BTreeSet::new();
+            let mut archive = tar_archive(path)?;
+            let all = archive.entries().map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            for entry in all {
+                let mut e = entry.map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+                let Some(key) = tar_entry_key(e.header().entry_type(), &e.path_bytes())? else { continue };
+                let Some(m) = by_key.get(&key) else { continue };
+                let rel = safe_rel(&m.path).ok_or_else(|| format!("unsafe path {}", m.path))?;
+                let mode = e.header().mode().ok();
+                write_stream(&dest.join(&rel), &mut e, mode)?;
+                written.insert(key);
+            }
+            if written.len() != by_key.len() {
+                return Err(format!("{} changed while it was installed", path.display()));
+            }
+            return Ok(written.len());
+        }
+        for e in &entries {
+            let rel = safe_rel(&e.path).ok_or_else(|| format!("unsafe path {}", e.path))?;
+            let data = self.read_entry(&e.path).ok_or_else(|| format!("cannot read {} from the package", e.path))?;
+            write_file(&dest.join(&rel), &data, in_bin(&rel), moved)?;
+            #[cfg(unix)]
+            if let (Archive::Zip(z), Some(&i)) = (&mut self.archive, self.index.get(&norm_key(&e.path))) {
+                if let Some(mode) = z.by_index(i).ok().and_then(|f| f.unix_mode()) {
+                    set_mode(&dest.join(&rel), mode)?;
+                }
+            }
+        }
+        Ok(entries.len())
     }
 
     fn paths(&self) -> Vec<String> {
@@ -303,8 +512,48 @@ fn read_previous_manifest(dir: &Path, notes: &mut Vec<String>) -> Vec<String> {
     }
 }
 
+/// Linux: write `<dest>.crowsetup-new`, then rename it over `dest`. A running
+/// binary or a mapped library keeps its old inode; nothing is moved aside.
+#[cfg(unix)]
+fn write_stream(dest: &Path, r: &mut dyn Read, mode: Option<u32>) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let mut tmp = dest.as_os_str().to_os_string();
+    tmp.push(".crowsetup-new");
+    let tmp = PathBuf::from(tmp);
+    let _ = fs::remove_file(&tmp);
+    let res = (|| {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        io::copy(r, &mut f).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+        f.flush().map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+        if let Some(m) = mode {
+            set_mode(&tmp, m)?;
+        }
+        fs::rename(&tmp, dest).map_err(|e| format!("cannot replace {}: {e}", dest.display()))
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// The permission bits of a package entry (owner read/write always kept).
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode((mode & 0o777) | 0o600))
+        .map_err(|e| format!("cannot set the mode of {}: {e}", path.display()))
+}
+
+#[cfg(unix)]
+fn write_file(dest: &Path, data: &[u8], _may_move_aside: bool, _moved: &mut Vec<String>) -> Result<(), String> {
+    write_stream(dest, &mut &data[..], None)
+}
+
 /// Write one file; in `bin` a file that cannot be opened for writing is renamed
 /// to `.old` first (Windows lets a running image be renamed, not written).
+#[cfg(not(unix))]
 fn write_file(dest: &Path, data: &[u8], may_move_aside: bool, moved: &mut Vec<String>) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -422,11 +671,7 @@ fn lay_down(pkg: &mut Package, dest: &Path, bin: &Path, in_bin: &dyn Fn(&Path) -
     let previous = read_previous_manifest(dest, &mut notes);
     let mut moved = Vec::new();
     let entries = pkg.manifest.clone();
-    for e in &entries {
-        let rel = safe_rel(&e.path).ok_or_else(|| format!("unsafe path {}", e.path))?;
-        let data = pkg.read_entry(&e.path).ok_or_else(|| format!("cannot read {} from the package", e.path))?;
-        write_file(&dest.join(&rel), &data, in_bin(&rel), &mut moved)?;
-    }
+    pkg.write_all(dest, in_bin, &mut moved)?;
     let mbytes = pkg.manifest_bytes.clone();
     write_file(&dest.join("MANIFEST.json"), &mbytes, false, &mut moved)?;
 
@@ -476,7 +721,7 @@ fn up_to_date(head: String, bin: &Path) -> String {
     s
 }
 
-/// Crow's package (`crow-<version>-win-x64.zip`) into `install_root`.
+/// Crow's package (`crow-<version>-win-x64.zip`, Linux `crow-<version>-linux-x64.tar.gz`) into `install_root`.
 pub fn install_crow_package(zip: &Path, install_root: &Path) -> Result<String, String> {
     let mut pkg = open_package(zip)?;
     let target = ["cli/crow_core.py", "cli/crow.py"]
@@ -522,9 +767,21 @@ pub fn install_crow_package(zip: &Path, install_root: &Path) -> Result<String, S
     Ok(describe(head, &out))
 }
 
-/// The crow-nest engine (`crow-nest-engine-<version>-win-x64.zip`) into `<root>\bin\`.
+/// A refusal when the engine needs a newer glibc than this system has.
+pub fn glibc_refusal(need: Option<&str>, have: Option<&str>) -> Option<String> {
+    let (need, have) = (need?, have?);
+    (!version_at_least(have, need)).then(|| {
+        format!("this engine needs glibc {need} or newer and this system has {have}; nothing was changed")
+    })
+}
+
+/// The crow-nest engine (`crow-nest-engine-<version>-win-x64.zip`, Linux
+/// `crow-nest-engine-<version>-linux-x64.tar.gz`) into `<root>\bin\`.
 pub fn install_engine_package(zip: &Path, install_root: &Path) -> Result<String, String> {
     let mut pkg = open_package(zip)?;
+    if let Some(why) = glibc_refusal(manifest_glibc_min(&pkg.manifest_bytes).as_deref(), host_glibc().as_deref()) {
+        return Err(why);
+    }
     let version = engine_version_from_name(zip).unwrap_or_else(|| "(unversioned)".into());
     let bin = install_root.join("bin");
     fs::create_dir_all(&bin).map_err(|e| format!("cannot create {}: {e}", bin.display()))?;

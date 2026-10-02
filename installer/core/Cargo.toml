@@ -15,6 +15,12 @@ zip = "8.6.0"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
+# Linux (#342): the packages are .tar.gz, disk and RAM come from libc.
+[target.'cfg(unix)'.dependencies]
+flate2 = "1.1.10"
+libc = "0.2.189"
+tar = { version = "0.4.46", default-features = false }
+
 [dev-dependencies]
 tempfile = "3.27.0"
 tiny_http = "0.12.0"

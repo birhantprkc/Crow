@@ -124,6 +124,7 @@ fn init_json(s: &Setup) -> String {
         "root_label": crate::folders::label(root),
         "desktop": s.desktop,
         "desktop_label": s.desktop.as_deref().map(crate::folders::label),
+        "launcher_label": crate::folders::LAUNCHER_LABEL,
     })
     .to_string()
 }
@@ -186,7 +187,8 @@ fn install_dir(picked: &Path) -> PathBuf {
     if picked.file_name().is_some_and(|n| n.eq_ignore_ascii_case("crow")) {
         picked.to_path_buf()
     } else {
-        picked.join("Crow")
+        // Linux (#342): lower case, like `$XDG_DATA_HOME/crow`
+        picked.join(if cfg!(windows) { "Crow" } else { "crow" })
     }
 }
 
@@ -344,8 +346,13 @@ pub fn main(s: Setup) -> ! {
     let webview = match webview {
         Ok(w) => w,
         Err(e) => {
+            #[cfg(windows)]
             message_box(&format!(
                 "Crow Setup needs the Microsoft Edge WebView2 runtime ({e}).\nRun CrowSetup.exe --headless instead."
+            ));
+            #[cfg(not(windows))]
+            message_box(&format!(
+                "Crow Setup needs WebKitGTK 4.1 ({e}).\nRun CrowSetup-linux-x64 --headless instead."
             ));
             std::process::exit(1);
         }
@@ -413,7 +420,7 @@ mod tests {
     #[test]
     fn the_webview_profile_lives_in_the_setup_folder() {
         let root = Path::new(r"D:\Test\Crow");
-        assert_eq!(webview_data_dir(root), PathBuf::from(r"D:\Test\Crow\setup\webview2"));
+        assert_eq!(webview_data_dir(root), root.join("setup").join("webview2"));
         let default = crowsetup_core::run::default_install_root();
         assert_eq!(webview_data_dir(&default), default.join("setup").join("webview2"));
     }
@@ -423,10 +430,19 @@ mod tests {
         assert!(icon(64).is_some() && icon(128).is_some());
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_picked_drive_gets_a_crow_folder() {
         assert_eq!(install_dir(Path::new(r"D:\")), PathBuf::from(r"D:\Crow"));
         assert_eq!(install_dir(Path::new(r"D:\Apps\crow")), PathBuf::from(r"D:\Apps\crow"));
+    }
+
+    /// #342: a picked Linux folder gets `crow`, as `$XDG_DATA_HOME/crow`.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_picked_linux_folder_gets_a_crow_folder() {
+        assert_eq!(install_dir(Path::new("/mnt/big")), PathBuf::from("/mnt/big/crow"));
+        assert_eq!(install_dir(Path::new("/opt/Crow")), PathBuf::from("/opt/Crow"));
     }
 }
 

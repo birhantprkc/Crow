@@ -17,6 +17,10 @@
 //!   rounds down. A 64 GB host shows about 63.4 GiB, so RAM counts as 64 GB from
 //!   60 GiB on; VRAM counts as 32 GB from 30 GiB on.
 //! - WebView2 missing is not a block: `--headless` is the fallback.
+//! - Linux (#342): RAM from /proc/meminfo, free disk from statvfs (f_bavail,
+//!   what an unprivileged user may write), and `webview2` reports WebKitGTK 4.1
+//!   (the window links it, so a binary that runs has it). The OS sentence names
+//!   Linux.
 
 use crate::api::{Blocked, PreflightReport};
 use crate::stack::Stack;
@@ -102,10 +106,19 @@ fn article(name: &str) -> &'static str {
     }
 }
 
+/// The OS the hard-block sentence names.
+const OS_NAME: &str = if cfg!(windows) { "Windows" } else { "Linux" };
+
 pub fn verdicts(facts: &Facts, stack: &Stack) -> PreflightReport {
+    verdicts_with_disk(facts, stack, &|p: &crate::stack::Point| p.preflight.disk_bytes)
+}
+
+/// [`verdicts`] with each point's disk need handed in: a `--source` folder on the
+/// same Linux file system is hard-linked, not copied, so it costs no space (#342).
+pub fn verdicts_with_disk(facts: &Facts, stack: &Stack, disk_need: &dyn Fn(&crate::stack::Point) -> u64) -> PreflightReport {
     let gpu = pick_gpu(&facts.gpus);
     let hard_block = if !facts.os_64bit {
-        Some("Crow needs 64-bit Windows, and this machine runs 32-bit Windows.".to_string())
+        Some(format!("Crow needs 64-bit {OS_NAME}, and this machine runs 32-bit {OS_NAME}."))
     } else {
         match gpu {
             None => Some("Crow needs an NVIDIA RTX 50 series GPU, and nvidia-smi reports none on this machine.".to_string()),
@@ -127,10 +140,10 @@ pub fn verdicts(facts: &Facts, stack: &Stack) -> PreflightReport {
                 Some(format!("Needs {VRAM_NEED_GB} GB of VRAM. This GPU has {} GB.", mib.div_ceil(1024)))
             } else if p.preflight.host_ram.pinned_max_gib.is_some() && facts.ram_bytes < RAM_FLOOR_BYTES {
                 Some(format!("Needs {RAM_NEED_GB} GB RAM. This machine has {} GB.", ceil_gib(facts.ram_bytes)))
-            } else if facts.disk_free_bytes < p.preflight.disk_bytes {
+            } else if facts.disk_free_bytes < disk_need(p) {
                 Some(format!(
                     "Needs {} GB free disk. This drive has {} GB free.",
-                    ceil_gib(p.preflight.disk_bytes),
+                    ceil_gib(disk_need(p)),
                     facts.disk_free_bytes / GIB
                 ))
             } else {
@@ -262,9 +275,50 @@ mod sys {
     }
 }
 
-#[cfg(not(windows))]
+/// `MemTotal` of /proc/meminfo, in bytes; 0 when absent.
+pub fn parse_meminfo(text: &str) -> u64 {
+    text.lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))
+        .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok())
+        .map_or(0, |kib| kib * 1024)
+}
+
+/// Where a WebKitGTK 4.1 runtime library lives on the common distributions.
+pub const WEBKITGTK_LIBS: [&str; 4] = [
+    "/usr/lib/libwebkit2gtk-4.1.so.0",
+    "/usr/lib64/libwebkit2gtk-4.1.so.0",
+    "/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0",
+    "/usr/local/lib/libwebkit2gtk-4.1.so.0",
+];
+
+#[cfg(unix)]
 mod sys {
-    //! The installer is Windows-only; elsewhere the crate builds and reads nothing.
+    //! Linux (#342).
+    use std::path::Path;
+    pub fn os_64bit() -> bool {
+        cfg!(target_pointer_width = "64")
+    }
+    pub fn ram_total() -> u64 {
+        std::fs::read_to_string("/proc/meminfo").map(|t| super::parse_meminfo(&t)).unwrap_or(0)
+    }
+    pub fn disk_free(dir: &Path) -> u64 {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return 0 };
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: c is NUL-terminated, st is a writable statvfs.
+        if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+            return 0;
+        }
+        (st.f_bavail as u64).saturating_mul(st.f_frsize as u64)
+    }
+    /// WebKitGTK 4.1, the Linux WebView.
+    pub fn webview2() -> bool {
+        super::WEBKITGTK_LIBS.iter().any(|p| Path::new(p).exists())
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+mod sys {
     use std::path::Path;
     pub fn os_64bit() -> bool {
         cfg!(target_pointer_width = "64")
