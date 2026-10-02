@@ -7,10 +7,21 @@ The reasoning is in the commit and on the issue.
 
 ### Added
 
+- **`CrowSetup-linux-x64` installs Crow, the crow-nest engine and the chosen operating points on Linux** (#342, 2026-10-02). It is the same installer as `CrowSetup.exe`, built from the same crate: a GTK/WebKitGTK window, the same resumable, verified downloads, `--headless`, `--source` and `--package-source`.
+  - **Layout:** the root is `${XDG_DATA_HOME:-~/.local/share}/crow`. `bin/` holds `serve`, `libnvrtc.so`, `libnvrtc-builtins.so.13.3` (crow-nest #133) and `sd-server`, `cuda/lib/` holds cudart, cublas and cublasLt, and Python is a venv from the system `python3` (3.10 or newer). It writes desktop entries "Crow Operating Points" and "Crow" (`$XDG_DATA_HOME/applications`).
+  - **Local models:** `--source` hard-links models that are on the same file system, and the disk check counts them as free.
+  - **Packages:** `crow-<v>-linux-x64.tar.gz` is packed by `tools/pack-release.sh`, which uses the privacy gate of `pack-release.ps1` plus `/home/<anyone>/`. The archive is read back through the gate member by member. The bare user name passes only in the public-namespace contexts (URLs, repo ids, the repo constant, the README link text, the copyright line); robin confirmed this on 2026-10-02. `installer/build.sh` builds and gates the installer: 4,640,496 B, 0 refused hits.
+  - **sd-server for shipping:** `SD_RELEASE=1 tools/build-sd-server.sh` builds it with RPATH `$ORIGIN/../cuda/lib`, `-ffile-prefix-map` and GGML_NATIVE off with AVX2/FMA/F16C (x86-64-v3). The privacy scan finds 0 hits, against 236 for the 2026-09-27 local build.
+  - **Measured on the Linux box, 2026-10-02:**
+    - Install: a headless install of 27B + Image Stack from local packages and the manifest-layout models took 22 s. 52.9 GB were planned and hard-linked; the disk lost about 1.3 GB (packages and venv).
+    - Boot from the installed root: Image Stack "Landed" after 9 s. NVRTC came from `bin/` and cudart/cublasLt from `cuda/lib/`, with no CUDA toolkit on any path.
+    - Image: one `generate_image` at 2048×2048 took 161.3 s on the first request. The 2.8.0 reference with the native build is 155 s warm and 175 s cold at 2752×1536.
+    - Stop took 0.6 s, and both ports were free afterwards.
 - **Operating points start on Linux** (#341, 2026-10-02). `manifests/stack.json` names `bin/serve` and `bin/sd-server` for Linux and a `lib_path` (`<install>/bin`, `<install>/cuda/lib`) that goes in front of `LD_LIBRARY_PATH`. The boot menu and the operating-point window start both servers in the same memory-bounded user scope as the llama.cpp lines. `tools/check_stack.py` checks both platforms. Measured on the Linux box (RTX 5090), from a scratch install root with the crow-nest Linux pack (crow-nest #133) and the models in the manifest layout: the 27B landed in 11 s (`/props` `model_path` ends with the container, vision on), and the Image Stack in 9 s with sd-server ready on :8097. Stop took 0.3 s, and afterwards both ports were free and VRAM was back to 697 MiB.
 
 ### Fixed
 
+- **The Linux release packer no longer refuses its own archive** (#342, 2026-10-02). The readback gate scanned the tar as one blob, so the per-file allowlist did not apply and the public namespace was counted 20 times. Each member is now scanned under its own path. Its selftest is red without the fix ("an allowed context reads back clean") and green with it, 25 checks.
 - **`tools/check_stack.py` no longer takes the Hugging Face owner for the user name** (#343, 2026-10-02). On a machine whose login equals the repo namespace (robin's Linux box: `nibor1896`), the check failed 17 times on `/files[i]/repo` and `tools/test_check_stack.py` was red twice against an unchanged manifest. The namespace of a bare repo id is now exempt, while the repo name part and every other field are still checked. Result: 7 of 7, and the suite has 53 tests OK under the real login.
 - **Stop no longer waits 30 s on Linux for a server it already ended** (#341, 2026-10-02). A killed child that nobody waited for stayed a zombie and still answered signal 0, so Stop timed out with "still there". `process_exists` now treats a zombie as gone.
 
