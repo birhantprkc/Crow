@@ -1,5 +1,6 @@
 //! `--selftest`: no network, no window. The run order on the fake steps, the
-//! embedded stack and a plan per point, and the embedded UI. Prints one line
+//! embedded stack and a plan per point of it (and that cli::POINTS names the
+//! same points), and the embedded UI. Prints one line
 //! per check and a RESULT line; exit 0 when every check passes.
 
 use crowsetup_core::api::{Package, Packages};
@@ -39,7 +40,22 @@ pub fn main() -> i32 {
         guarded(|| Stack::parse(crowsetup_core::STACK_JSON).map(|_| ())),
     ));
     let pkgs = Packages { crow: package("crow.zip"), engine: package("engine.zip") };
-    for point in crate::cli::POINTS {
+    // The points come from the embedded stack.json, not from cli::POINTS: a point
+    // added there and forgotten in the CLI list is planned here and turns red below.
+    let points: Vec<(String, bool)> = Stack::parse(crowsetup_core::STACK_JSON)
+        .map(|s| s.points.iter().map(|p| (p.id.clone(), !p.derived.is_empty())).collect())
+        .unwrap_or_default();
+    let ids: Vec<&str> = points.iter().map(|(id, _)| id.as_str()).collect();
+    checks.push((
+        "points: stack.json = cli::POINTS".into(),
+        if ids == crate::cli::POINTS {
+            Ok(())
+        } else {
+            Err(format!("stack.json {ids:?}, cli::POINTS {:?}", crate::cli::POINTS))
+        },
+    ));
+    for (point, has_derived) in &points {
+        let (point, has_derived) = (point.as_str(), *has_derived);
         checks.push((
             format!("plan {point}"),
             guarded(|| {
@@ -53,7 +69,7 @@ pub fn main() -> i32 {
                 if ids.len() != n {
                     return Err("a file is listed twice".into());
                 }
-                if (point == "image-stack") == plan.derived.is_empty() {
+                if has_derived == plan.derived.is_empty() {
                     return Err(format!("derived files: {}", plan.derived.len()));
                 }
                 Ok(())

@@ -350,5 +350,65 @@ class TheWindowsLine(Base):
             self.red("placeholders and paths", "names the user")
 
 
+class PointLists(unittest.TestCase):
+    """The hand-written point lists (#340), each broken in a copy of its source file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        for rel in {entry[1] for entry in C.POINT_LISTS}:
+            os.makedirs(os.path.dirname(os.path.join(self.root, rel)), exist_ok=True)
+            with open(os.path.join(C.REPO, rel), encoding="utf-8") as f:
+                text = f.read()
+            with open(os.path.join(self.root, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def edit(self, rel, old, new):
+        path = os.path.join(self.root, rel)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn(old, text, "fixture text moved in %s" % rel)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(old, new, 1))
+
+    def problems(self, doc=REAL):
+        return C.check_point_lists(doc, self.root)[0]
+
+    def test_the_repo_is_green(self):
+        problems, n = C.check_point_lists(REAL)
+        self.assertEqual(problems, [])
+        self.assertEqual(n, 9)
+
+    def test_a_new_point_only_in_stack_json(self):
+        doc = copy.deepcopy(REAL)
+        doc["points"].append(dict(point(doc, "image-stack"), id="media-stack"))
+        problems = self.problems(doc)
+        hit = {label for label, *_ in C.POINT_LISTS if any(label in p for p in problems)}
+        self.assertEqual(hit, {label for label, _, _, rule, *_ in C.POINT_LISTS if rule != "subset"})
+
+    def test_cli_points_without_a_point(self):
+        self.edit("installer/app/src/cli.rs", '"27b", "image-stack"]', '"27b"]')
+        self.assertIn("cli.rs POINTS", "\n".join(self.problems()))
+
+    def test_boot_icon_missing(self):
+        self.edit("cli/crow_boot.py", '    "image-stack": ', '    "image-stackz": ')
+        self.assertTrue(any("crow_boot ICONS" in p and "lacks ['image-stack']" in p for p in self.problems()))
+
+    def test_fake_plan_without_a_point(self):
+        self.edit("installer/core/src/run.rs", 'if has("flash-next")', 'if false')
+        self.assertTrue(any("run.rs fake plan" in p and "flash-next" in p for p in self.problems()))
+
+    def test_mock_selects_an_unknown_point(self):
+        self.edit("installer/ui/mock.js", "var points = ['flash-next', '27b']", "var points = ['flash-next', 'video']")
+        self.assertTrue(any("mock.js selection" in p and "video" in p for p in self.problems()))
+
+    def test_a_list_that_moved(self):
+        self.edit("installer/ui/index.html", "var DESC = {", "var DESCRIPTIONS = {")
+        self.assertTrue(any("setup page DESC: list not found" in p for p in self.problems()))
+
+
 if __name__ == "__main__":
     unittest.main()

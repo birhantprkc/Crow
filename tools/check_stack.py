@@ -25,7 +25,13 @@ OFFLINE (the default, no network):
                    field, a pinned 40-hex revision, a status of published or
                    upstream, a dest under ${INSTALL}/ that no other file uses, and
                    holds model.bin under ${INSTALL}/models/whisper-small/, the
-                   directory cli/crow_voice.py loads.
+                   directory cli/crow_voice.py loads;
+  * point lists  - the point ids are also written by hand in the code (POINT_LISTS
+                   below: the CLI list, the boot icons, the setup page, ...). Each
+                   such list must name exactly the points of stack.json, or for a
+                   per-point table at least each of them; the mock's selection only
+                   real ones. A point added to stack.json and forgotten in one place
+                   turns this red (#340).
 
 ONLINE (--online): bytes, sha256 and revision of every file re-read from the
 source - the tree API at the pinned revision (lfs oid for LFS files, a download
@@ -570,6 +576,53 @@ def check_online_crow(doc, report: Report, hub):
         report.check("online " + f["id"], problems, "%d B at %s" % (f["bytes"], where))
 
 
+# The point ids written by hand outside stack.json (#340). (label, file, regex whose
+# group 1 holds the list, rule[, id regex; default: every quoted id in the list]). rule "equal": exactly the points of stack.json;
+# "each": every point is there (more keys are allowed: a defaulted table, extra model
+# lines); "subset": only real points (a sample selection).
+POINT_LISTS = (
+    ("cli.rs POINTS", "installer/app/src/cli.rs", r"pub const POINTS: \[&str; \d+\] = \[([^\]]*)\]", "equal"),
+    ("crow_core ACTIVE_POINTS", "cli/crow_core.py", r"\nACTIVE_POINTS = \(([^)]*)\)", "equal"),
+    ("check_stack POINT_IDS", "tools/check_stack.py", r"\nPOINT_IDS = \(([^)]*)\)", "equal"),
+    ("setup page DESC", "installer/ui/index.html", r"var DESC = \{([^}]*)\}", "equal"),
+    ("setup page selection", "installer/ui/index.html", r"\bsel: \{([^}]*)\}", "equal"),
+    ("crow_boot ICONS", "cli/crow_boot.py", r"\nICONS = \{(.*?)\n\}", "each"),
+    ("crow_boot_gui USUAL_START_S", "cli/crow_boot_gui.py", r"\nUSUAL_START_S = \{([^}]*)\}", "each"),
+    ("run.rs fake plan", "installer/core/src/run.rs", r"(?s)(let has = \|p: &str\|.*?)let derived = ", "each",
+     r'has\("([^"]+)"\)'),
+    ("mock.js selection", "installer/ui/mock.js", r"var points = \[([^\]]*)\]", "subset"),
+)
+QUOTED_ID = re.compile(r"""["']([a-z0-9][a-z0-9.-]*)["']""")
+
+
+def check_point_lists(doc, root=REPO) -> "tuple[list[str], int]":
+    """Every hand-written point list against the ids of stack.json; (problems, lists read)."""
+    points = [pt["id"] for pt in doc["points"]]
+    p, cache = [], {}
+    for label, rel, pattern, rule, *id_re in POINT_LISTS:
+        if rel not in cache:
+            try:
+                with open(os.path.join(root, rel), encoding="utf-8") as f:
+                    cache[rel] = f.read()
+            except OSError as e:
+                p.append("%s: cannot read %s (%s)" % (label, rel, e.strerror))
+                continue
+        m = re.search(pattern, cache[rel], re.S)
+        if not m:
+            p.append("%s: list not found in %s (pattern moved?)" % (label, rel))
+            continue
+        found = (re.compile(id_re[0]) if id_re else QUOTED_ID).findall(m.group(1))
+        missing = [x for x in points if x not in found]
+        unknown = [x for x in found if x not in points]
+        if rule == "equal" and (missing or unknown or len(found) != len(points)):
+            p.append("%s (%s) names %s, stack.json has %s" % (label, rel, found, points))
+        elif rule == "each" and missing:
+            p.append("%s (%s) lacks %s" % (label, rel, missing))
+        elif rule == "subset" and unknown:
+            p.append("%s (%s) names unknown points %s" % (label, rel, unknown))
+    return p, len(POINT_LISTS)
+
+
 def run(doc, online=False) -> Report:
     r = Report()
     schema = check_schema(doc)
@@ -590,6 +643,8 @@ def run(doc, online=False) -> Report:
     crow_problems = check_crow_files(doc)
     r.check("crow files", crow_problems, "%d files %s B, dictation in %s"
             % (len(crow), format(sum(f.get("bytes") or 0 for f in crow), ","), WHISPER_DIR))
+    lists, n_lists = check_point_lists(doc)
+    r.check("point lists", lists, "%d lists, %d points" % (n_lists, len(doc["points"])))
     if crow_problems:
         return r  # the online half indexes the fields this check did not find
     if online:
