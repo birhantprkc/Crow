@@ -237,7 +237,13 @@ def verify(out: str, extra) -> list:
         elif len(b) != e["bytes"] or sha(b) != e["sha256"]:
             problems.append("corrupt: " + e["path"])
     problems += ["unlisted: " + n for n in seen if n not in named]
-    if not gate({os.path.basename(out)[:-3]: raw}, extra):
+    # Each member through the gate under its own path, as at staging: the
+    # allowlist is per file, so the tar as ONE blob would refuse every allowed
+    # context (2026-10-02: x20 for the public namespace). The member names are
+    # gated on their own; the headers are checked above (no owner).
+    seen["MANIFEST.json"] = json.dumps(manifest).encode()
+    names = "\n".join(sorted(seen)).encode()
+    if not gate(seen, extra) or not gate({"<tar member names>": names}, extra):
         problems.append("the written archive does not pass the privacy gate")
     return problems, len(manifest)
 
@@ -366,6 +372,13 @@ def selftest() -> int:
         bad = os.path.join(tmp, "crow-9.9.8-linux-x64.tar.gz")
         write_tar(bad, {"bin/sd-server": ("x " + home + "/y").encode()})
         check("a written archive with a home path fails verification", verify(bad, [])[0] != [])
+        ok_ns = os.path.join(tmp, "crow-9.9.7-linux-x64.tar.gz")
+        write_tar(ok_ns, {"manifests/stack.json": b'"repo": "nibor1896/Qwen3.8-27B-CNQ4.5"'})
+        check("an allowed context reads back clean (gated per member)", verify(ok_ns, [])[0] == [])
+        if len(user) >= 4:
+            bad_name = os.path.join(tmp, "crow-9.9.6-linux-x64.tar.gz")
+            write_tar(bad_name, {"cli/x.py": ("# built by " + user).encode()})
+            check("the bare user name in a member still fails verification", verify(bad_name, [])[0] != [])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
