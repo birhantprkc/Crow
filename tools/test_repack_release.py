@@ -340,9 +340,11 @@ class EndToEndTest(unittest.TestCase):
         zpath = os.path.join(self.out, "crow-9.9.9-win-x64.zip")
         with zipfile.ZipFile(zpath) as z:
             names = z.namelist()
-        self.assertIn("cli/crow_core.py", names)
-        self.assertIn("kits/pathtracer/kit.json", names)
-        self.assertFalse([n for n in names if n.endswith(".log") or "/runs/" in n or ".pyc" in n], names)
+        # Backslash names, the shape pack-release.ps1 writes and v3.0.0 shipped.
+        self.assertIn("cli\\crow_core.py", names)
+        self.assertIn("kits\\pathtracer\\kit.json", names)
+        self.assertFalse([n for n in names if n.endswith(".log") or "\\runs\\" in n.replace("/", "\\")
+                          or ".pyc" in n], names)
 
     def test_a_previous_bin_with_a_log_in_it_is_refused(self):
         rr.write_package(os.path.join(self.tmp, "prev.zip"),
