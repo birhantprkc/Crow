@@ -305,6 +305,17 @@ impl App {
 }
 
 pub fn main(s: Setup) -> ! {
+    // WebKitGTK's DMA-BUF renderer turns on Wayland explicit sync and commits
+    // a buffer without an acquire point; Hyprland answers "Missing acquire
+    // timeline", Gdk "Error 71 (Protocol error)", and the window dies at its
+    // first frame (measured 2026-10-02, NVIDIA 610.57.04). The same fix as the
+    // Crow window (`cli/crow_gui.py` prepare_environment), which keeps the
+    // accelerated path. A value the user set wins.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_none_or(|v| v.is_empty()) {
+        // SAFETY: still single-threaded; no worker, GTK or WebKit thread yet.
+        unsafe { std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1") };
+    }
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
@@ -335,14 +346,26 @@ pub fn main(s: Setup) -> ! {
     // wry hands this to CreateCoreWebView2EnvironmentWithOptions as the user
     // data folder; the run never returns, so the context outlives the view.
     let mut web_context = WebContext::new(Some(webview_data_dir(&s.opts.launch_root)));
-    let webview = WebViewBuilder::new_with_web_context(&mut web_context)
+    let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_html(page())
         .with_background_color(BG)
         .with_devtools(cfg!(debug_assertions))
         .with_ipc_handler(move |req: Request<String>| {
             let _ = ipc_proxy.send_event(UserEvent::Ipc(req.body().clone()));
-        })
-        .build(&window);
+        });
+    #[cfg(windows)]
+    let webview = builder.build(&window);
+    // `build(&window)` is X11-only on Linux: under Wayland the window never
+    // maps. tao's default GTK box works on both (wry 0.57 examples/simple.rs).
+    #[cfg(not(windows))]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        match window.default_vbox() {
+            Some(vbox) => builder.build_gtk(vbox),
+            None => builder.build(&window),
+        }
+    };
     let webview = match webview {
         Ok(w) => w,
         Err(e) => {

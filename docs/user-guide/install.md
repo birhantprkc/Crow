@@ -227,6 +227,7 @@ chmod +x CrowSetup-linux-x64 && ./CrowSetup-linux-x64
 |---|---|
 | system | `webkit2gtk-4.1` and `gtk3` (the window and the binary link them), glibc 2.34+ (the engine) |
 | Python | `python3` 3.10+ with `venv`, and `python-gobject` for the Crow window |
+| display | X11 or Wayland. The window sets `__NV_DISABLE_EXPLICIT_SYNC=1` unless you set it, as the Crow window does: without it WebKitGTK dies on NVIDIA under Wayland |
 
 ```bash
 sudo pacman -S --needed gtk3 webkit2gtk-4.1 python python-gobject
