@@ -99,6 +99,25 @@ class Paths(Base):
             self.doc["files"][0]["role"] = "container of zzqbuilder"
             self.red("placeholders and paths", "names the user")
 
+    def test_repo_owner_is_not_the_user(self):
+        # #343: a Hugging Face repo id's namespace is the public owner the installer
+        # downloads from, not a leak, even when it equals the builder's login.
+        owner = REAL["files"][0]["repo"].split("/")[0]
+        with mock.patch.dict(os.environ, {"USER": owner, "LOGNAME": owner}):
+            r = C.run(self.doc)
+            self.assertFalse([ln for ln in r.lines if "names the user" in ln], "\n".join(r.lines))
+
+    def test_user_name_in_the_repo_name_part(self):
+        with mock.patch.dict(os.environ, {"USERNAME": "zzqbuilder"}):
+            self.doc["files"][0]["repo"] = "someorg/zzqbuilder-model"
+            self.red("placeholders and paths", "names the user")
+
+    def test_user_name_in_a_dest_beside_a_repo_owner(self):
+        owner = REAL["files"][0]["repo"].split("/")[0]
+        with mock.patch.dict(os.environ, {"USER": owner}):
+            self.doc["files"][0]["dest"] = "${MODELS}/%s/x.cnq" % owner
+            self.red("placeholders and paths", "names the user")
+
 
 class References(Base):
     def test_unused_file(self):

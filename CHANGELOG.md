@@ -11,6 +11,7 @@ The reasoning is in the commit and on the issue.
 
 ### Fixed
 
+- **`tools/check_stack.py` no longer takes the Hugging Face owner for the user name** (#343, 2026-10-02). On a machine whose login equals the repo namespace (robin's Linux box: `nibor1896`), the check failed 17 times on `/files[i]/repo` and `tools/test_check_stack.py` was red twice against an unchanged manifest. The namespace of a bare repo id is now exempt, while the repo name part and every other field are still checked. Result: 7 of 7, and the suite has 53 tests OK under the real login.
 - **Stop no longer waits 30 s on Linux for a server it already ended** (#341, 2026-10-02). A killed child that nobody waited for stayed a zombie and still answered signal 0, so Stop timed out with "still there". `process_exists` now treats a zombie as gone.
 
 ## 3.0.0 — 2026-10-01

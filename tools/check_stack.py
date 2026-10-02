@@ -72,6 +72,9 @@ REPO_ID = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
 PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
 PATH_ROOTS = ("${INSTALL}/", "${MODELS}/")
 # absolute or personal paths: a drive letter, a UNC root, a home directory
+# A Hugging Face repo id, `<namespace>/<name>` (#343). The namespace is the public
+# owner the installer downloads from, so it is not held to the user-name check.
+REPO_ID = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 PERSONAL = re.compile(r"(?i)(\b[a-z]:[\\/]|\\\\[a-z0-9]|(^|[\s\"'(=])~[\\/]|[\\/](users|home)[\\/])")
 SMALL = 1 << 20
 CROW_SMALL = 8 << 20
@@ -229,6 +232,8 @@ def check_paths(doc) -> "list[str]":
         if PERSONAL.search(s):
             p.append("%s: absolute or personal path in %r" % (where, s[:80]))
         low = s.lower()
+        if where.endswith("/repo") and REPO_ID.fullmatch(s):
+            low = low.split("/", 1)[1]
         for n in names:
             if re.search(r"(?<![a-z0-9])%s(?![a-z0-9])" % re.escape(n), low):
                 p.append("%s: names the user %r" % (where, n))
