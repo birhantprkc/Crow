@@ -5,6 +5,14 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Added
+
+- **Operating points start on Linux** (#341, 2026-10-02). `manifests/stack.json` names `bin/serve` and `bin/sd-server` for Linux and a `lib_path` (`<install>/bin`, `<install>/cuda/lib`) that goes in front of `LD_LIBRARY_PATH`. The boot menu and the operating-point window start both servers in the same memory-bounded user scope as the llama.cpp lines. `tools/check_stack.py` checks both platforms. Measured on the Linux box (RTX 5090), from a scratch install root with the crow-nest Linux pack (crow-nest #133) and the models in the manifest layout: the 27B landed in 11 s (`/props` `model_path` ends with the container, vision on), and the Image Stack in 9 s with sd-server ready on :8097. Stop took 0.3 s, and afterwards both ports were free and VRAM was back to 697 MiB.
+
+### Fixed
+
+- **Stop no longer waits 30 s on Linux for a server it already ended** (#341, 2026-10-02). A killed child that nobody waited for stayed a zombie and still answered signal 0, so Stop timed out with "still there". `process_exists` now treats a zombie as gone.
+
 ## 3.0.0 — 2026-10-01
 
 **`CrowSetup.exe` installs Crow, the crow-nest engine and the operating points in one window, and the window is Crow's only client.** The installer is attached to this release; it downloads Crow's package and the crow-nest v0.8.0 engine from their releases, resumes after a stop, and writes the shortcut to the new operating-point window. The terminal client and `crow --serve` are removed: start Crow with `python <install>/cli/crow_gui.py`; installs of 2.8.5 and older update through the usual one-liner. Major version because a command line that used to work no longer exists.
