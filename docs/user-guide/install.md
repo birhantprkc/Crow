@@ -10,7 +10,7 @@ the model — that is a separate line, printed at the end of the run.
 | Windows | `install.ps1` — five steps, no elevation, everything under `%LOCALAPPDATA%\Crow` |
 | Windows, one window | `CrowSetup.exe` from the [latest release](https://github.com/nibor1896/Crow/releases/latest): Crow, the crow-nest engine and the operating points you pick, with resume. See [CrowSetup.exe](#crowsetupexe-windows) |
 | Linux | `install.sh` — five steps, no root, everything under `${XDG_DATA_HOME:-~/.local/share}/crow` |
-| Linux, one window | `CrowSetup-linux-x64`: the same installer as `CrowSetup.exe`, for Linux. See [CrowSetup (Linux)](#crowsetup-linux) |
+| Linux, one window | `CrowSetup-linux-x64` from the [latest release](https://github.com/nibor1896/Crow/releases/latest): the same installer as `CrowSetup.exe`, for Linux. See [CrowSetup (Linux)](#crowsetup-linux) |
 | The model | `hf download`, separately, 73.45 GiB + 0.9 GiB for the projector |
 
 ---

@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 3.1.0 — 2026-10-02
+
+**Linux gets the one-window installer and the operating points.** `CrowSetup-linux-x64` is attached to this release; it installs Crow's Linux package (with `sd-server` and its CUDA libraries) and the crow-nest v0.9.0 Linux engine, and writes the "Crow Operating Points" launcher. The operating-point window starts 27B and the Image Stack on Linux. Windows assets are unchanged: `CrowSetup.exe` and the Windows package stay on v3.0.0.
+
 ### Added
 
 - **`CrowSetup-linux-x64` installs Crow, the crow-nest engine and the chosen operating points on Linux** (#342, 2026-10-02). It is the same installer as `CrowSetup.exe`, built from the same crate: a GTK/WebKitGTK window, the same resumable, verified downloads, `--headless`, `--source` and `--package-source`. The window runs on X11 and Wayland, NVIDIA included (it sets `__NV_DISABLE_EXPLICIT_SYNC=1` unless you set it, as the Crow window does); before that fix it never mapped under Wayland, and on Hyprland + NVIDIA 610.57.04 WebKitGTK died at the first frame ("Missing acquire timeline").
