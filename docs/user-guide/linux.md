@@ -79,6 +79,7 @@ unset, which is what the specification asks for.
 | Crow's own log, `crow.log` (rotated, 1 MiB × 4) | `~/.local/state/crow/log/` | `%LOCALAPPDATA%\Crow\log\` |
 | models | `<install>/models`, a link to the tree; `$CROW_MODELS` overrides it | `<install>\models` |
 | `llama-server` binary | `<install>/bin/`, then `PATH`, then `~/.local/share/crow/bin` | `<install>\bin\llama-server.exe` |
+| crow-nest `serve`, `sd-server` (boot menu) | `<install>/bin/serve` with its NVRTC libraries beside it, `<install>/bin/sd-server` | `<install>\bin\serve.exe`, `sd-server.exe` |
 | fonts | `~/.local/share/fonts/crow/` + `fc-cache` | `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + winreg |
 | launcher | `$CROW_HOME/bin/crow`, symlinked into `~/.local/bin` if that is on `$PATH` | none — `install.ps1` prints the start line and writes nothing to the Start menu, the registry or `PATH` |
 | desktop entry | `~/.local/share/applications/crow.desktop` | — |
@@ -185,7 +186,15 @@ not downloaded by Crow. Licence: Qwen Research License Agreement (release date 2
 
 ## Start
 
-**Default: crow-nest**, from the crow-nest repo root (build and container download:
+**Default: crow-nest, from the boot menu** ([boot menu](boot.md#linux)). It starts `serve` (and for
+the Image Stack `sd-server`) from `<install>/bin` in the memory scope below, with `<install>/bin`
+and `<install>/cuda/lib` in front of `LD_LIBRARY_PATH`:
+
+```bash
+python3 cli/crow_boot.py --gui --models ~/Projects/models/crow-stack
+```
+
+**By hand**, from the crow-nest repo root (build and container download:
 [install guide](install.md#the-model)):
 
 ```bash
