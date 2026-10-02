@@ -158,6 +158,34 @@ class Wiring(Base):
         self.red("engine wiring", "--listen-port")
 
 
+class Platforms(Base):
+    """#341: both platforms start every point; the real manifest named Windows only."""
+
+    def test_engine_without_a_linux_binary(self):
+        del point(self.doc, "27b")["engine"]["binary"]["linux"]
+        self.red("platforms", "point 27b engine.binary names ['windows']")
+
+    def test_image_server_without_a_linux_binary(self):
+        del point(self.doc, "image-stack")["image_server"]["binary"]["linux"]
+        self.red("platforms", "point image-stack image_server.binary names ['windows']")
+
+    def test_linux_binary_is_another_program(self):
+        point(self.doc, "flash-next")["engine"]["binary"]["linux"] = "${INSTALL}/bin/serve.exe"
+        self.red("platforms", "are not one program")
+
+    def test_lib_path_missing(self):
+        del self.doc["lib_path"]
+        self.red("platforms", "lib_path must map windows / linux")
+
+    def test_lib_path_without_the_engine_folder(self):
+        self.doc["lib_path"]["linux"] = ["${INSTALL}/cuda/lib"]
+        self.red("platforms", "lib_path.linux lacks ${INSTALL}/bin")
+
+    def test_lib_path_outside_the_install(self):
+        self.doc["lib_path"]["linux"].append("${MODELS}/lib")
+        self.red("platforms", "is not a list of ${INSTALL}/ folders")
+
+
 class Cli(unittest.TestCase):
     def cli(self, *args):
         return subprocess.run([sys.executable, os.path.join(HERE, "check_stack.py"), *args],

@@ -4,8 +4,15 @@
  "_paths": "Every path starts with a placeholder; no absolute path is written here. Forward slashes; the installer converts them for the platform.",
  "schema": "crow-stack/1",
  "placeholders": {
-  "INSTALL": "the install root (Windows: %LOCALAPPDATA%\\Crow)",
+  "INSTALL": "the install root (Windows: %LOCALAPPDATA%\\Crow; Linux: $XDG_DATA_HOME/crow, by default .local/share/crow in the home folder)",
   "MODELS": "the models root: $CROW_MODELS when set, else ${INSTALL}/models (Crow cli/crow_platform.py models_dir)"
+ },
+ "_lib_path": "Folders Boot puts in front of LD_LIBRARY_PATH for serve and sd-server, per platform (cli/crow_boot.py plan_point; #341). Linux: ${INSTALL}/bin holds the NVRTC libraries beside serve (crow-nest's Linux pack; libnvrtc has no RUNPATH and cudarc dlopens bare names), ${INSTALL}/cuda/lib the CUDA runtime and cuBLAS that sd-server links. Windows: none; a program finds its DLLs beside it.",
+ "lib_path": {
+  "linux": [
+   "${INSTALL}/bin",
+   "${INSTALL}/cuda/lib"
+  ]
  },
  "licenses": {
   "qwen-community-1.0": {
@@ -555,7 +562,8 @@
    },
    "engine": {
     "binary": {
-     "windows": "${INSTALL}/bin/serve.exe"
+     "windows": "${INSTALL}/bin/serve.exe",
+     "linux": "${INSTALL}/bin/serve"
     },
     "cwd": "${INSTALL}",
     "env": {
@@ -638,7 +646,8 @@
    },
    "engine": {
     "binary": {
-     "windows": "${INSTALL}/bin/serve.exe"
+     "windows": "${INSTALL}/bin/serve.exe",
+     "linux": "${INSTALL}/bin/serve"
     },
     "cwd": "${INSTALL}",
     "env": {
@@ -733,7 +742,8 @@
    },
    "engine": {
     "binary": {
-     "windows": "${INSTALL}/bin/serve.exe"
+     "windows": "${INSTALL}/bin/serve.exe",
+     "linux": "${INSTALL}/bin/serve"
     },
     "cwd": "${INSTALL}",
     "env": {
@@ -776,7 +786,8 @@
    "image_server": {
     "_what": "sd-server exactly as Crow builds it: cli/crow_core.py image_server_command (argv) plus cli/crow_platform.py image_server_platform_args (the Windows --mmap). Crow starts it from an empty working folder it owns (crow_core.image_server_workdir, #324).",
     "binary": {
-     "windows": "${INSTALL}/bin/sd-server.exe"
+     "windows": "${INSTALL}/bin/sd-server.exe",
+     "linux": "${INSTALL}/bin/sd-server"
     },
     "argv": [
      "--diffusion-model",

@@ -48,6 +48,14 @@ THE DECISIONS, and why each is this way:
   `crow_platform.log_dir()` (Windows: `runs\` under the current folder -- the
   shortcut starts the menu in the install root; if that folder cannot be
   created, `<install>/runs`).
+* LINUX (#341): serve and sd-server start behind
+  `crow_platform.server_scope_prefix()` -- the user scope with the memory
+  bounds the llama.cpp lines get; empty on Windows. `systemd-run --scope`
+  execs the server, so the Popen pid IS the server's pid, the one the scan,
+  Stop and `terminate_tree` address. Their LD_LIBRARY_PATH gets stack.json's
+  `lib_path` for this platform in front (Linux: `<install>/bin` for the
+  NVRTC beside serve, `<install>/cuda/lib` for sd-server's CUDA runtime);
+  Windows has none and its env is left as it was.
 * READINESS is the stack's probe: serve `GET /health` == `{"status": "ok"}`
   (it answers only once fully loaded), sd-server `GET /sdcpp/v1/capabilities`
   == 200; a 5xx from sd-server is final (#324), a 5xx from serve is waited
@@ -229,7 +237,12 @@ def _binary(spec: dict, point_id: str, what: str) -> str:
 
 
 def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
-    """Everything needed to start one point, placeholders resolved."""
+    """Everything needed to start one point, placeholders resolved.
+
+    `lib_path` is stack.json's top-level `lib_path` for this platform: the
+    folders serve and sd-server get in front of LD_LIBRARY_PATH (#341). []
+    where the stack names none (Windows).
+    """
     points = {p.get("id"): p for p in stack["points"]}
     point = points.get(point_id)
     if point is None:
@@ -271,7 +284,24 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
         "base_url": base_url_for(port),
         "identity": engine.get("identity") or {},
         "timeout": BOOT_TIMEOUT_S.get(point_id, DEFAULT_BOOT_TIMEOUT_S),
+        "lib_path": [r(d) for d in (stack.get("lib_path") or {}).get(PLATFORM_KEY) or []],
     }
+
+
+def with_lib_path(env: dict, lib_path) -> dict:
+    """`env` with the plan's library folders in front of LD_LIBRARY_PATH (#341).
+
+    The loader searches LD_LIBRARY_PATH before RUNPATH, and a library that
+    dlopens further (libnvrtc -> libnvrtc-builtins) inherits it; libnvrtc has
+    no RUNPATH and cudarc dlopens bare names. A folder already there moves to
+    the front instead of being listed twice. No folders (Windows): `env` comes
+    back as it was, no key added.
+    """
+    if not lib_path:
+        return env
+    have = [d for d in (env.get("LD_LIBRARY_PATH") or "").split(os.pathsep) if d]
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(list(lib_path) + [d for d in have if d not in lib_path])
+    return env
 
 
 def engine_env_keys(stack: dict) -> set:
@@ -480,10 +510,15 @@ def process_exists(pid) -> bool:
     and tasklist dropped it only after 1.61 s -- the time Windows needed to tear
     down its memory. A next point started in between shares the card with it.
     Windows: a SYNCHRONIZE handle, signalled once the process object is done.
-    Elsewhere: pid_alive.
+    Elsewhere: pid_alive, except that a ZOMBIE is gone (#341). The window and
+    the menu are the parent of the serve they started, and nothing waits on
+    it after Stop: measured 2026-10-02, a scoped child that was killed stays
+    `Z` in /proc/<pid>/stat and answers signal 0, so pid_alive said "alive"
+    and Stop waited its 30 s and reported it still there. A zombie holds no
+    memory, card or port; only its exit status is left.
     """
     if not crow_platform.IS_WINDOWS:
-        return crow_platform.pid_alive(pid)
+        return crow_platform.pid_alive(pid) and not _is_zombie(pid)
     try:
         number = int(pid)
     except (TypeError, ValueError):
@@ -500,6 +535,18 @@ def process_exists(pid) -> bool:
         return kernel32.WaitForSingleObject(handle, 0) == 0x102       # WAIT_TIMEOUT
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _is_zombie(pid, proc_root: str = "/proc") -> bool:
+    """True when /proc says the process has exited and waits to be reaped."""
+    try:
+        with open(os.path.join(proc_root, str(int(pid)), "stat"), "rb") as fh:
+            stat = fh.read().decode("utf-8", "replace")
+    except (OSError, TypeError, ValueError):
+        return False
+    # the state follows the command name, which is in parentheses and may hold any byte
+    rest = stat.rsplit(")", 1)[-1].split()
+    return bool(rest) and rest[0] == "Z"
 
 
 def _detached_kwargs(breakaway: bool) -> dict:
@@ -850,6 +897,7 @@ class Boot:
                                            self.style.bold(plan["title"]), plan["line"]))
         env = {k: v for k, v in os.environ.items() if k not in engine_env_keys(self.stack)}
         env.update(plan["serve"]["env"])
+        with_lib_path(env, plan["lib_path"])
         started = []
         logs = []
         began = self.clock()
@@ -857,7 +905,8 @@ class Boot:
             log, sink = self._open_log("serve-%d.log" % plan["serve"]["port"])
             logs.append(log)
             try:
-                serve = self._spawn(plan["serve"]["argv"], cwd=plan["serve"]["cwd"],
+                serve = self._spawn(crow_platform.server_scope_prefix() + plan["serve"]["argv"],
+                                    cwd=plan["serve"]["cwd"],
                                     env=env, stdin=subprocess.DEVNULL,
                                     stdout=sink, stderr=subprocess.STDOUT)
             finally:
@@ -873,8 +922,10 @@ class Boot:
                 log, sink = self._open_log("sd-server-%d.log" % plan["image"]["port"])
                 logs.append(log)
                 try:
-                    image = self._spawn(plan["image"]["argv"], cwd=work,
-                                        env=crow_core._image_server_env(),
+                    image = self._spawn(crow_platform.server_scope_prefix() + plan["image"]["argv"],
+                                        cwd=work,
+                                        env=with_lib_path(crow_core._image_server_env(),
+                                                          plan["lib_path"]),
                                         stdin=subprocess.DEVNULL,
                                         stdout=sink, stderr=subprocess.STDOUT)
                 finally:
