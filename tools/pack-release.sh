@@ -31,7 +31,7 @@
 #   3. THE PRIVACY GATE: tools/repack-release.py privacy_gate() -- the same
 #      patterns and the same scoped allowlist as pack-release.ps1: $HOME (three
 #      spellings), the user name (as a path segment and bare, case-insensitive),
-#      the host name, every --private-pattern, in UTF-8 and UTF-16LE -- plus
+#      the host name (between separators), every --private-pattern, in UTF-8 and UTF-16LE -- plus
 #      /home/<any user>/ in both encodings, which no allowlist covers. The
 #      Linux builder's user name is also the project's public namespace, so
 #      LINUX_ALLOW below lets the bare name pass in its URL, repo-id, link and
@@ -129,12 +129,7 @@ def home_hits(files: dict) -> list:
 # the bare name and only UTF-8; path patterns, /home/<user>/ and the host name
 # are never allowed. On a machine with another user name these entries match
 # nothing.
-LINUX_ALLOW = (
-    r'* @@ nibor1896 @@ 64 @@ public namespace URL @@ (?:github\.com|githubusercontent\.com|huggingface\.co|ko-fi\.com)/nibor1896(?![a-z0-9_-])',
-    r'manifests/stack.json @@ nibor1896 @@ 32 @@ model repo id @@ "repo": "nibor1896/',
-    r'cli/crow_core.py @@ nibor1896 @@ 1 @@ the GitHub repo constant @@ repo = "nibor1896/crow"',
-    r'readme.md @@ nibor1896 @@ 1 @@ the repo link text @@ >nibor1896/crow<',
-    r'license @@ nibor1896 @@ 1 @@ the copyright line @@ copyright \(c\) 20[0-9][0-9] nibor1896\n',
+LINUX_ALLOW = rr.NAMESPACE_ALLOW + (
     # installer/build.sh gates the CrowSetup binary, which embeds manifests/stack.json
     r'crowsetup* @@ nibor1896 @@ 32 @@ model repo id (embedded stack.json) @@ "repo": "nibor1896/',
 )
@@ -145,7 +140,7 @@ def gate(files: dict, extra) -> bool:
     pats, notes = rr.private_patterns(extra)
     for n in notes:
         print("  privacy gate note: " + n)
-    hits = rr.scan_private(files, pats)
+    hits = rr.scan_private(files, pats, hosts=rr.host_names())
     print("privacy gate: %d files, %d patterns (profile path x3 spellings, user name, host, %d extra) + /home/<user>/, UTF-8 and UTF-16LE"
           % (len(files), len(pats), len([e for e in extra if e])))
     refused, allowed = rr.split_allowed(files, hits, pats, allow=rr.PRIVACY_ALLOW + LINUX_ALLOW)
