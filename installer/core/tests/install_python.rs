@@ -25,6 +25,7 @@ fn only_3_10_and_newer_counts() {
     assert!(!python::version_at_least("x", 3, 10));
 }
 
+#[cfg(windows)]
 #[test]
 fn the_store_stub_folder_is_recognised() {
     assert!(python::is_windows_apps(Path::new(
@@ -34,6 +35,7 @@ fn the_store_stub_folder_is_recognised() {
     assert!(!python::is_windows_apps(Path::new("C:\\Python312\\python.exe")));
 }
 
+#[cfg(windows)]
 fn fake_dirs() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let stub = tmp.path().join("Microsoft").join("WindowsApps");
@@ -47,6 +49,7 @@ fn fake_dirs() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     (tmp, stub, real, empty)
 }
 
+#[cfg(windows)]
 #[test]
 fn path_candidates_skip_the_store_stub_and_folders_without_python() {
     let (_tmp, stub, real, empty) = fake_dirs();
@@ -54,6 +57,7 @@ fn path_candidates_skip_the_store_stub_and_folders_without_python() {
     assert_eq!(python::path_candidates(&path), vec![real.join("python.exe")]);
 }
 
+#[cfg(windows)]
 #[test]
 fn find_asks_the_launcher_first_then_path_and_never_runs_the_stub() {
     let (_tmp, stub, real, _empty) = fake_dirs();
@@ -153,4 +157,48 @@ fn ensure_without_python_and_without_an_embedded_zip_says_so() {
             assert!(err.contains("Python"), "{err}");
         }
     }
+}
+
+/// #342: Linux has no `py` launcher and no `python.exe`; `python3` on PATH is
+/// asked first, then `python` (install.sh `command -v python3 || command -v python`).
+#[cfg(not(windows))]
+#[test]
+fn linux_asks_python3_then_python_on_path_and_never_py() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    for exe in [a.join("python"), b.join("python3")] {
+        fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths([&a, &b]).unwrap();
+    assert_eq!(python::path_candidates(&path), vec![b.join("python3"), a.join("python")]);
+
+    // python3 is 3.9 -> python 3.12 is taken; `py` is never run
+    let mut calls: Vec<OsString> = Vec::new();
+    let found = python::find_with(
+        &mut |prog: &OsStr, _args: &[&str]| {
+            calls.push(prog.to_os_string());
+            if Path::new(prog) == b.join("python3") {
+                Some(format!("{}\n3.9.18\n", b.join("python3").display()))
+            } else if Path::new(prog) == a.join("python") {
+                Some(format!("{}\n3.12.4\n", a.join("python").display()))
+            } else {
+                None
+            }
+        },
+        &path,
+    )
+    .unwrap();
+    assert_eq!(found.exe, a.join("python"));
+    assert!(calls.iter().all(|c| c != "py"), "{calls:?}");
+}
+
+/// #342: the venv lives under the install root.
+#[cfg(not(windows))]
+#[test]
+fn the_linux_venv_python_is_under_the_root() {
+    assert_eq!(python::venv_python(Path::new("/x/crow")), PathBuf::from("/x/crow/venv/bin/python"));
 }

@@ -21,6 +21,11 @@
 //!   exits 0). A missing DLL ends a process before `main` with an NTSTATUS exit
 //!   code (0xC0000135) and no output, which is exactly what this tells apart.
 //!   For the Image Stack `sd-server.exe --help` must exit 0.
+//! * Linux (#342): a missing library ends the process with the loader's
+//!   "error while loading shared libraries" (exit 127), which the same rules
+//!   report. serve runs with the plan's own env; sd-server with
+//!   `LD_LIBRARY_PATH=<root>/cuda/lib`, exactly what crow_core's
+//!   `_image_server_env` gives it at start.
 
 use crate::python::{output_tail, quiet, PythonInfo};
 use crate::state::StateStore;
@@ -175,12 +180,24 @@ pub fn judge_start(what: &str, rule: StartRule, code: Option<i32>, output: &str)
 
 /// Run `exe args`, wait up to `timeout`, judge it by `rule`.
 pub fn binary_starts(exe: &Path, args: &[&str], rule: StartRule, timeout: Duration) -> Result<(), String> {
+    binary_starts_env(exe, args, rule, timeout, &[])
+}
+
+/// [`binary_starts`] with variables added to the inherited environment.
+pub fn binary_starts_env(
+    exe: &Path,
+    args: &[&str],
+    rule: StartRule,
+    timeout: Duration,
+    env: &[(String, String)],
+) -> Result<(), String> {
     let what = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| exe.display().to_string());
     if !exe.is_file() {
         return Err(format!("{what} is missing: {}", exe.display()));
     }
     let mut child = quiet(exe)
         .args(args)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(exe.parent().unwrap_or(Path::new(".")))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -250,6 +267,17 @@ pub fn boot_plan(py: &PythonInfo, install_root: &Path, models_root: &Path, point
     parse_plan(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// `LD_LIBRARY_PATH` with `<root>/cuda/lib` in front (crow_core `_image_server_env`).
+pub fn image_server_env(install_root: &Path, inherited: Option<&str>) -> Vec<(String, String)> {
+    let lib = install_root.join("cuda").join("lib").to_string_lossy().into_owned();
+    let value = match inherited.filter(|v| !v.is_empty()) {
+        Some(have) => format!("{lib}:{have}"),
+        None => lib,
+    };
+    vec![("LD_LIBRARY_PATH".into(), value)]
+}
+
+#[cfg(windows)]
 pub fn check_point(py: &PythonInfo, install_root: &Path, models_root: &Path, point: &str) -> Result<(), String> {
     let plan = boot_plan(py, install_root, models_root, point)?;
     let verified = verified_ids(install_root);
@@ -257,6 +285,20 @@ pub fn check_point(py: &PythonInfo, install_root: &Path, models_root: &Path, poi
     binary_starts(&plan.serve.binary, &["--help"], StartRule::UsageOrZero("usage: serve"), START_TIMEOUT)?;
     if let Some(image) = &plan.image {
         binary_starts(&image.binary, &["--help"], StartRule::ExitZero, START_TIMEOUT)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn check_point(py: &PythonInfo, install_root: &Path, models_root: &Path, point: &str) -> Result<(), String> {
+    let plan = boot_plan(py, install_root, models_root, point)?;
+    let verified = verified_ids(install_root);
+    check_files(&plan, &|id: &str| verified.contains(id))?;
+    let serve_env: Vec<(String, String)> = plan.serve.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    binary_starts_env(&plan.serve.binary, &["--help"], StartRule::UsageOrZero("usage: serve"), START_TIMEOUT, &serve_env)?;
+    if let Some(image) = &plan.image {
+        let env = image_server_env(install_root, std::env::var("LD_LIBRARY_PATH").ok().as_deref());
+        binary_starts_env(&image.binary, &["--help"], StartRule::ExitZero, START_TIMEOUT, &env)?;
     }
     Ok(())
 }

@@ -195,6 +195,8 @@ pub fn opts(source: Source) -> FetchOptions {
         stall_secs: 5,
         checkpoint_bytes: 4096,
         max_backoff_secs: 0,
+        // the copy path; tests/fetch_link.rs covers the hard link (#342)
+        link_local: false,
     }
 }
 

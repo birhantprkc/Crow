@@ -180,18 +180,20 @@ fn packages_are_jobs_with_release_paths() {
 
 #[test]
 fn dest_resolution_with_a_non_default_install_and_models_root() {
+    // built with join so the test holds on both platforms (#342)
     let install = PathBuf::from(r"D:\Apps\CrowTest");
     let models = PathBuf::from(r"E:\big\models");
     let p = plan(&Stack::embedded(), &sel(&["image-stack"], &install), &models, &packages()).unwrap();
     let dest = |id: &str| p.jobs.iter().find(|j| j.id == id).unwrap().dest.clone();
-    assert_eq!(dest("27b-cnq"), PathBuf::from(r"E:\big\models\Qwen3.8-27B-CNQ4.5\Qwen3.8-27B-CNQ4.5.cnq"));
+    let under = |root: &Path, parts: &[&str]| parts.iter().fold(root.to_path_buf(), |p, x| p.join(x));
+    assert_eq!(dest("27b-cnq"), under(&models, &["Qwen3.8-27B-CNQ4.5", "Qwen3.8-27B-CNQ4.5.cnq"]));
     assert_eq!(
         dest("qi-transformer-1"),
-        PathBuf::from(r"E:\big\models\qwen-image-2.1\transformer\diffusion_pytorch_model-00001-of-00002.safetensors")
+        under(&models, &["qwen-image-2.1", "transformer", "diffusion_pytorch_model-00001-of-00002.safetensors"])
     );
     // ${INSTALL}, not ${MODELS}: crow_voice.py loads <crow>/models/whisper-small
-    assert_eq!(dest("whisper-model"), PathBuf::from(r"D:\Apps\CrowTest\models\whisper-small\model.bin"));
-    assert_eq!(p.derived[0].dest, PathBuf::from(r"E:\big\models\qwen-image-2.1\text_encoder_sdcli"));
+    assert_eq!(dest("whisper-model"), under(&install, &["models", "whisper-small", "model.bin"]));
+    assert_eq!(p.derived[0].dest, under(&models, &["qwen-image-2.1", "text_encoder_sdcli"]));
 }
 
 #[test]
