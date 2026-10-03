@@ -32,3 +32,10 @@ manifests/0731-encoding/** -text
 # Windows checkout would add a CR per line and every one of those goes red.
 kits/pathtracer/crow-pathtracer.js -text
 kits/pathtracer/LICENSE.* -text
+
+# CrowSetup's licence texts. installer/licenses/ holds copies tools/installer_notices.py
+# checks against the sha256 in installer/licenses/sources.json, and the generated
+# installer/THIRD-PARTY-NOTICES.txt is compared to a fresh build byte for byte.
+# A CRLF checkout would turn every one of those red.
+installer/licenses/* -text
+installer/THIRD-PARTY-NOTICES.txt -text

@@ -5,6 +5,10 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+### Added
+
+- **CrowSetup carries its third-party notices** (2026-10-03). The installer binary compiles in Rust crates under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0 and bzip2-1.0.6 terms, and on Windows Microsoft's WebView2 loader (linked statically from Microsoft.Web.WebView2 1.0.3800.47), but shipped without their notices. `installer/THIRD-PARTY-NOTICES.txt` now lists every crate of the Windows and Linux release builds (209 together: 145 on Windows, 190 on Linux) with each licence text the crate ships, and `CrowSetup --licenses` prints it from inside the exe. `tools/installer_notices.py` generates the file from `installer/Cargo.lock` and holds it there in CI; the five crates without a licence file of their own (webview2-com, -sys, -macros, dlopen2, dlopen2_derive) and Microsoft's texts are vendored byte for byte under `installer/licenses/` with source and sha256. `NOTICE` names the installer, the embedded Python package and get-pip.py.
+
 ## 3.2.1 — 2026-10-03
 
 **The Media Stack installs to the end.** v3.2.0's `CrowSetup.exe` stopped every Media Stack install at its last check, after all files and the video runtime were in place.
