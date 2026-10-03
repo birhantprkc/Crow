@@ -515,6 +515,39 @@ class LlamaEngineAndVideo(unittest.TestCase):
         self.pt["engine"]["kind"] = "serve"
         self.red("--slot-save-path None is not created")
 
+    def full_runtime(self):
+        for rt in self.pt["video_server"]["runtime"].values():
+            rt.update({"strip": "ComfyUI_windows_portable", "bytes": 4384588275,
+                       "model_paths": {"file": "ComfyUI/extra_model_paths.yaml",
+                                       "base": "${MODELS}/ltx-2.5",
+                                       "folders": ["diffusion_models", "text_encoders", "vae"]}})
+        return self.pt["video_server"]["runtime"]["windows"]
+
+    def test_a_full_runtime_is_green_and_its_bytes_count_as_derived(self):
+        self.full_runtime()
+        self.assertEqual(self.problems(), [])
+        self.assertEqual(C.point_sums(self.doc, self.pt)["derived"], 4384588275)
+
+    def test_runtime_strip_is_one_folder_name(self):
+        self.full_runtime()["strip"] = "a/../b"
+        self.red("runtime.windows.strip 'a/../b' is not one folder name")
+
+    def test_runtime_bytes_are_positive(self):
+        self.full_runtime()["bytes"] = 0
+        self.red("runtime.windows.bytes 0 is not a positive integer")
+
+    def test_model_paths_base_sits_under_a_placeholder(self):
+        self.full_runtime()["model_paths"]["base"] = "C:/models"
+        self.red("runtime.windows.model_paths.base 'C:/models' does not start with")
+
+    def test_model_paths_name_folders(self):
+        self.full_runtime()["model_paths"]["folders"] = []
+        self.red("runtime.windows.model_paths.folders must list folder kinds")
+
+    def test_model_paths_file_is_relative(self):
+        self.full_runtime()["model_paths"]["file"] = "../x.yaml"
+        self.red("runtime.windows.model_paths.file '../x.yaml' is not inside the runtime")
+
     def test_video_server_field_missing(self):
         del self.pt["video_server"]["runtime"]
         self.red("video_server lacks runtime")
@@ -604,7 +637,7 @@ class PointLists(unittest.TestCase):
 
     def test_a_new_point_only_in_stack_json(self):
         doc = copy.deepcopy(REAL)
-        doc["points"].append(dict(point(doc, "image-stack"), id="media-stack"))
+        doc["points"].append(dict(point(doc, "image-stack"), id="test-only-point"))
         problems = self.problems(doc)
         hit = {label for label, *_ in C.POINT_LISTS if any(label in p for p in problems)}
         self.assertEqual(hit, {label for label, _, _, rule, *_ in C.POINT_LISTS if rule != "subset"})

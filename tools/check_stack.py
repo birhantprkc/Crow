@@ -386,6 +386,10 @@ def point_sums(doc, pt) -> dict:
         s[f["status"].replace("-", "_")] += f["bytes"]
     s["files"] = s["published"] + s["mirror_pending"] + s["upstream"]
     s["derived"] = sum(derived[d]["bytes"] for d in pt["derived"])
+    # #340: an unpacked runtime is produced on the machine like a derived file
+    # (its archive is deleted afterwards; the peak holds both).
+    runtimes = ((pt.get("video_server") or {}).get("runtime") or {}).values()
+    s["derived"] += max([rt.get("bytes") or 0 for rt in runtimes if isinstance(rt, dict)] or [0])
     s["disk"] = s["files"] + s["derived"]
     return s
 
@@ -413,6 +417,41 @@ def flag_value(argv, flag):
     if flag in argv and argv.index(flag) + 1 < len(argv):
         return argv[argv.index(flag) + 1]
     return None
+
+
+FOLDER_KIND = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def runtime_problems(pid, plat, rt) -> "list[str]":
+    """#340: the optional unpack fields of video_server.runtime.<platform>:
+    `strip` (the archive's top folder), `bytes` (unpacked size), `model_paths`
+    (ComfyUI's extra_model_paths.yaml: file inside the runtime, base under a
+    placeholder, folder kinds)."""
+    p, at = [], "point %s video_server.runtime.%s" % (pid, plat)
+    if "strip" in rt:
+        v = rt["strip"]
+        if not isinstance(v, str) or not v or any(c in v for c in "/\\:") or v in (".", ".."):
+            p.append("%s.strip %r is not one folder name" % (at, v))
+    if "bytes" in rt:
+        v = rt["bytes"]
+        if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+            p.append("%s.bytes %r is not a positive integer" % (at, v))
+    mp = rt.get("model_paths")
+    if mp is not None:
+        if not isinstance(mp, dict):
+            return p + ["%s.model_paths is not an object" % at]
+        f = mp.get("file")
+        if not isinstance(f, str) or not f or f.startswith(("/", "\\")) \
+                or ".." in f.replace("\\", "/").split("/") or ":" in f:
+            p.append("%s.model_paths.file %r is not inside the runtime" % (at, f))
+        base = mp.get("base")
+        if not isinstance(base, str) or not base.startswith(PATH_ROOTS):
+            p.append("%s.model_paths.base %r does not start with %s" % (at, base, " or ".join(PATH_ROOTS)))
+        folders = mp.get("folders")
+        if not isinstance(folders, list) or not folders \
+                or not all(isinstance(x, str) and FOLDER_KIND.match(x) for x in folders):
+            p.append("%s.model_paths.folders must list folder kinds" % at)
+    return p
 
 
 def check_wiring(doc) -> "list[str]":
@@ -489,6 +528,7 @@ def check_wiring(doc) -> "list[str]":
                     p.append("point %s video_server.runtime.%s.file %r is no runtime file of this point"
                              % (pid, plat, fid))
                 roots.append((rt or {}).get("dir") or "")
+                p.extend(runtime_problems(pid, plat, rt or {}))
             for v in vargv + list((vs.get("binary") or {}).values()):
                 if is_path(v) and v not in installed and v not in produced \
                         and not any(r and v.startswith(r + "/") for r in roots):

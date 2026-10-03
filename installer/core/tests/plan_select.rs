@@ -312,3 +312,26 @@ fn an_upstream_file_is_fetched_from_its_host_and_a_gate_rides_on_the_job() {
     assert_eq!((f("qi-transformer-1").gated, f("qi-transformer-2").gated, f("qi-vae").gated), (true, false, false));
     assert_eq!(vae.local_rel, format!("Qwen/Qwen-Image-2.1/{}", f("qi-vae").path));
 }
+
+#[test]
+fn an_unpacked_runtime_counts_on_disk_and_its_deleted_archive_does_not() {
+    // #340: the archive is deleted once unpacked, like a convert input.
+    let mut doc = Stack::embedded().raw.clone();
+    let mut file = doc["files"].as_array().unwrap().iter().find(|f| f["id"] == "qi-vae").unwrap().clone();
+    file["id"] = "comfyui-portable".into();
+    file["role"] = "runtime".into();
+    file["bytes"] = 1_994_326_521u64.into();
+    file["dest"] = "${INSTALL}/setup/downloads/ComfyUI_windows_portable_nvidia.7z".into();
+    doc["files"].as_array_mut().unwrap().push(file);
+    let rt = serde_json::json!({"file": "comfyui-portable", "dir": "${INSTALL}/comfyui",
+                                "strip": "ComfyUI_windows_portable", "bytes": 4_384_588_275u64});
+    let pt = doc["points"].as_array_mut().unwrap().iter_mut().find(|p| p["id"] == "27b").unwrap();
+    pt["files"].as_array_mut().unwrap().push("comfyui-portable".into());
+    pt["video_server"] = serde_json::json!({"runtime": {"windows": rt.clone(), "linux": rt}});
+    let s = Stack::parse(&doc.to_string()).unwrap();
+    let root = default_root();
+    let with = plan(&s, &sel(&["27b"], &root), &root.join("models"), &packages()).unwrap();
+    let without = plan_for(&["27b"]);
+    assert_eq!(with.download_bytes, without.download_bytes + 1_994_326_521);
+    assert_eq!(with.disk_bytes, without.disk_bytes + 4_384_588_275);
+}

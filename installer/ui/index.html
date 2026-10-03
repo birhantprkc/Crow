@@ -163,6 +163,8 @@ button.sec:hover{color:var(--soft)}
       p.files.forEach(function (id) { if (gate[id] && gated.indexOf(gate[id]) < 0) gated.push(gate[id]); });
       return {
         id: p.id, title: p.menu.title, files: p.files, derived: p.bytes.derived, disk: p.bytes.disk, gated: gated,
+        // #340: a video runtime is unpacked after the downloads (step "runtime")
+        runtime: !!(p.video_server && p.video_server.runtime && Object.keys(p.video_server.runtime).length),
         licence: shown.map(function (l) {
           return l.covers + ': ' + l.name + (l.non_commercial ? ', non-commercial use only.' : '.');
         }).join(' ')
@@ -293,11 +295,18 @@ button.sec:hover{color:var(--soft)}
     if (err) return row({ title: title(id), desc: S.files[err.id].error, dcls: 'bad', cls: 'err', tail: retry(err.id) });
     if (id === 'image-stack' && step('convert').status === 'failed')
       return row({ title: title(id), desc: step('convert').detail, dcls: 'bad', cls: 'err', tail: retry('convert') });
+    var rt = (point(id) || {}).runtime;
+    if (rt && step('runtime').status === 'failed')
+      return row({ title: title(id), desc: step('runtime').detail, dcls: 'bad', cls: 'err', tail: retry('runtime') });
     var total = sum(js.map(function (j) { return j.bytes; })), done = sum(js.map(jobDone));
     var all = js.length > 0 && js.every(function (j) { return S.files[j.id] && S.files[j.id].verified; });
     if (all && id === 'image-stack' && step('convert').status !== 'ok') {
       return row({ title: title(id), desc: step('convert').status === 'running'
         ? 'Preparing the text encoder.' : 'Downloaded. The text encoder comes next.' });
+    }
+    if (all && rt && step('runtime').status !== 'ok') {
+      return row({ title: title(id), desc: step('runtime').status === 'running'
+        ? 'Unpacking the video runtime (ComfyUI).' : 'Downloaded. The video runtime comes next.' });
     }
     if (all) return row({ title: title(id), desc: 'Ready. All files verified.', dcls: 'ok' });
     var fs = js.map(function (j) { return S.files[j.id]; }).filter(Boolean);

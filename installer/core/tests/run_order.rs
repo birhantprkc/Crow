@@ -470,3 +470,80 @@ fn a_failed_install_keeps_the_package_zips() {
     let sh = f.shared.lock().unwrap();
     assert!(sh.present.contains("crow-package") && sh.present.contains("engine-package"), "{:?}", sh.present);
 }
+
+// ------------------------------------------------- #340: the video runtime
+
+#[test]
+fn the_media_stack_unpacks_its_runtime_after_the_downloads_and_drops_the_archive() {
+    let mut f = FakeSteps::default();
+    let (out, events) = run_once(&mut f, &selection(&["media-stack"], &root()));
+    assert_eq!(out, Outcome::Done);
+    assert_eq!(f.log(), expected_order(&["media-stack"]));
+    let log = f.log();
+    let unpack = log.iter().position(|l| l == "unpack runtime comfyui-portable").expect("unpacked");
+    assert!(log.iter().position(|l| l == "download comfyui-portable from 0").unwrap() < unpack);
+    assert!(unpack < log.iter().position(|l| l == "check media-stack").unwrap());
+    assert!(!f.shared.lock().unwrap().present.contains("comfyui-portable"), "the archive is deleted");
+    assert!(events.iter().any(|e| matches!(e, Event::Step { name, status: StepStatus::Ok, .. } if name == "runtime")));
+    let saved = f.shared.lock().unwrap().saved.clone().unwrap();
+    assert!(saved.steps_done.iter().any(|s| s.starts_with("runtime:")), "{:?}", saved.steps_done);
+}
+
+#[test]
+fn a_second_run_neither_fetches_nor_unpacks_the_runtime_again() {
+    let f = FakeSteps::default();
+    let sel = selection(&["media-stack"], &root());
+    run_once(&mut f.clone(), &sel);
+    f.shared.lock().unwrap().log.clear();
+    let (out, _) = run_once(&mut f.clone(), &sel);
+    assert_eq!(out, Outcome::Done);
+    let log = f.log();
+    assert!(!log.iter().any(|l| l.contains("comfyui-portable")), "{log:?}");
+}
+
+#[test]
+fn a_runtime_that_is_gone_is_fetched_and_unpacked_again() {
+    let f = FakeSteps::default();
+    let sel = selection(&["media-stack"], &root());
+    run_once(&mut f.clone(), &sel);
+    {
+        let mut sh = f.shared.lock().unwrap();
+        sh.log.clear();
+        sh.runtime_gone = true;
+    }
+    let (out, _) = run_once(&mut f.clone(), &sel);
+    assert_eq!(out, Outcome::Done);
+    let log = f.log();
+    assert!(log.iter().any(|l| l.starts_with("download comfyui-portable")), "{log:?}");
+    assert!(log.iter().any(|l| l == "unpack runtime comfyui-portable"), "{log:?}");
+}
+
+#[test]
+fn a_failed_unpack_waits_for_retry_of_the_runtime_step() {
+    let f = FakeSteps::default();
+    f.shared.lock().unwrap().fail_step.insert("runtime".into(), 1);
+    let mut live = Live::start(&f, &root());
+    live.send(Command::Start(selection(&["media-stack"], &root())));
+    live.wait_event("runtime failed", |e| matches!(e, Event::Step { name, status: StepStatus::Failed, .. } if name == "runtime"));
+    assert!(!f.log().iter().any(|l| l.starts_with("check")), "{:?}", f.log());
+    live.send(Command::Retry { id: "runtime".into() });
+    let (out, _) = live.finish();
+    assert_eq!(out, Outcome::Done);
+    assert_eq!(f.log().iter().filter(|l| *l == "unpack runtime comfyui-portable").count(), 2);
+}
+
+#[test]
+fn the_disk_peak_holds_the_archive_and_its_unpacked_runtime_together() {
+    // Fake media stack: downloads 600+49+150+199 = 998, the unpacked runtime
+    // 4000 beside its archive until the archive is deleted: peak 4998.
+    let sel = selection(&["media-stack"], &root());
+    let mut f = FakeSteps::default();
+    f.shared.lock().unwrap().disk_free = Some(4997);
+    match run_once(&mut f, &sel).0 {
+        Outcome::Fatal(m) => assert!(m.contains("free disk"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    let mut f = FakeSteps::default();
+    f.shared.lock().unwrap().disk_free = Some(4998);
+    assert_eq!(run_once(&mut f, &sel).0, Outcome::Done);
+}
