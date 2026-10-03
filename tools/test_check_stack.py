@@ -68,6 +68,12 @@ class Schema(Base):
         file_(self.doc, "fn-hotsets-crow0924")["source"]["sha256"] = "a" * 64
         self.red("schema", "differ from its source")
 
+    def test_a_licence_shown_at_install_names_what_it_covers(self):
+        # #340: the selection screen says "<covers>: <name>"; it used to say
+        # "Qwen-Image weights" for every licence it showed.
+        del self.doc["licenses"]["qwen-research"]["covers"]
+        self.red("schema", "licence qwen-research is shown at install but names nothing it covers")
+
     def test_non_commercial_licence_hidden(self):
         self.doc["licenses"]["qwen-research"]["show_at_install"] = False
         self.red("schema", "not shown at install")

@@ -250,6 +250,9 @@ def check_schema(doc) -> "list[str]":
                 p.append("licence %s lacks %s" % (name, k))
         if lic.get("non_commercial") and not lic.get("show_at_install"):
             p.append("licence %s is non-commercial but not shown at install" % name)
+        # #340: the selection screen writes "<covers>: <name>" under the point.
+        if lic.get("show_at_install") and not (isinstance(lic.get("covers"), str) and lic["covers"]):
+            p.append("licence %s is shown at install but names nothing it covers" % name)
         tf = ids.get(lic.get("text_file"))
         if tf is None or tf.get("role") != "license":
             p.append("licence %s text_file %r is not a file with role license"

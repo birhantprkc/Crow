@@ -31,6 +31,7 @@
   },
   "qwen-research": {
    "name": "Qwen Research License Agreement",
+   "covers": "Qwen-Image weights",
    "non_commercial": true,
    "show_at_install": true,
    "text_file": "qi-license",

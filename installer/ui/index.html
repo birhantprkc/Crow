@@ -75,6 +75,7 @@ button.sec:hover{color:var(--soft)}
 .opt .row{padding:6px 0}
 .opt .row b{color:var(--soft);font-weight:500}
 .opt .row .d{font-size:12px;overflow-wrap:anywhere}
+.tok input{width:100%;box-sizing:border-box;margin:2px 0 4px;padding:6px 8px;border:1px solid var(--dimmer);border-radius:6px;background:transparent;color:var(--soft);font:inherit;font-size:12.5px}
 .block{max-width:var(--col);color:var(--warn);text-align:center;font-size:13.5px;margin-top:4px}
 .note{width:100%;max-width:var(--bar);color:var(--warn);font-size:12px;text-align:center;margin-top:8px}
 
@@ -150,18 +151,20 @@ button.sec:hover{color:var(--soft)}
   function deriveInfo(init) {
     var st = init.stack || {}, bytes = {}, lic = st.licenses || {};
     (st.files || []).concat(st.crow_files || []).forEach(function (f) { bytes[f.id] = f.bytes; });
-    var fileLic = {};
-    (st.files || []).forEach(function (f) { fileLic[f.id] = f.license; });
+    var fileLic = {}, gate = {};
+    (st.files || []).forEach(function (f) { fileLic[f.id] = f.license; if (f.gated) gate[f.id] = f.repo; });
     var points = (st.points || []).map(function (p) {
       var shown = [];
       p.files.forEach(function (id) {
         var l = lic[fileLic[id]];
         if (l && l.show_at_install && shown.indexOf(l) < 0) shown.push(l);
       });
+      var gated = [];
+      p.files.forEach(function (id) { if (gate[id] && gated.indexOf(gate[id]) < 0) gated.push(gate[id]); });
       return {
-        id: p.id, title: p.menu.title, files: p.files, derived: p.bytes.derived, disk: p.bytes.disk,
+        id: p.id, title: p.menu.title, files: p.files, derived: p.bytes.derived, disk: p.bytes.disk, gated: gated,
         licence: shown.map(function (l) {
-          return 'Qwen-Image weights: ' + l.name + (l.non_commercial ? ', non-commercial use only.' : '.');
+          return l.covers + ': ' + l.name + (l.non_commercial ? ', non-commercial use only.' : '.');
         }).join(' ')
       };
     });
@@ -263,6 +266,17 @@ button.sec:hover{color:var(--soft)}
       h += '<div class="opt"><p>Crow also runs these llama.cpp models. Setup downloads nothing for them: put the GGUF ' +
         'at the path below, inside the install folder, and llama-server.exe into bin. The boot menu then lists them.</p>' +
         S.info.llama.map(function (l) { return row({ title: l.label, desc: l.path }); }).join('') + '</div>';
+    }
+    // #340: a gated Hugging Face repo needs the user's own token. Kept in S
+    // across renders, sent once on Install, never stored by CrowSetup.
+    var gated = [];
+    selected().forEach(function (p) { (p.gated || []).forEach(function (g) { if (gated.indexOf(g) < 0) gated.push(g); }); });
+    if (gated.length) {
+      h += '<div class="sec">Hugging Face access</div><div class="opt tok"><p>' +
+        esc(gated.join(', ')) + ' is gated. Sign in on huggingface.co, accept its licence on the repo page, ' +
+        'then paste a read token here. Left empty, Setup uses HF_TOKEN or the Hugging Face CLI login.</p>' +
+        '<input id="hftoken" type="password" autocomplete="off" spellcheck="false" placeholder="hf_..." value="' +
+        esc(S.hfToken || '') + '"></div>';
     }
     var free = S.free != null ? S.free : (r ? r.disk_free_bytes : null), need = peak(), none = selected().length === 0;
     var note = '';
@@ -415,6 +429,7 @@ button.sec:hover{color:var(--soft)}
       case 'install':
         S.started = true; S.phase = 'installing';
         S.shortcutDir = S.init.desktop || null; S.shortcutLabel = shortcutLabel(S.shortcutDir);
+        if (S.hfToken) send({ type: 'hf_token', token: S.hfToken });
         send({ type: 'start', points: selected().map(function (p) { return p.id; }), install_root: S.root, shortcut_dir: S.shortcutDir });
         render(); break;
       case 'continue': S.started = true; S.phase = 'installing'; send({ type: 'resume' }); render(); break;
@@ -431,6 +446,9 @@ button.sec:hover{color:var(--soft)}
   document.addEventListener('click', function (e) {
     var t = e.target.closest('[data-act]');
     if (t && !t.disabled) act(t.dataset.act, t);
+  });
+  document.addEventListener('input', function (e) {
+    if (e.target && e.target.id === 'hftoken') S.hfToken = e.target.value.trim();
   });
   document.getElementById('drag').addEventListener('mousedown', function (e) {
     if (e.button === 0) send({ type: 'drag' });
