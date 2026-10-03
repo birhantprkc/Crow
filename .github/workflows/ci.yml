@@ -130,3 +130,9 @@ jobs:
       - name: crowsetup --selftest
         working-directory: installer
         run: cargo run --locked -p crowsetup -- --selftest
+
+      # The exe embeds installer/THIRD-PARTY-NOTICES.txt (`--licenses`); a dependency
+      # change that does not regenerate it ships notices for crates that are gone
+      # and none for the new ones.
+      - name: CrowSetup's third-party notices match Cargo.lock
+        run: python tools/installer_notices.py

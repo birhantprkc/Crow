@@ -92,6 +92,11 @@ fn real_main() -> i32 {
             println!("{}", cli::USAGE);
             0
         }
+        cli::Mode::Licenses => {
+            attach_console();
+            print!("{}", cli::LICENSES);
+            0
+        }
         cli::Mode::Selftest => {
             attach_console();
             selftest::main()

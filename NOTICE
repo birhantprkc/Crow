@@ -392,3 +392,35 @@ CLIPLoader (`398:393`) is removed.
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+CrowSetup -- installer/
+--------------------------------------------------------------------------------
+
+CrowSetup.exe (and CrowSetup on Linux) is a Rust program. Its release binary
+compiles in crates from crates.io -- MIT, Apache-2.0, BSD, ISC, Zlib,
+Unicode-3.0, CDLA-Permissive-2.0 (webpki-roots) and bzip2-1.0.6 (libbz2-rs-sys),
+several dual-licensed -- and, on Windows, Microsoft's WebView2 loader:
+webview2-com-sys links WebView2LoaderStatic.lib from the NuGet package
+Microsoft.Web.WebView2 1.0.3800.47, under Microsoft's BSD-style licence.
+
+One crate of the Linux build is under the Mozilla Public License 2.0, a
+file-level copyleft: option-ext (through wry, dirs and dirs-sys), compiled in
+unmodified. MPL-2.0 section 3.2(a) asks that recipients of the binary learn
+where its source is; the notices file names the published .crate on crates.io
+with the sha256 Cargo.lock pins, for every MPL crate the lock contains.
+
+Every one of those texts, with the crate and version it belongs to, is in
+`installer/THIRD-PARTY-NOTICES.txt`. The exe ships alone as a release asset, so
+it carries that file too: `CrowSetup --licenses` prints it. The file is generated
+from installer/Cargo.lock by `tools/installer_notices.py`, which also holds it
+against the lock; texts the crate sources do not carry (webview2-com, dlopen2,
+Microsoft's) are copied byte for byte into `installer/licenses/`, each with its
+source and sha256 in `installer/licenses/sources.json`.
+
+The Windows build also embeds two files it unpacks unchanged: python.org's
+Python 3.13 embeddable package (PSF License Agreement; its LICENSE.txt is inside
+the package and lands beside python.exe) and get-pip.py from pypa/get-pip
+(MIT; the pip wheel inside it carries pip's licence and those of the libraries
+pip vendors).

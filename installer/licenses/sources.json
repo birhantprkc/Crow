@@ -1,0 +1,38 @@
+{
+  "comment": "Licence texts CrowSetup compiles in that are NOT inside the crate sources cargo downloads. Copied byte for byte from the source named here; tools/installer_notices.py holds each file against its sha256.",
+  "files": {
+    "webview2-rs.LICENSE": {
+      "for": ["webview2-com", "webview2-com-sys", "webview2-com-macros"],
+      "why": "the three crates declare MIT but publish no licence file; the text is the repository's LICENSE at the commits their .cargo_vcs_info.json names (edc2caf8 for webview2-com 0.39.1 and webview2-com-sys 0.39.1, dffa41a8 for webview2-com-macros 0.8.1 -- the same git blob at both)",
+      "source": "https://github.com/wravery/webview2-rs/blob/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+      "git_blob": "de9a7e660e173136b351982a34f715af424ff812",
+      "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+    },
+    "dlopen2.LICENSE": {
+      "for": ["dlopen2", "dlopen2_derive"],
+      "why": "Linux build only (through tao); both crates declare MIT but publish no licence file; the text is the repository's LICENSE at cc80e4a0, the commit .cargo_vcs_info.json names for dlopen2 0.8.2 and dlopen2_derive 0.4.3",
+      "source": "https://github.com/OpenByteDev/dlopen2/blob/cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE",
+      "git_blob": "d38093a7a564c64ad15e459f2e0a1f86a443c8b3",
+      "sha256": "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2"
+    },
+    "Microsoft.Web.WebView2.LICENSE.txt": {
+      "for": ["WebView2LoaderStatic.lib"],
+      "why": "webview2-com-sys links Microsoft's WebView2 loader statically on MSVC targets, so CrowSetup.exe carries Microsoft code; LICENSE.txt from the NuGet package the library comes from",
+      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg",
+      "sha256": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55"
+    },
+    "Microsoft.Web.WebView2.NOTICE.txt": {
+      "for": ["WebView2LoaderStatic.lib"],
+      "why": "NOTICE.txt from the same NuGet package",
+      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg",
+      "sha256": "106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90"
+    }
+  },
+  "webview2_loader": {
+    "crate": "webview2-com-sys",
+    "version": "0.39.1",
+    "nuget": "Microsoft.Web.WebView2 1.0.3800.47",
+    "why": "the crate's x64/WebView2LoaderStatic.lib is byte-identical to build/native/x64/WebView2LoaderStatic.lib in that package (compared 2026-10-03); the SDK version is the one crates/update-bindings pins at upstream commit 12be1a54, released with webview2-com-sys 0.39.0",
+    "x64_static_lib_sha256": "89c6b872783b8f6c3cedbff618adb42082d455c615453ae10cfc753f1e8f25d8"
+  }
+}
