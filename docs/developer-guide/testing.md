@@ -39,6 +39,9 @@ is not on `PATH`; the skipped count in a run's `OK (skipped=N)` line includes it
 CI (`.github/workflows/ci.yml`) runs ruff, the suites, `check_shared_core`,
 `check_operating_point`, `check_pathtracer_kit` and `test_pathtracer_kit` on `ubuntu-latest` and `windows-latest` (Windows without
 `test_crow_gui`), and `install.sh --selftest` on Linux only. `check_gui_prereqs` is not in CI.
+Its `installer` job (windows-latest) runs `cargo test`, `crowsetup --selftest` and
+`tools/installer_notices.py`, which holds `installer/THIRD-PARTY-NOTICES.txt` against
+`installer/Cargo.lock`; after a dependency change, `python tools/installer_notices.py --write`.
 
 The window's own suite needs `pywebview` importable; without it the folder-picker
 cases error out on `No module named 'webview'` and the rest still runs.

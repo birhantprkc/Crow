@@ -144,6 +144,7 @@ Install root: `%LOCALAPPDATA%\Crow`, models in `<install>\models` (the same layo
 | `--shortcut-dir <dir>` | the shortcut goes into `<dir>` only, not the Desktop or the Start menu |
 | `--no-shortcuts` | no shortcut at all |
 | `--selftest` | run the checks, open no window, use no network. Exit code 0 is green |
+| `--licenses` | print the third-party notices of everything compiled into the installer (the Rust crates and, on Windows, Microsoft's WebView2 loader) |
 
 ### Build it
 
@@ -156,6 +157,7 @@ powershell -NoProfile -File installer\build.ps1 -Selftest
 |---|---|
 | vendor | the Python 3.13.16 embeddable zip and `get-pip.py` into `installer\vendor\`, each against a sha256 pinned in the script. The pip is the pypa/get-pip commit with pip 26.2.1, so the sha cannot move under a pin |
 | `packages.json` | asset, bytes, sha256, version and release URL of the two zips; the exe embeds it |
+| notices | `installer\THIRD-PARTY-NOTICES.txt`, generated from `installer\Cargo.lock` by `tools\installer_notices.py`; the exe embeds it and prints it with `--licenses` |
 | build | `cargo build --release -p crowsetup --features bundle`, paths remapped, C runtime linked static |
 | check | `crowsetup.exe --selftest` must exit 0 |
 | privacy gate | `tools\repack-release.py` scans the exe for the builder's profile path, user name and host name, as UTF-8 and UTF-16. A hit refuses the build and nothing is copied |
