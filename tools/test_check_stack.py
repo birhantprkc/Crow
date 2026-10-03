@@ -494,6 +494,31 @@ class LlamaEngineAndVideo(unittest.TestCase):
         self.pt["video_server"]["binary"]["windows"] = "${INSTALL}/bin/python.exe"
         self.red("video_server.binary.windows is not inside its runtime dir")
 
+    def windows_only(self):
+        self.pt["platforms"] = ["windows"]
+        self.pt["_platforms"] = "the video runtime is the Windows portable build"
+        for m in (self.pt["engine"]["binary"], self.pt["video_server"]["binary"],
+                  self.pt["video_server"]["runtime"]):
+            del m["linux"]
+
+    def test_a_windows_only_point_with_a_reason_is_green(self):
+        self.windows_only()
+        self.assertEqual(self.problems(), [])
+
+    def test_a_windows_only_point_needs_a_reason(self):
+        self.windows_only()
+        del self.pt["_platforms"]
+        self.red("runs on windows only and gives no reason (_platforms)")
+
+    def test_an_unknown_platform(self):
+        self.pt["platforms"] = ["windows", "macos"]
+        self.red("platforms ['windows', 'macos'] is not a list of windows / linux")
+
+    def test_a_windows_only_point_naming_a_linux_binary(self):
+        self.windows_only()
+        self.pt["engine"]["binary"]["linux"] = "${INSTALL}/bin/llama-server"
+        self.red("engine.binary names ['linux', 'windows'], expected windows")
+
 
 class PointLists(unittest.TestCase):
     """The hand-written point lists (#340), each broken in a copy of its source file."""

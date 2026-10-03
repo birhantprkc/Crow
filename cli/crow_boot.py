@@ -236,6 +236,11 @@ def _binary(spec: dict, point_id: str, what: str) -> str:
     return binary
 
 
+def runs_here(point: dict) -> bool:
+    """The point names this platform, or names none (= both, #340)."""
+    return PLATFORM_KEY in (point.get("platforms") or ("windows", "linux"))
+
+
 def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
     """Everything needed to start one point, placeholders resolved.
 
@@ -248,6 +253,9 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
     if point is None:
         raise SetupError("unknown operating point %r (one of %s)"
                          % (point_id, ", ".join(p for p in points if p)))
+    if not runs_here(point):
+        raise SetupError("%s runs on %s only, not on %s"
+                         % (point_id, ", ".join(point.get("platforms") or []), PLATFORM_KEY))
 
     def r(value):
         return resolve(value, install, models)
@@ -1220,6 +1228,8 @@ class Boot:
         rows = [("1", "start", "Start Crow", "open the window on the running point",
                  ("crow", None), False)]
         for p in self.stack["points"]:
+            if not runs_here(p):
+                continue
             menu = p.get("menu") or {}
             icon = p.get("id") if p.get("id") in ICONS else "start"
             rows.append((str(len(rows) + 1), icon, menu.get("title") or p.get("id"),

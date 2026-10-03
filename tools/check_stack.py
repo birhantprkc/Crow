@@ -99,6 +99,11 @@ CROW_FILE_FIELDS = ("id", "repo", "path", "revision", "bytes", "sha256", "dest",
 CROW_STATUSES = ("published", "upstream")
 WHISPER_DIR = "${INSTALL}/models/whisper-small/"
 PLATFORMS = ("windows", "linux")
+
+
+def point_platforms(pt) -> "tuple[str, ...]":
+    """The platforms a point runs on: its `platforms`, else both (#340)."""
+    return tuple(pt.get("platforms") or PLATFORMS)
 BIN_DIR = "${INSTALL}/bin/"
 HF = "https://huggingface.co"
 
@@ -232,6 +237,15 @@ def check_schema(doc) -> "list[str]":
                   "crow_env", "preflight"):
             if k not in pt:
                 p.append("point %s lacks %s" % (pt.get("id", "?"), k))
+        plats = pt.get("platforms")
+        if plats is not None:
+            if not isinstance(plats, list) or not plats or len(set(plats)) != len(plats) \
+                    or set(plats) - set(PLATFORMS):
+                p.append("point %s platforms %r is not a list of %s"
+                         % (pt.get("id", "?"), plats, " / ".join(PLATFORMS)))
+            elif sorted(plats) != sorted(PLATFORMS) and not pt.get("_platforms"):
+                p.append("point %s runs on %s only and gives no reason (_platforms)"
+                         % (pt.get("id", "?"), ", ".join(plats)))
         eng = pt.get("engine")
         if isinstance(eng, dict) and eng.get("kind", "serve") not in ENGINE_KINDS:
             p.append("point %s engine kind %r is not one of %s"
@@ -478,7 +492,8 @@ def check_wiring(doc) -> "list[str]":
 
 
 def check_platforms(doc) -> "list[str]":
-    """#341: both platforms can start every point (cli/crow_boot.py plan_point)."""
+    """#341: both platforms can start every point (cli/crow_boot.py plan_point),
+    unless the point names fewer in `platforms` with a reason (#340)."""
     p = []
     lib_path = doc.get("lib_path")
     if not isinstance(lib_path, dict) or sorted(set(lib_path) - set(PLATFORMS)):
@@ -489,6 +504,7 @@ def check_platforms(doc) -> "list[str]":
                                                  for d in dirs):
             p.append("lib_path.%s %r is not a list of ${INSTALL}/ folders" % (plat, dirs))
     for pt in doc["points"]:
+        plats = point_platforms(pt)
         specs = [("engine", pt.get("engine") or {})]
         if pt.get("image_server"):
             specs.append(("image_server", pt["image_server"]))
@@ -498,27 +514,30 @@ def check_platforms(doc) -> "list[str]":
             # so the bin/ rules below do not apply to it.
             binary, runtime = vs.get("binary") or {}, vs.get("runtime") or {}
             for name, m in (("binary", binary), ("runtime", runtime)):
-                if sorted(m) != sorted(PLATFORMS):
+                if sorted(m) != sorted(plats):
                     p.append("point %s video_server.%s names %s, expected %s"
-                             % (pt["id"], name, sorted(m) or "nothing", " and ".join(PLATFORMS)))
-            for plat in PLATFORMS:
+                             % (pt["id"], name, sorted(m) or "nothing", " and ".join(plats)))
+            for plat in plats:
                 root = ((runtime.get(plat) or {}).get("dir") or "").rstrip("/")
                 if plat in binary and (not root or not binary[plat].startswith(root + "/")):
                     p.append("point %s video_server.binary.%s is not inside its runtime dir"
                              % (pt["id"], plat))
         for what, spec in specs:
             binary = spec.get("binary") or {}
-            if sorted(binary) != sorted(PLATFORMS):
+            if sorted(binary) != sorted(plats):
                 p.append("point %s %s.binary names %s, expected %s"
-                         % (pt["id"], what, sorted(binary) or "nothing", " and ".join(PLATFORMS)))
+                         % (pt["id"], what, sorted(binary) or "nothing", " and ".join(plats)))
                 continue
-            win, lin = binary["windows"], binary["linux"]
-            if not win.startswith(BIN_DIR) or not lin.startswith(BIN_DIR):
+            if not all(b.startswith(BIN_DIR) for b in binary.values()):
                 p.append("point %s %s.binary is not under %s" % (pt["id"], what, BIN_DIR))
-            if not win.endswith(".exe") or lin.endswith(".exe") or win[:-4] != lin:
+            win, lin = binary.get("windows"), binary.get("linux")
+            if win is not None and not win.endswith(".exe"):
+                p.append("point %s %s.binary.windows %s is not an .exe" % (pt["id"], what, win))
+            if win is not None and lin is not None and (lin.endswith(".exe") or win[:-4] != lin):
                 p.append("point %s %s.binary: windows %s and linux %s are not one program"
                          % (pt["id"], what, win, lin))
-            if what == "engine" and lin.rsplit("/", 1)[0] not in (lib_path.get("linux") or []):
+            if what == "engine" and lin is not None \
+                    and lin.rsplit("/", 1)[0] not in (lib_path.get("linux") or []):
                 p.append("point %s: lib_path.linux lacks %s, where the NVRTC beside serve lives"
                          % (pt["id"], lin.rsplit("/", 1)[0]))
             extra = spec.get("argv_platform")

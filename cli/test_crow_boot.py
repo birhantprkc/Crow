@@ -827,6 +827,37 @@ class TheVideoServerIsPlannedNotStartedTests(BootCase):
         self.assertEqual([os.path.basename(c[0][0]) for c in popen.calls], ["llama-server" + EXE])
 
 
+class APointForOnePlatformTests(BootCase):
+    """#340: a point with `platforms` is not offered, and not planned, elsewhere."""
+
+    def setUp(self):
+        super().setUp()
+        self.stack = copy.deepcopy(STACK)
+        other = "linux" if crow_boot.PLATFORM_KEY == "windows" else "windows"
+        next(p for p in self.stack["points"] if p["id"] == "27b")["platforms"] = [other]
+        self.other = other
+
+    def test_the_menu_leaves_it_out(self):
+        boot = crow_boot.Boot(self.stack, self.install, self.models, out=self.out, style=crow_boot.Style(),
+                              popen=FakePopen(), get=lambda url, timeout: NOTHING, sleep=self.clock.sleep,
+                              clock=self.clock, read=lambda prompt="": "0", scan=lambda: [],
+                              llama=FakeLlama(), point_for=lambda url, timeout=3.0: None,
+                              model_path=lambda url, timeout=3.0: None,
+                              terminate=self.terminated.append, log_dir=self.logs)
+        actions = [r[4] for r in boot.entries()]
+        self.assertNotIn(("point", "27b"), actions)
+        self.assertIn(("point", "image-stack"), actions)
+
+    def test_planning_it_here_is_a_setup_error(self):
+        with self.assertRaisesRegex(crow_boot.SetupError, "27b runs on %s only" % self.other):
+            crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+
+    def test_naming_this_platform_changes_nothing(self):
+        next(p for p in self.stack["points"] if p["id"] == "27b")["platforms"] = [crow_boot.PLATFORM_KEY]
+        self.assertEqual(crow_boot.plan_point(self.stack, "27b", self.install, self.models),
+                         crow_boot.plan_point(STACK, "27b", self.install, self.models))
+
+
 class ThePlanAsJsonTests(BootCase):
     """#196 phase 2: `--plan <point> --json` is what CrowSetup's check step reads.
     It must be the menu's own resolution, not a second copy of it."""
