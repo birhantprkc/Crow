@@ -13321,6 +13321,13 @@ class TheProjectorReachesTheCommandLineTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="crow-mmproj-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # crow_platform.models_dir reads `$CROW_MODELS` before <install>\models;
+        # a developer shell that points it at the lab tree would put that tree
+        # where the install's models belong. Out for the case, back after.
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CROW_MODELS", None)
         # The two trees server_command resolves against: the measurement
         # machine's model root, and an install.
         self.root = os.path.join(self.dir, "lab-models")
