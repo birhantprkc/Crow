@@ -50,7 +50,9 @@ class TheWindowShowsTheStacksGuiLineTests(GuiCase):
         ctl = self.controller()
         ctl.refresh()
         shown = {r["id"]: r["detail"] for r in ctl.view()["rows"]}
-        self.assertEqual(shown, {p["id"]: p["menu"]["gui"] for p in STACK["points"]})
+        # #340: a point for another platform is not offered here (runs_here).
+        self.assertEqual(shown, {p["id"]: p["menu"]["gui"] for p in STACK["points"]
+                                 if crow_boot.runs_here(p)})
         self.assertEqual(shown["27b"], "128k context. Great speed, coding and vision.")
         menu = {r[2]: r[3] for r in ctl.boot.entries()}
         self.assertEqual(menu["Qwen3.8-27B"], next(p["menu"]["line"] for p in STACK["points"]

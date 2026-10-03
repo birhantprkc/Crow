@@ -199,7 +199,8 @@ class ThePlaceholdersResolveFromTheStackTests(BootCase):
         # owner decision 2026-10-01: the 27B alone runs at 128k, the image stack keeps 65,536
         rows = self.boot().entries()
         titles = [r[2] for r in rows]
-        for point in STACK["points"]:
+        # #340: a point for another platform is not offered here (runs_here).
+        for point in [p for p in STACK["points"] if crow_boot.runs_here(p)]:
             self.assertIn(point["menu"]["title"], titles)
             self.assertIn(point["menu"]["line"], [r[3] for r in rows])
         line_27b = next(r[3] for r in rows if r[4] == ("point", "27b"))
