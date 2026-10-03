@@ -32,6 +32,10 @@ def run_now(fn, *args):
     fn(*args)
 
 
+# #340: the Media Stack runs on Windows only, so the rows a platform shows differ.
+MEDIA = any(p["id"] == "media-stack" and crow_boot.runs_here(p) for p in STACK["points"])
+
+
 class GuiCase(BootCase):
     def controller(self, **kw):
         boot = self.boot(**kw)
@@ -46,7 +50,9 @@ class TheWindowShowsTheStacksGuiLineTests(GuiCase):
         ctl = self.controller()
         ctl.refresh()
         shown = {r["id"]: r["detail"] for r in ctl.view()["rows"]}
-        self.assertEqual(shown, {p["id"]: p["menu"]["gui"] for p in STACK["points"]})
+        # #340: a point for another platform is not offered here (runs_here).
+        self.assertEqual(shown, {p["id"]: p["menu"]["gui"] for p in STACK["points"]
+                                 if crow_boot.runs_here(p)})
         self.assertEqual(shown["27b"], "128k context. Great speed, coding and vision.")
         menu = {r[2]: r[3] for r in ctl.boot.entries()}
         self.assertEqual(menu["Qwen3.8-27B"], next(p["menu"]["line"] for p in STACK["points"]
@@ -70,7 +76,7 @@ class State1NothingRunsTests(GuiCase):
         self.assertEqual(v["say"], "Which model should Crow fly with?")
         self.assertIsNone(v["fill"])
         self.assertEqual([r["title"] for r in v["rows"]],
-                         ["Qwen3.8-Flash-Next", "Qwen3.8-27B", "Image Stack"])
+                         ["Qwen3.8-Flash-Next", "Qwen3.8-27B", "Image Stack"] + ["Media Stack"] * MEDIA)
         self.assertTrue(all(r["enabled"] and not r["dim"] for r in v["rows"]))
         self.assertEqual([(r["title"], r["detail"], r["cls"]) for r in v["optional"]],
                          [("Qwen3.8-27B-UD-Q4_K_XL (optional)", "llama.cpp, port 8082", "opt")])
@@ -98,7 +104,8 @@ class State2StartingTests(GuiCase):
         self.assertEqual((first["title"], first["detail"], first["enabled"]),
                          ("Qwen3.8-27B", "Loading the model. Usually ready in under 20 s.", False))
         self.assertEqual([(r["title"], r["cls"], r["enabled"]) for r in at7["rows"][1:]],
-                         [("Qwen3.8-Flash-Next", "off", False), ("Image Stack", "off", False)])
+                         [("Qwen3.8-Flash-Next", "off", False), ("Image Stack", "off", False)]
+                         + [("Media Stack", "off", False)] * MEDIA)
         self.assertEqual(at7["optional"], [])
         self.assertEqual(at7["bar"]["text"], "You can close this window. The model keeps loading.")
         self.assertEqual(at7["bar"]["button"]["label"], "Cancel")
@@ -160,7 +167,8 @@ class State3LandedTests(GuiCase):
         self.assertEqual(v["running"], {"title": "Qwen3.8-27B", "stop": True,
                                         "detail": "Running on port 8099. 128k context, vision on."})
         self.assertEqual([(r["title"], r["cls"], r["dim"]) for r in v["rows"]],
-                         [("Qwen3.8-Flash-Next", "off", True), ("Image Stack", "off", True)])
+                         [("Qwen3.8-Flash-Next", "off", True), ("Image Stack", "off", True)]
+                         + [("Media Stack", "off", True)] * MEDIA)
         self.assertEqual(v["bar"]["text"], "The Crow window opens on Qwen3.8-27B.")
         self.assertTrue(v["bar"]["button"]["enabled"])
 
@@ -204,7 +212,7 @@ class State3LandedTests(GuiCase):
         v = ctl.view()
         self.assertEqual(v["running"]["title"], "Qwen3.8-27B-UD-Q4_K_XL (optional)")
         self.assertEqual(v["running"]["detail"], "Running on port 8082. llama.cpp.")
-        self.assertEqual(len(v["rows"]), 3, "every baseline point is offered (and refused)")
+        self.assertEqual(len(v["rows"]), 3 + MEDIA, "every baseline point is offered (and refused)")
 
 
 class TheWindowOnLinuxTests(GuiCase):
@@ -392,6 +400,37 @@ class TheWindowStartsNoConsoleTests(unittest.TestCase):
                     bare.append(node.lineno)
         self.assertEqual(bare, [], "subprocess.run without **no_console_kwargs() at these lines")
 
+
+
+class AComfyUIAloneHasItsCardTests(GuiCase):
+    """#340: a ComfyUI left without its language model is shown and stoppable."""
+
+    def test_the_card_names_the_video_server(self):
+        line = (r'"C:\x\comfyui\python_embeded\python.exe" -s C:\x\comfyui\ComfyUI\main.py'
+                r' --port 8188')
+        ctl = self.controller(scan=lambda: [("9191", line)])
+        ctl.refresh()
+        running = ctl.view()["running"]
+        self.assertEqual(running["title"], "Video server (ComfyUI)")
+        self.assertIn("pid 9191", running["detail"])
+
+
+class APointForOnePlatformIsOfferedThereOnlyTests(GuiCase):
+    """#340: the window offers what the terminal menu offers (crow_boot.runs_here):
+    the Media Stack runs on Windows only."""
+
+    def titles(self):
+        ctl = self.controller()
+        ctl.refresh()
+        return [r["title"] for r in ctl.view()["rows"]]
+
+    def test_linux_does_not_offer_the_media_stack(self):
+        with mock.patch.object(crow_boot, "PLATFORM_KEY", "linux"):
+            self.assertNotIn("Media Stack", self.titles())
+
+    def test_windows_offers_it(self):
+        with mock.patch.object(crow_boot, "PLATFORM_KEY", "windows"):
+            self.assertIn("Media Stack", self.titles())
 
 if __name__ == "__main__":
     unittest.main()

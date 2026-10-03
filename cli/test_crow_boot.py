@@ -7,6 +7,7 @@ contract file is the real one, written into a temporary config folder.
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
@@ -198,7 +199,8 @@ class ThePlaceholdersResolveFromTheStackTests(BootCase):
         # owner decision 2026-10-01: the 27B alone runs at 128k, the image stack keeps 65,536
         rows = self.boot().entries()
         titles = [r[2] for r in rows]
-        for point in STACK["points"]:
+        # #340: a point for another platform is not offered here (runs_here).
+        for point in [p for p in STACK["points"] if crow_boot.runs_here(p)]:
             self.assertIn(point["menu"]["title"], titles)
             self.assertIn(point["menu"]["line"], [r[3] for r in rows])
         line_27b = next(r[3] for r in rows if r[4] == ("point", "27b"))
@@ -482,7 +484,9 @@ class TheOptionalLlamaLinesTests(BootCase):
         self.assertIsNone(self.contract())
 
     def test_the_menu_numbers_them_after_the_baseline_and_starts_them(self):
-        answers = iter(["5", "0"])
+        # #340: the Media Stack is a baseline row on Windows only
+        here = sum(1 for p in STACK["points"] if crow_boot.runs_here(p))
+        answers = iter([str(2 + here), "0"])
         popen = FakePopen()
         code = self.boot(read=lambda prompt="": next(answers), popen=popen,
                          get=lambda url, timeout: (200, b"{}"),
@@ -490,7 +494,7 @@ class TheOptionalLlamaLinesTests(BootCase):
         self.assertEqual(code, crow_boot.EXIT_OK)
         self.assertEqual(popen.calls[0][0][-1], "8082")
         rows = self.boot(llama=FakeLlama([LLAMA_27B])).entries()
-        self.assertEqual([r[0] for r in rows if r[4] and r[4][0] == "stop"], ["6"])
+        self.assertEqual([r[0] for r in rows if r[4] and r[4][0] == "stop"], [str(3 + here)])
 
 
 class TheLandedScreenReturnsToTheMenuTests(BootCase):
@@ -746,6 +750,117 @@ class TheTerminalTests(unittest.TestCase):
         self.assertIn(crow_boot.flight_frame(5, fancy=False), "|/-\\")
 
 
+def media_stack():
+    """STACK with the 27b rebuilt as a llama-server point with a video server (#340)."""
+    doc = copy.deepcopy(STACK)
+    pt = next(p for p in doc["points"] if p["id"] == "27b")
+    pt["engine"] = dict(pt["engine"], kind="llama-server",
+                        binary={"windows": "${INSTALL}/bin/llama-server.exe",
+                                "linux": "${INSTALL}/bin/llama-server"},
+                        env={}, dirs=[],
+                        argv=["-m", "${MODELS}/g/model-Q8_0.gguf", "--port", "8099"])
+    pt["video_server"] = {
+        "binary": {"windows": "${INSTALL}/comfyui/python_embeded/python.exe",
+                   "linux": "${INSTALL}/comfyui/venv/bin/python"},
+        "argv": ["-s", "${INSTALL}/comfyui/ComfyUI/main.py", "--port", "8188"],
+        "port": 8188,
+        "readiness": {"method": "GET", "path": "/system_stats", "status": 200},
+        "runtime": {"windows": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"},
+                    "linux": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"}},
+    }
+    return doc
+
+
+class TheVideoServerIsPlannedNotStartedTests(BootCase):
+    """#340: a llama-server engine starts like serve; the video server is planned for
+    Crow's first use, never started by the menu and never a reason not to boot."""
+
+    def setUp(self):
+        super().setUp()
+        self.stack = media_stack()
+
+    def test_the_plan_carries_the_engine_kind_and_the_video_server(self):
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        self.assertEqual(plan["serve"]["kind"], "llama-server")
+        self.assertEqual(plan["serve"]["argv"][0],
+                         os.path.normpath(os.path.join(self.install, "bin", "llama-server" + EXE)))
+        self.assertEqual(plan["serve"]["argv"][1:3],
+                         ["-m", os.path.join(self.models, "g", "model-Q8_0.gguf")])
+        video = plan["video"]
+        runtime = os.path.join(self.install, "comfyui")
+        self.assertEqual(video["runtime"], runtime)
+        self.assertTrue(video["argv"][0].startswith(runtime), video["argv"][0])
+        self.assertEqual(video["argv"][video["argv"].index("--port") + 1], "8188")
+        self.assertEqual(video["port"], 8188)
+        self.assertNotIn("${", json.dumps(plan), "a placeholder was left unresolved")
+        self.assertEqual(crow_boot.plan_point(STACK, "27b", self.install, self.models)["video"], None)
+        self.assertEqual(crow_boot.plan_point(STACK, "27b", self.install, self.models)["serve"]["kind"],
+                         "serve")
+
+    def test_a_missing_video_runtime_does_not_block_the_boot(self):
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        missing = crow_boot.missing_files(plan, self.install, self.models)
+        self.assertIn(os.path.join(self.models, "g", "model-Q8_0.gguf"), missing)
+        self.assertFalse([m for m in missing if m.startswith(plan["video"]["runtime"])], missing)
+
+    def test_the_plan_json_names_the_video_server(self):
+        doc = crow_boot.plan_json(self.stack, "27b", self.install, self.models)
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        self.assertEqual(doc["serve"]["kind"], "llama-server")
+        self.assertEqual(doc["video"], {"binary": plan["video"]["argv"][0], "argv": plan["video"]["argv"][1:],
+                                        "port": 8188, "readiness": plan["video"]["readiness"],
+                                        "runtime": plan["video"]["runtime"]})
+        self.assertIsNone(crow_boot.plan_json(STACK, "27b", self.install, self.models)["video"])
+
+    def test_a_start_spawns_only_the_engine(self):
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        for path in crow_boot.missing_files(plan, self.install, self.models):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").close()
+        probes = iter([NOTHING, OK_HEALTH])
+        popen = FakePopen()
+        boot = crow_boot.Boot(self.stack, self.install, self.models, out=self.out, style=crow_boot.Style(),
+                              popen=popen, get=lambda url, timeout: next(probes), sleep=self.clock.sleep,
+                              clock=self.clock, read=lambda prompt="": "0", scan=lambda: [],
+                              llama=FakeLlama(), point_for=lambda url, timeout=3.0: None,
+                              model_path=lambda url, timeout=3.0: "x/model-Q8_0.gguf",
+                              terminate=self.terminated.append, log_dir=self.logs)
+        code = boot.start("27b")
+        self.assertEqual(code, crow_boot.EXIT_OK, self.out.getvalue())
+        self.assertEqual([os.path.basename(c[0][0]) for c in popen.calls], ["llama-server" + EXE])
+
+
+class APointForOnePlatformTests(BootCase):
+    """#340: a point with `platforms` is not offered, and not planned, elsewhere."""
+
+    def setUp(self):
+        super().setUp()
+        self.stack = copy.deepcopy(STACK)
+        other = "linux" if crow_boot.PLATFORM_KEY == "windows" else "windows"
+        next(p for p in self.stack["points"] if p["id"] == "27b")["platforms"] = [other]
+        self.other = other
+
+    def test_the_menu_leaves_it_out(self):
+        boot = crow_boot.Boot(self.stack, self.install, self.models, out=self.out, style=crow_boot.Style(),
+                              popen=FakePopen(), get=lambda url, timeout: NOTHING, sleep=self.clock.sleep,
+                              clock=self.clock, read=lambda prompt="": "0", scan=lambda: [],
+                              llama=FakeLlama(), point_for=lambda url, timeout=3.0: None,
+                              model_path=lambda url, timeout=3.0: None,
+                              terminate=self.terminated.append, log_dir=self.logs)
+        actions = [r[4] for r in boot.entries()]
+        self.assertNotIn(("point", "27b"), actions)
+        self.assertIn(("point", "image-stack"), actions)
+
+    def test_planning_it_here_is_a_setup_error(self):
+        with self.assertRaisesRegex(crow_boot.SetupError, "27b runs on %s only" % self.other):
+            crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+
+    def test_naming_this_platform_changes_nothing(self):
+        next(p for p in self.stack["points"] if p["id"] == "27b")["platforms"] = [crow_boot.PLATFORM_KEY]
+        self.assertEqual(crow_boot.plan_point(self.stack, "27b", self.install, self.models),
+                         crow_boot.plan_point(STACK, "27b", self.install, self.models))
+
+
 class ThePlanAsJsonTests(BootCase):
     """#196 phase 2: `--plan <point> --json` is what CrowSetup's check step reads.
     It must be the menu's own resolution, not a second copy of it."""
@@ -947,6 +1062,88 @@ class TheShortcutOpensTheWindowTests(BootCase):
             crow_boot.main(["--terminal"])
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("--terminal goes with --create-shortcut", err.getvalue())
+
+
+
+COMFY_LINE = (r'"C:\x\comfyui\python_embeded\python.exe" -s C:\x\comfyui\ComfyUI\main.py'
+              r' --listen 127.0.0.1 --port 8188')
+
+
+class TheContractCarriesThePlanTests(BootCase):
+    """#340: a point with a video server writes the engine's and ComfyUI's plan
+    into active-point.json, the window starts both from there (use_mode)."""
+
+    def test_the_plan_of_both_servers_is_in_the_contract(self):
+        stack = media_stack()
+        plan = crow_boot.plan_point(stack, "27b", self.install, self.models)
+        for path in crow_boot.missing_files(plan, self.install, self.models):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").close()
+        probes = iter([NOTHING, OK_HEALTH])
+        popen = FakePopen()
+        boot = crow_boot.Boot(stack, self.install, self.models, out=self.out, style=crow_boot.Style(),
+                              popen=popen, get=lambda url, timeout: next(probes), sleep=self.clock.sleep,
+                              clock=self.clock, read=lambda prompt="": "0", scan=lambda: [],
+                              llama=FakeLlama(), point_for=lambda url, timeout=3.0: None,
+                              model_path=lambda url, timeout=3.0: "x/model-Q8_0.gguf",
+                              terminate=self.terminated.append, log_dir=self.logs)
+        self.assertEqual(boot.start("27b"), crow_boot.EXIT_OK, self.out.getvalue())
+        doc = self.contract()
+        self.assertEqual(doc["mode"], "image")
+        self.assertEqual(doc["pids"], {"serve": popen.procs[0].pid, "image": None, "video": None})
+        serve, video = doc["servers"]["serve"], doc["servers"]["video"]
+        self.assertEqual(serve["argv"], plan["serve"]["argv"])
+        self.assertEqual((serve["env"], serve["cwd"], serve["port"], serve["readiness"]),
+                         (plan["serve"]["env"], plan["serve"]["cwd"], 8099, plan["serve"]["readiness"]))
+        self.assertEqual(serve["drop"], sorted(crow_boot.engine_env_keys(stack)))
+        self.assertEqual(serve["lib_path"], plan["lib_path"])
+        self.assertEqual(video, {"argv": plan["video"]["argv"], "cwd": plan["video"]["runtime"],
+                                 "port": 8188, "readiness": plan["video"]["readiness"]})
+
+    def test_a_point_without_one_writes_the_old_shape(self):
+        self.layout("27b")
+        probes = iter([NOTHING, OK_HEALTH])
+        self.assertEqual(self.boot(get=lambda url, timeout: next(probes)).start("27b"),
+                         crow_boot.EXIT_OK)
+        doc = self.contract()
+        self.assertNotIn("servers", doc)
+        self.assertNotIn("mode", doc)
+
+
+class AComfyUIIsAServerTooTests(BootCase):
+    """#340: ComfyUI holds the card like sd-server does, so it blocks a start,
+    is named, and --stop ends it."""
+
+    def test_a_comfyui_alone_blocks_a_start_and_is_named(self):
+        popen = FakePopen()
+        code = self.boot(popen=popen, scan=lambda: [("9191", COMFY_LINE)]).start("27b")
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_REFUSED)
+        self.assertIn("a video server (ComfyUI) without its language model, pid 9191", text)
+        self.assertIn(crow_boot.kill_hint("9191"), text)
+        self.assertEqual(popen.calls, [])
+
+    def test_the_contract_in_video_mode_names_comfyui(self):
+        crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",
+                                     {"serve": None, "image": None, "video": 9191}, mode="video")
+        code = self.boot().start("27b")
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_REFUSED)
+        self.assertIn("ComfyUI pid 9191", text)
+        self.assertIn(crow_boot.kill_hint(9191), text)
+
+    def test_stop_ends_comfyui(self):
+        crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",
+                                     {"serve": None, "image": None, "video": 9191}, mode="video")
+        killed = []
+        listed = [("9191", COMFY_LINE)]
+        code = self.boot(scan=lambda: [r for r in listed if r[0] not in killed],
+                         kill=killed.append, alive=lambda pid: str(pid) not in killed).stop()
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_OK, text)
+        self.assertEqual(killed, ["9191"])
+        self.assertIn("ComfyUI pid 9191", text)
+        self.assertIsNone(self.contract())
 
 
 if __name__ == "__main__":

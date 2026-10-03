@@ -64,8 +64,10 @@ LOGO_LINE = "var LOGO = 'mark-on-dark.svg';"
 # GGUF line 9-12 s from a hardlinked install layout (2026-10-01, CHANGELOG
 # 3.0.0); Flash-Next's cold start ~83 s (2026-09-11, crow_boot.py BOOT_TIMEOUT_S).
 # A line without a measurement fills against DEFAULT_USUAL_START_S, a guess.
+# The Media Stack (#340) is NOT MEASURED yet: its 9B llama-server line takes the
+# 27B GGUF line's figure, the nearest measured start.
 USUAL_START_S = {"flash-next": 83.0, "27b": 15.0, "image-stack": 15.0,
-                 "qwen35-q4-k-xl": 15.0}
+                 "media-stack": 15.0, "qwen35-q4-k-xl": 15.0}
 DEFAULT_USUAL_START_S = 60.0
 FILL_CAP = 95
 REFRESH_S = 3.0
@@ -130,9 +132,15 @@ class Controller:
 
     # -- what is on offer ---------------------------------------------------
     def points(self) -> list:
-        """The three baseline points, then the installed optional lines."""
+        """The baseline points that run here, then the installed optional lines.
+
+        #340: a point for one platform (the Media Stack, Windows) is left out
+        elsewhere, as in the terminal menu (crow_boot.runs_here).
+        """
         out = []
         for p in self.boot.stack["points"]:
+            if not crow_boot.runs_here(p):
+                continue
             menu = p.get("menu") or {}
             out.append({"id": p.get("id"), "title": menu.get("title") or p.get("id"),
                         "detail": gui_line(menu), "optional": False})
@@ -260,6 +268,10 @@ class Controller:
         if kind == crow_platform.KIND_IMAGE:
             return {"title": "Image server (sd-server)",
                     "detail": "Running without its language model, pid %s." % pids.get("image"),
+                    "stop": stop}
+        if kind == crow_platform.KIND_VIDEO:
+            return {"title": "Video server (ComfyUI)",
+                    "detail": "Running without its language model, pid %s." % pids.get("video"),
                     "stop": stop}
         m = re.search(r":(\d+)(?:/|$)", running.get("base_url") or "")
         port = int(m.group(1)) if m else (running.get("port") or crow_core.CROW_NEST_PORT)

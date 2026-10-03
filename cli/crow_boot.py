@@ -67,6 +67,13 @@ THE DECISIONS, and why each is this way:
   `crow_core._image_server_env()`. On failure, timeout or Ctrl+C, what this run
   started is ended by its handle (`crow_platform.terminate_tree`), the last 10
   log lines are shown, and no contract file is written.
+* A POINT WITH A VIDEO SERVER (#340) starts only its engine here. Its
+  contract file also carries `servers` -- the engine's argv, env, the keys to
+  drop, lib_path, cwd, port and probe, and ComfyUI's argv, cwd (the runtime
+  folder), port and probe -- plus `mode: "image"` and `pids.video`, so the
+  window starts ComfyUI and restarts the engine exactly as planned here
+  (`crow_core.use_mode`). The scan sees ComfyUI (`crow_platform.KIND_VIDEO`):
+  it blocks a start like sd-server does, and Stop ends it.
 * ONE POINT AT A TIME, checked before anything starts: the contract file
   (`crow_core.read_active_point`), then the process scan
   (`crow_core.running_servers(include_image=True)`; a serve is named by
@@ -175,6 +182,7 @@ ICONS = {
     "flash-next": ("\U0001F9E0", "-"),
     "27b": ("⚡", "-"),
     "image-stack": ("\U0001F3A8", "-"),
+    "media-stack": ("\U0001F3AC", "-"),
     "optional": ("\U0001F999", "-"),
     "stop": ("\U0001F6D1", "x"),
     "quit": ("\U0001F44B", "q"),
@@ -236,6 +244,11 @@ def _binary(spec: dict, point_id: str, what: str) -> str:
     return binary
 
 
+def runs_here(point: dict) -> bool:
+    """The point names this platform, or names none (= both, #340)."""
+    return PLATFORM_KEY in (point.get("platforms") or ("windows", "linux"))
+
+
 def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
     """Everything needed to start one point, placeholders resolved.
 
@@ -248,6 +261,9 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
     if point is None:
         raise SetupError("unknown operating point %r (one of %s)"
                          % (point_id, ", ".join(p for p in points if p)))
+    if not runs_here(point):
+        raise SetupError("%s runs on %s only, not on %s"
+                         % (point_id, ", ".join(point.get("platforms") or []), PLATFORM_KEY))
 
     def r(value):
         return resolve(value, install, models)
@@ -255,6 +271,7 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
     engine = point.get("engine") or {}
     port = int(engine.get("port") or crow_core.CROW_NEST_PORT)
     serve = {
+        "kind": engine.get("kind") or "serve",
         "argv": [r(_binary(engine, point_id, "engine"))]
                 + [r(a) for a in engine.get("argv") or []],
         "env": {str(k): r(v) for k, v in (engine.get("env") or {}).items()},
@@ -273,6 +290,18 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
             "port": int(spec.get("port") or 8097),
             "readiness": spec.get("readiness") or {"path": "/", "status": 200},
         }
+    # #340: the video server is planned here but never started by the menu; Crow
+    # starts it on first use. `runtime` is the unpacked folder its program lives in.
+    video = None
+    spec = point.get("video_server")
+    if spec:
+        video = {
+            "argv": [r(_binary(spec, point_id, "video server"))]
+                    + [r(a) for a in spec.get("argv") or []],
+            "port": int(spec.get("port") or 8188),
+            "readiness": spec.get("readiness") or {"path": "/system_stats", "status": 200},
+            "runtime": r(((spec.get("runtime") or {}).get(PLATFORM_KEY) or {}).get("dir") or ""),
+        }
     menu = point.get("menu") or {}
     return {
         "id": point_id,
@@ -280,6 +309,7 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
         "line": menu.get("line") or "",
         "serve": serve,
         "image": image,
+        "video": video,
         "crow_env": {str(k): r(v) for k, v in (point.get("crow_env") or {}).items()},
         "base_url": base_url_for(port),
         "identity": engine.get("identity") or {},
@@ -313,7 +343,11 @@ def engine_env_keys(stack: dict) -> set:
 
 
 def missing_files(plan: dict, install: str, models: str) -> list:
-    """Placeholder paths the point needs that are not on disk (dirs excluded)."""
+    """Placeholder paths the point needs that are not on disk (dirs excluded).
+
+    The video server is not among them: the menu never starts it, and a point
+    whose video runtime is missing still boots (#340).
+    """
     roots = tuple(os.path.normpath(p) for p in (install, models))
     dirs = set(plan["serve"]["dirs"])
     wanted = [plan["serve"]["argv"][0]] + list(plan["serve"]["env"].values())
@@ -368,18 +402,23 @@ def plan_json(stack: dict, point_id: str, install: str, models: str) -> dict:
         })
     serve = plan["serve"]
     image = plan["image"]
+    video = plan["video"]
     return {
         "point": plan["id"],
         "title": plan["title"],
         "install_root": install,
         "models_root": models,
         "base_url": plan["base_url"],
-        "serve": {"binary": serve["argv"][0], "argv": serve["argv"][1:], "cwd": serve["cwd"],
+        "serve": {"kind": serve["kind"], "binary": serve["argv"][0], "argv": serve["argv"][1:],
+                  "cwd": serve["cwd"],
                   "env": serve["env"], "dirs": serve["dirs"], "port": serve["port"],
                   "readiness": serve["readiness"]},
         "image": None if image is None else {
             "binary": image["argv"][0], "argv": image["argv"][1:], "port": image["port"],
             "readiness": image["readiness"]},
+        "video": None if video is None else {
+            "binary": video["argv"][0], "argv": video["argv"][1:], "port": video["port"],
+            "readiness": video["readiness"], "runtime": video["runtime"]},
         "crow_env": plan["crow_env"],
         "files": files,
         "derived": derived,
@@ -726,7 +765,8 @@ class Boot:
             pids = doc.get("pids") or {}
             return {"kind": crow_platform.KIND_CROW_NEST, "point": doc.get("point"),
                     "source": "active-point",
-                    "pids": {"serve": pids.get("serve"), "image": pids.get("image")},
+                    "pids": {"serve": pids.get("serve"), "image": pids.get("image"),
+                             "video": pids.get("video")},
                     "base_url": doc.get("base_url") or base_url_for(crow_core.CROW_NEST_PORT),
                     "since": doc.get("started_at")}
         found = self.scan() or []
@@ -754,6 +794,11 @@ class Boot:
         if images:
             return {"kind": crow_platform.KIND_IMAGE, "point": None, "source": "scan",
                     "pids": {"serve": None, "image": image_pid}}
+        videos = by_kind.get(crow_platform.KIND_VIDEO, [])
+        if videos:
+            # #340: ComfyUI holds the card as firmly as any of them.
+            return {"kind": crow_platform.KIND_VIDEO, "point": None, "source": "scan",
+                    "pids": {"serve": None, "image": None, "video": videos[0][0]}}
         url = base_url_for(crow_core.CROW_NEST_PORT)
         point = self.point_for(url)
         if point:
@@ -772,11 +817,15 @@ class Boot:
             return "a llama.cpp server%s%s, pid %s" % (model, where, pids.get("serve"))
         if kind == crow_platform.KIND_IMAGE:
             return "an image server (sd-server) without its language model, pid %s" % pids.get("image")
+        if kind == crow_platform.KIND_VIDEO:
+            return "a video server (ComfyUI) without its language model, pid %s" % pids.get("video")
         bits = []
         if pids.get("serve"):
             bits.append("serve pid %s" % pids["serve"])
         if pids.get("image"):
             bits.append("sd-server pid %s" % pids["image"])
+        if pids.get("video"):
+            bits.append("ComfyUI pid %s" % pids["video"])
         return "%s%s" % (self.label(running.get("point")),
                          ", " + ", ".join(bits) if bits else "")
 
@@ -788,7 +837,8 @@ class Boot:
                  "   Only one operating point can run at a time."]
         lines.append('   To stop it: choose "Stop the running point" in this menu, or run')
         lines.append("     python %s --stop" % os.path.join("cli", "crow_boot.py"))
-        hand = [kill_hint(p) for p in (pids.get("serve"), pids.get("image")) if p]
+        hand = [kill_hint(p) for p in (pids.get("serve"), pids.get("image"), pids.get("video"))
+                if p]
         if hand:
             lines.append("   or by hand: %s" % " and ".join(hand))
         return "\n".join(lines)
@@ -945,8 +995,22 @@ class Boot:
 
         seconds = self.clock() - began
         pids = {"serve": serve.pid, "image": image.pid if image is not None else None}
+        extra = {}
+        if plan["video"]:
+            # #340: the window starts ComfyUI and restarts this engine itself
+            # (crow_core.use_mode), from exactly what this plan resolved.
+            pids["video"] = None
+            extra = {"mode": "image", "servers": {
+                "serve": {"argv": plan["serve"]["argv"], "env": plan["serve"]["env"],
+                          "drop": sorted(engine_env_keys(self.stack)),
+                          "lib_path": plan["lib_path"], "cwd": plan["serve"]["cwd"],
+                          "port": plan["serve"]["port"],
+                          "readiness": plan["serve"]["readiness"]},
+                "video": {"argv": plan["video"]["argv"], "cwd": plan["video"]["runtime"],
+                          "port": plan["video"]["port"],
+                          "readiness": plan["video"]["readiness"]}}}
         try:
-            where = self.write_active(plan["id"], plan["base_url"], pids)
+            where = self.write_active(plan["id"], plan["base_url"], pids, **extra)
         except (OSError, ValueError) as exc:
             where = None
             self.say("%s the contract file could not be written: %s" % (self.style.icon("warn"), exc))
@@ -1048,7 +1112,8 @@ class Boot:
                 targets.append(("llama", str(pid)))
                 llama_names.append(os.path.basename(crow_core.served_model(line)) or "llama.cpp")
                 continue
-            role = "image" if kind == crow_platform.KIND_IMAGE else "serve"
+            role = {crow_platform.KIND_IMAGE: "image",
+                    crow_platform.KIND_VIDEO: "video"}.get(kind, "serve")
             targets.append((role, str(pid)))
             if role == "serve" and not point:
                 port = crow_platform.server_port(line) or crow_core.CROW_NEST_PORT
@@ -1087,7 +1152,8 @@ class Boot:
                 self.sleep(0.25)
         took = self.clock() - began
         self._remove(path)
-        names = {"serve": "serve", "image": "sd-server", "llama": "llama-server"}
+        names = {"serve": "serve", "image": "sd-server", "llama": "llama-server",
+                 "video": "ComfyUI"}
         done = ", ".join("%s pid %s" % (names[r], p) for r, p in targets)
         if left:
             self.say("%s Asked %s to stop (%s), but pid %s is still there. End it by hand: %s"
@@ -1197,6 +1263,8 @@ class Boot:
         rows = [("1", "start", "Start Crow", "open the window on the running point",
                  ("crow", None), False)]
         for p in self.stack["points"]:
+            if not runs_here(p):
+                continue
             menu = p.get("menu") or {}
             icon = p.get("id") if p.get("id") in ICONS else "start"
             rows.append((str(len(rows) + 1), icon, menu.get("title") or p.get("id"),

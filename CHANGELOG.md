@@ -5,6 +5,31 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 3.2.0 — 2026-10-03
+
+**Crow makes short videos.** The new Media Stack operating point (Windows) puts Qwen3.5-9B, Qwen-Image 2.1 and LTX-2.5 on one card, and `animate_image` turns a still into an MP4 with sound that plays in the window. CrowSetup installs it from the original sources, with the user's own Hugging Face token for the gated LTX weights, and unpacks ComfyUI as the video runtime. The first live run on robin's RTX 5090 (2026-10-03, n=1) rendered a 5 s clip in 73.3 s and brought the language model back 8 s after ComfyUI ended. This release ships Windows assets only; on Linux, v3.1.0 stays the install.
+
+### Added
+
+- **The Media Stack operating point: pictures and short videos on one card** (#340, Windows). Qwen3.5-9B Q8_0 with its projector on llama-server; Qwen-Image 2.1 on sd-server, warmed when Crow's window opens (#300); LTX-2.5 (distilled, int8) on ComfyUI v0.38.0, started on the first clip. Pictures and videos never share the card. #340 Phase 0 (RTX 5090) measured VRAM at up to 32,049 of 32,607 MiB during a clip, and host RAM at up to 50,868 MiB machine-wide during a 20 s clip. CrowSetup therefore asks for 64 GB RAM for this point. Every file comes from its original source, and nothing foreign is mirrored. The LTX weights come from `Lightricks/LTX-2.5`, which is gated: CrowSetup sends the user's own Hugging Face token, either from the field on its selection screen, from `HF_TOKEN`, or from the Hugging Face CLI login. The 9B's context of 65,536 and its 15 s usual start are not measured yet.
+- **`animate_image` turns a still into a clip** (#340). It takes one continuous motion plus the camera, 1 to 20 s at 24 fps, 1080p (1920x1088) or 1440p (2560x1408), and saves an MP4 in `<working root>/videos/`. When ffmpeg is on the PATH, three stills of the clip go back to the model. While the clip renders, the language model steps aside: `use_mode` stops sd-server and the engine, starts ComfyUI, and afterwards ends ComfyUI and starts the engine again from the boot's plan. The engine comes back after an error, a stop or the 30-minute timeout as well. #340 Phase 0 measured a 5 s clip at 1080p with a median of 65.6 s, 10 s with 146.2 s, and 20 s with 349 to 361 s. The clip carries LTX-2.5's own sound (AAC, 48 kHz stereo); the motion text describes it in words. A motion text the user wrote goes to the video model verbatim: on 2026-10-03 the 9B's rewrites had dropped a user's sound sentence (the clip came back with loud noise) and named "the human's foot at the bottom left corner" (a giant foot was painted in), while the verbatim text was followed.
+- **The clip plays in the window** (#340). A saved clip replaces its progress tile with a player, and the caption shows the size the stream reports. On Windows and on a phone, the clip goes to the page as bytes, the same way pictures do. Phase 0's 5 s clips were 1.6 to 2.6 MB. Before the player gets the file, it must lie in the working area or an approved path and start with MP4 or WebM bytes. The clip comes back after a restart, and **Show in folder** opens the folder with the file selected.
+- **CrowSetup unpacks ComfyUI's own release archive** (#340). The archive is a solid LZMA2 + BCJ2 7z, read with sevenz-rust2 on one thread. On `ComfyUI_windows_portable_nvidia.7z` v0.38.0 (1,994,326,521 B, 58,293 files, 4,384,588,275 B) that took 806 MB of RAM and 40.9 s, against 10.2 GB on the default 24 threads. The archive is deleted after unpacking. `ComfyUI/extra_model_paths.yaml` points ComfyUI at the LTX files under the models root.
+- **The operating-point window and CrowSetup list the Media Stack** (#340). It shows on Windows only (`platforms` in `manifests/stack.json`); CrowSetup's selection page has the Hugging Face token field, its `--points` takes `media-stack`, and its preflight asks for 64 GB RAM and 100 GB free disk.
+
+### Changed
+
+- **Projectors and tokenizers download from their original repos** (#340). Six files that came from a mirror are fetched from the repos that publish them; their sha256 is unchanged. Only robin's own CNQ quants and their companion files live in his repos.
+- **`NOTICE` names sd-server's components, the NVIDIA Linux libraries and the ComfyUI template** (#340). The notices for these parts were missing from the v3.1.0 assets.
+- **The 2.1.0, 2.8.4 and 2.8.5 Windows assets no longer carry local logs** (#196, 2026-10-01). Each was replaced on its release by a repack of its own tag with that tag's packer and the rebuilt `bin\` (llama.cpp `1c3c967`, sd.cpp `2f88688`; the published `bin\` of all three was byte-identical to 2.8.5's). The repacks hold exactly the files of the originals minus the 10 `cli/runs/*.log` each: 2.1.0 531,611,346 B (33 files), 2.8.4 643,541,823 B (59), 2.8.5 643,542,202 B (59).
+
+### Known limitations
+
+- **The Media Stack runs on Windows only.** ComfyUI publishes its portable runtime for Windows only; a Linux runtime is not started.
+- **Prompt following of LTX-2.5 in Crow is weaker than it should be** (#346). On 2026-10-03 a small brass key turned into two rings while the crow picked it up, and the camera panned although the text said it holds still. Crow sends LTX the raw text where Lightricks' ComfyUI template first enhances it with Gemma 4 e2b, and renders 1920x1088 where the template renders 1280x720. Neither is measured yet.
+- **The 1080p video is 1920x1088, not 1920x1080.** It is the size ComfyUI's `ResolutionSelector` picks in the workflow (`comfy_extras/nodes_resolution.py`, v0.38.0).
+- **The 9B's context of 65,536, its start, its VRAM beside sd-server and ComfyUI's boot time rest on one run** (2026-10-03): ComfyUI answered 16 s after the card was free, 9B + sd-server peaked at 21,864 of 32,579 MiB. `docs/operating-points.md` keeps them under "Not measured".
+
 ## 3.1.0 — 2026-10-02
 
 **Linux gets the one-window installer and the operating points.** `CrowSetup-linux-x64` is attached to this release; it installs Crow's Linux package (with `sd-server` and its CUDA libraries) and the crow-nest v0.9.0 Linux engine, and writes the "Crow Operating Points" launcher. The operating-point window starts 27B and the Image Stack on Linux. Windows assets are unchanged: `CrowSetup.exe` and the Windows package stay on v3.0.0.

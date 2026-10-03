@@ -428,7 +428,7 @@ impl Cx<'_> {
         } else {
             None
         };
-        let rx = spawn_request(agent.clone(), self.job.url.clone(), offset, if_range);
+        let rx = spawn_request(agent.clone(), self.job.url.clone(), offset, if_range, hf_token());
         let stall = Duration::from_secs(self.opts.stall_secs.max(1));
         let mut last = Instant::now();
         loop {
@@ -476,10 +476,7 @@ impl Cx<'_> {
                     }
                     416 => return Ok(()), // the part is complete; sha256 decides
                     401 | 403 | 404 | 410 => {
-                        return Err(Stop::Fatal(FetchError::Permanent(format!(
-                            "HTTP {status} for {}",
-                            self.job.url
-                        ))));
+                        return Err(Stop::Fatal(FetchError::Permanent(refused(status, &self.job.url))));
                     }
                     s => return Err(Stop::Retry(format!("HTTP {s}"))),
                 },
@@ -599,9 +596,10 @@ fn spawn_request(
     url: String,
     offset: u64,
     if_range: Option<String>,
+    token: Option<String>,
 ) -> Receiver<Msg> {
     let (tx, rx) = mpsc::sync_channel(8);
-    std::thread::spawn(move || request_worker(agent, url, offset, if_range, tx));
+    std::thread::spawn(move || request_worker(agent, url, offset, if_range, token, tx));
     rx
 }
 
@@ -612,10 +610,15 @@ fn request_worker(
     mut url: String,
     offset: u64,
     if_range: Option<String>,
+    token: Option<String>,
     tx: SyncSender<Msg>,
 ) {
     for _ in 0..=MAX_HOPS {
         let mut req = agent.get(&url);
+        // asked per hop: a redirect off huggingface.co carries no token
+        if let Some(auth) = auth_header(&url, token.as_deref()) {
+            req = req.header("Authorization", auth);
+        }
         if offset > 0 {
             req = req.header("Range", format!("bytes={offset}-"));
             if let Some(e) = &if_range {
@@ -682,6 +685,72 @@ fn request_worker(
     let _ = tx.send(Msg::Fail(format!("more than {MAX_HOPS} redirects")));
 }
 
+// ------------------------------------------------- the Hugging Face token (#340)
+// A gated repo (Lightricks/LTX-2.5) answers 401/403 without the user's token.
+// The token is the user's own: it goes to https://huggingface.co only, never
+// across a redirect to a CDN or any other host, never into an event, a log or
+// the state file. The window sets it (`set_hf_token`); without that the
+// places huggingface_hub 1.21 reads are asked, in its order.
+
+static HF_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The token the user typed into the window; `None` or blank clears it.
+pub fn set_hf_token(token: Option<String>) {
+    *HF_TOKEN.lock().unwrap_or_else(|e| e.into_inner()) =
+        token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+}
+
+/// The window's token, else the environment's or the Hugging Face CLI's.
+pub fn hf_token() -> Option<String> {
+    if let Some(t) = HF_TOKEN.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(t);
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    find_hf_token(&|k: &str| std::env::var(k).ok(), home.as_deref())
+}
+
+/// huggingface_hub's order: HF_TOKEN, HUGGING_FACE_HUB_TOKEN, then the file at
+/// HF_TOKEN_PATH, else `$HF_HOME/token`, else
+/// `${XDG_CACHE_HOME:-~/.cache}/huggingface/token` (constants.py, _auth.py).
+pub fn find_hf_token(env: &dyn Fn(&str) -> Option<String>, home: Option<&Path>) -> Option<String> {
+    let clean = |v: String| Some(v.trim().to_string()).filter(|t| !t.is_empty());
+    if let Some(t) = env("HF_TOKEN").and_then(clean).or_else(|| env("HUGGING_FACE_HUB_TOKEN").and_then(clean)) {
+        return Some(t);
+    }
+    let file = match (env("HF_TOKEN_PATH"), env("HF_HOME")) {
+        (Some(p), _) => PathBuf::from(p),
+        (None, Some(h)) => PathBuf::from(h).join("token"),
+        (None, None) => {
+            let cache = env("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| home.map(|h| h.join(".cache")))?;
+            cache.join("huggingface").join("token")
+        }
+    };
+    std::fs::read_to_string(file).ok().and_then(clean)
+}
+
+/// `Authorization` for this URL: only https://huggingface.co/..., with a token.
+fn auth_header(url: &str, token: Option<&str>) -> Option<String> {
+    if !url.starts_with("https://huggingface.co/") {
+        return None;
+    }
+    token.map(|t| format!("Bearer {t}"))
+}
+
+/// The sentence for a refused request. A Hugging Face 401/403 is the gate.
+fn refused(status: u16, url: &str) -> String {
+    if matches!(status, 401 | 403)
+        && let Some(rest) = url.strip_prefix("https://huggingface.co/")
+    {
+        let repo: Vec<&str> = rest.splitn(3, '/').take(2).collect();
+        let page = format!("https://huggingface.co/{}", repo.join("/"));
+        return format!(
+            "HTTP {status} from Hugging Face: {page} is gated. Sign in there, accept its licence, \
+             then give CrowSetup a read access token (the token field, or HF_TOKEN)"
+        );
+    }
+    format!("HTTP {status} for {url}")
+}
+
 /// `bytes 100-999/1000` -> 100.
 fn content_range_start(v: &str) -> Option<u64> {
     v.trim()
@@ -731,6 +800,67 @@ mod tests {
             "https://huggingface.co/r/resolve/abc/n.gguf"
         );
         assert_eq!(join_url("http://h:1", "a"), "http://h:1/a");
+    }
+
+    #[test]
+    fn the_token_goes_to_hugging_face_over_https_only() {
+        let t = Some("hf_x");
+        let hf = "https://huggingface.co/Lightricks/LTX-2.5/resolve/abc/m.safetensors";
+        assert_eq!(auth_header(hf, t).as_deref(), Some("Bearer hf_x"));
+        assert_eq!(auth_header(hf, None), None);
+        for other in [
+            "http://huggingface.co/r/resolve/a/m",
+            "https://cas-bridge.xethub.hf.co/xet/abc?sig=1",
+            "https://cdn-lfs.huggingface.co/r/abc",
+            "https://huggingface.co.evil.example/r",
+            "https://github.com/x/y/releases/download/v1/a.7z",
+            "https://huggingface.co@evil.example/r",
+        ] {
+            assert_eq!(auth_header(other, t), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_refused_gate_says_what_to_do_and_never_the_token() {
+        let url = "https://huggingface.co/Lightricks/LTX-2.5/resolve/abc/vae/v.safetensors";
+        for status in [401, 403] {
+            let m = refused(status, url);
+            assert!(m.contains("https://huggingface.co/Lightricks/LTX-2.5"), "{m}");
+            assert!(m.contains("token"), "{m}");
+            assert!(m.contains(&format!("HTTP {status}")), "{m}");
+        }
+        assert_eq!(refused(404, url), format!("HTTP 404 for {url}"));
+        let gh = "https://github.com/x/y/releases/download/v1/a.7z";
+        assert_eq!(refused(403, gh), format!("HTTP 403 for {gh}"));
+    }
+
+    #[test]
+    fn the_token_is_found_where_huggingface_hub_looks() {
+        let dir = std::env::temp_dir().join(format!("crow-hf-token-{}", std::process::id()));
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".cache").join("huggingface")).unwrap();
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        };
+        // nothing anywhere
+        assert_eq!(find_hf_token(&env(&[]), Some(&home)), None);
+        // the default file, trimmed
+        std::fs::write(home.join(".cache/huggingface/token"), "hf_file\r\n").unwrap();
+        assert_eq!(find_hf_token(&env(&[]), Some(&home)).as_deref(), Some("hf_file"));
+        // the environment wins, HF_TOKEN before the old name
+        assert_eq!(find_hf_token(&env(&[("HUGGING_FACE_HUB_TOKEN", "hf_old")]), Some(&home)).as_deref(), Some("hf_old"));
+        assert_eq!(find_hf_token(&env(&[("HF_TOKEN", " hf_env "), ("HUGGING_FACE_HUB_TOKEN", "hf_old")]), Some(&home)).as_deref(), Some("hf_env"));
+        // HF_HOME moves the file; HF_TOKEN_PATH names it
+        let moved = dir.join("hfhome");
+        std::fs::create_dir_all(&moved).unwrap();
+        std::fs::write(moved.join("token"), "hf_home").unwrap();
+        let hf_home: &'static str = Box::leak(moved.to_string_lossy().into_owned().into_boxed_str());
+        assert_eq!(find_hf_token(&env(Box::leak(Box::new([("HF_HOME", hf_home)]))), Some(&home)).as_deref(), Some("hf_home"));
+        let path: &'static str = Box::leak(moved.join("token").to_string_lossy().into_owned().into_boxed_str());
+        assert_eq!(find_hf_token(&env(Box::leak(Box::new([("HF_TOKEN_PATH", path), ("HF_HOME", "/nowhere")]))), None).as_deref(), Some("hf_home"));
+        // an empty value is no token
+        assert_eq!(find_hf_token(&env(&[("HF_TOKEN", "  ")]), None), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

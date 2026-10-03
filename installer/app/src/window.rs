@@ -4,7 +4,8 @@
 //! BRIDGE. UI -> exe: `window.ipc.postMessage(JSON)`, either a core
 //! [`Command`] (`{"type":"start",...}`, `pause`, `resume`, `retry`,
 //! `open_boot_menu`, `quit`) or a window message (`ready`, `log`, `minimize`,
-//! `drag`, `close`, `pick_folder`). Exe -> UI: `evaluate_script` calling
+//! `drag`, `close`, `pick_folder`, `hf_token` -- the user's token for a gated
+//! Hugging Face repo, never logged). Exe -> UI: `evaluate_script` calling
 //! `window.crow.init(..)`, `window.crow.event(<Event JSON>)` and
 //! `window.crow.picked(..)`. Scripts before the page's `ready` are queued.
 //!
@@ -50,6 +51,16 @@ fn svg_data_uri(svg: &str) -> String {
         }
     }
     out.replace(' ', "%20")
+}
+
+/// What the log says about one message from the page: nothing for the page's
+/// own `log`, the message for the rest -- except a token, which is named, not shown.
+fn ipc_log_line(v: &serde_json::Value, body: &str) -> Option<String> {
+    match v["type"].as_str() {
+        Some("log") => None,
+        Some("hf_token") => Some("ipc <- hf_token (hidden)".into()),
+        _ => Some(format!("ipc <- {body}")),
+    }
 }
 
 /// The page as the WebView gets it: the logo inlined.
@@ -273,8 +284,8 @@ impl App {
             Ok(v) => v,
             Err(e) => return eprintln!("crowsetup: bad ipc message: {e}"),
         };
-        if v["type"] != "log" {
-            eprintln!("ipc <- {body}");
+        if let Some(line) = ipc_log_line(&v, &body) {
+            eprintln!("{line}");
         }
         match v["type"].as_str().unwrap_or("") {
             "ready" => {
@@ -291,6 +302,9 @@ impl App {
                 let _ = self.window.drag_window();
             }
             "close" => self.close(cf),
+            // #340: the user's Hugging Face token for a gated repo; held by
+            // the fetcher for this run only, never logged or written.
+            "hf_token" => crowsetup_core::fetch::set_hf_token(v["token"].as_str().map(str::to_string)),
             "pick_folder" => {
                 let purpose = v["for"].as_str().unwrap_or("install").to_string();
                 self.pick_folder(&purpose, v["current"].as_str());
@@ -416,6 +430,18 @@ pub fn main(s: Setup) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_message_never_reaches_the_log() {
+        let body = r#"{"type":"hf_token","token":"hf_secret123"}"#;
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let line = ipc_log_line(&v, body).unwrap();
+        assert!(!line.contains("hf_secret123"), "{line}");
+        assert!(line.contains("hf_token"), "{line}");
+        let start = r#"{"type":"start","points":["27b"]}"#;
+        assert_eq!(ipc_log_line(&serde_json::from_str(start).unwrap(), start).as_deref(), Some(&*format!("ipc <- {start}")));
+        assert_eq!(ipc_log_line(&serde_json::json!({"type": "log", "msg": "x"}), "{}"), None);
+    }
 
     #[test]
     fn the_page_is_whole() {

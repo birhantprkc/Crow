@@ -4,7 +4,7 @@
 
 use crowsetup_core::api::{FileKind, Package, Packages, Selection};
 use crowsetup_core::plan::plan;
-use crowsetup_core::stack::Stack;
+use crowsetup_core::stack::{Stack, Status};
 use std::path::{Path, PathBuf};
 
 const CROW_PKG: u64 = 41_000_000;
@@ -224,7 +224,10 @@ fn urls_are_pinned_and_local_rel_is_repo_path() {
 }
 
 #[test]
-fn mirror_pending_files_fetch_from_their_source_but_keep_the_planned_local_path() {
+fn foreign_files_come_from_their_original_repo_and_only_our_hotset_is_mirror_pending() {
+    // #340, the owner 2026-10-03: only our own work goes into our repos. The
+    // projectors and tokenizers are fetched from unsloth and Qwen, under their
+    // own repo path; the crow-nest hotset is ours and waits for our repo.
     let p = plan_for(&["flash-next", "27b"]);
     let job = |id: &str| p.jobs.iter().find(|j| j.id == id).unwrap().clone();
     let mm = job("27b-mmproj");
@@ -232,26 +235,29 @@ fn mirror_pending_files_fetch_from_their_source_but_keep_the_planned_local_path(
         mm.url,
         "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-F16.gguf"
     );
-    assert_eq!(mm.local_rel, "nibor1896/Qwen3.8-27B-CNQ4.5/mmproj-F16.gguf");
+    assert_eq!(mm.local_rel, "unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf");
     assert_eq!(mm.bytes, 927_607_488);
     let tok = job("fn-tokenizer");
     assert_eq!(
         tok.url,
         "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/resolve/de4b8e4d43b917e7706784d8bb445c9af86a3540/tokenizer.json"
     );
+    assert_eq!(tok.local_rel, "Qwen/Qwen3.8-Flash-Next/tokenizer.json");
     let hot = job("fn-hotsets-crow0924");
     assert_eq!(
         hot.url,
         "https://raw.githubusercontent.com/nibor1896/crow-nest/f4a3bd86f7b33db883f59c251cc04b37ac1ceeda/decode_out/hotsets-M-crow0924-n160.json"
     );
     assert_eq!(hot.local_rel, "nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M/hotsets-M-crow0924-n160.json");
-    // the seven mirror-pending files of the two points (4 + 3), all from their source
-    let pending: Vec<&str> = p.jobs.iter().filter(|j| !j.url.contains("/nibor1896/Qwen3.8-") && j.kind == FileKind::Model).map(|j| j.id.as_str()).collect();
-    assert_eq!(pending.len(), 7, "{pending:?}");
-    let mirror_bytes: u64 = p.jobs.iter().filter(|j| pending.contains(&j.id.as_str())).map(|j| j.bytes).sum();
+    // every model file that is not in our repo is a foreign original or the hotset
+    let elsewhere: Vec<&str> = p.jobs.iter().filter(|j| !j.url.contains("/nibor1896/Qwen3.8-") && j.kind == FileKind::Model).map(|j| j.id.as_str()).collect();
+    assert_eq!(elsewhere.len(), 7, "{elsewhere:?}");
     let s = Stack::embedded();
-    assert_eq!(mirror_bytes, s.point("flash-next").unwrap().bytes.mirror_pending + s.point("27b").unwrap().bytes.mirror_pending);
-    assert_eq!(mirror_bytes, 916_868_415 + 940_434_736);
+    let pending: Vec<&str> = s.files.iter().filter(|f| f.status == Status::MirrorPending).map(|f| f.id.as_str()).collect();
+    assert_eq!(pending, ["fn-hotsets-crow0924"]);
+    let (fnx, b27) = (s.point("flash-next").unwrap(), s.point("27b").unwrap());
+    assert_eq!((fnx.bytes.mirror_pending, b27.bytes.mirror_pending), (37_167, 0));
+    assert_eq!(fnx.bytes.upstream + b27.bytes.upstream, 916_868_415 - 37_167 + 940_434_736);
 }
 
 #[test]
@@ -267,8 +273,8 @@ fn unknown_point_is_an_error_and_a_repeated_one_is_not() {
 #[test]
 fn embedded_stack_parses_with_its_crow_files() {
     let s = Stack::embedded();
-    assert_eq!(s.points.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["flash-next", "27b", "image-stack"]);
-    assert_eq!(s.files.len(), 26);
+    assert_eq!(s.points.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["flash-next", "27b", "image-stack", "media-stack"]);
+    assert_eq!(s.files.len(), 36);
     assert_eq!(s.crow_files.len(), 4);
     assert_eq!(s.crow_files.iter().map(|f| f.bytes).sum::<u64>(), WHISPER);
     assert!(Stack::parse("{").is_err());
@@ -276,4 +282,56 @@ fn embedded_stack_parses_with_its_crow_files() {
     raw["points"][1]["files"].as_array_mut().unwrap().push("27b-ghost".into());
     let err = Stack::parse(&raw.to_string()).unwrap_err();
     assert!(err.contains("27b-ghost"), "{err}");
+}
+
+#[test]
+fn an_upstream_file_is_fetched_from_its_host_and_a_gate_rides_on_the_job() {
+    // #340: GitHub raw files, GitHub release assets and gated Hugging Face repos.
+    let mut doc = Stack::embedded().raw.clone();
+    for f in doc["files"].as_array_mut().unwrap() {
+        match f["id"].as_str().unwrap() {
+            "qi-license" => f["host"] = "github".into(),
+            "qi-vae" => {
+                f["host"] = "github-release".into();
+                f["tag"] = "v0.38.0".into();
+            }
+            "qi-transformer-1" => f["gated"] = true.into(),
+            _ => {}
+        }
+    }
+    let s = Stack::parse(&doc.to_string()).expect("parse");
+    let root = default_root();
+    let p = plan(&s, &sel(&["image-stack"], &root), &root.join("models"), &packages()).expect("plan");
+    let job = |id: &str| p.jobs.iter().find(|j| j.id == id).unwrap().clone();
+    let (lic, vae, t1, t2) = (job("qi-license"), job("qi-vae"), job("qi-transformer-1"), job("qi-transformer-2"));
+    let f = |id: &str| s.file(id).unwrap().clone();
+    assert_eq!(lic.url, format!("https://raw.githubusercontent.com/Qwen/Qwen-Image-2.1/{}/{}", f("qi-license").revision.unwrap(), f("qi-license").path));
+    assert_eq!(vae.url, format!("https://github.com/Qwen/Qwen-Image-2.1/releases/download/v0.38.0/{}", f("qi-vae").path));
+    assert!(t1.url.starts_with("https://huggingface.co/Qwen/Qwen-Image-2.1/resolve/"), "{}", t1.url);
+    assert!(t2.url.starts_with("https://huggingface.co/"), "{}", t2.url);
+    assert_eq!((f("qi-transformer-1").gated, f("qi-transformer-2").gated, f("qi-vae").gated), (true, false, false));
+    assert_eq!(vae.local_rel, format!("Qwen/Qwen-Image-2.1/{}", f("qi-vae").path));
+}
+
+#[test]
+fn an_unpacked_runtime_counts_on_disk_and_its_deleted_archive_does_not() {
+    // #340: the archive is deleted once unpacked, like a convert input.
+    let mut doc = Stack::embedded().raw.clone();
+    let mut file = doc["files"].as_array().unwrap().iter().find(|f| f["id"] == "qi-vae").unwrap().clone();
+    file["id"] = "comfyui-portable".into();
+    file["role"] = "runtime".into();
+    file["bytes"] = 1_994_326_521u64.into();
+    file["dest"] = "${INSTALL}/setup/downloads/ComfyUI_windows_portable_nvidia.7z".into();
+    doc["files"].as_array_mut().unwrap().push(file);
+    let rt = serde_json::json!({"file": "comfyui-portable", "dir": "${INSTALL}/comfyui",
+                                "strip": "ComfyUI_windows_portable", "bytes": 4_384_588_275u64});
+    let pt = doc["points"].as_array_mut().unwrap().iter_mut().find(|p| p["id"] == "27b").unwrap();
+    pt["files"].as_array_mut().unwrap().push("comfyui-portable".into());
+    pt["video_server"] = serde_json::json!({"runtime": {"windows": rt.clone(), "linux": rt}});
+    let s = Stack::parse(&doc.to_string()).unwrap();
+    let root = default_root();
+    let with = plan(&s, &sel(&["27b"], &root), &root.join("models"), &packages()).unwrap();
+    let without = plan_for(&["27b"]);
+    assert_eq!(with.download_bytes, without.download_bytes + 1_994_326_521);
+    assert_eq!(with.disk_bytes, without.disk_bytes + 4_384_588_275);
 }

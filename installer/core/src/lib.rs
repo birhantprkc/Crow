@@ -19,6 +19,8 @@ pub mod convert;
 pub mod finish;
 pub mod layout;
 pub mod python;
+/// #340: the video server's runtime (ComfyUI's portable 7z).
+pub mod runtime;
 
 pub mod run;
 

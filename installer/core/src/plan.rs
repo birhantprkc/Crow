@@ -19,7 +19,7 @@
 //! conversion is higher by those inputs; preflight checks each point's peak.
 
 use crate::api::{DerivedJob, FileJob, FileKind, Package, Packages, Plan, Selection};
-use crate::stack::{Stack, StackFile, Status, hf_url, resolve_path};
+use crate::stack::{Stack, StackFile, Status, resolve_path};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -87,7 +87,20 @@ pub fn plan(stack: &Stack, sel: &Selection, models_root: &Path, packages: &Packa
     let download_bytes: u64 = jobs.iter().map(|j| j.bytes).sum();
     let derived_bytes: u64 = derived.iter().map(|d| d.bytes).sum();
     let deleted_bytes: u64 = deleted.iter().filter_map(|id| stack.file(id)).map(|f| f.bytes).sum();
-    let disk_bytes = download_bytes + derived_bytes - deleted_bytes;
+    // #340: an unpacked runtime stays, its archive is deleted (crate::runtime).
+    let plat = if cfg!(windows) { "windows" } else { "linux" };
+    let (mut runtime_bytes, mut archives) = (0u64, BTreeSet::new());
+    for p in &selected {
+        let rt = stack.raw["points"].as_array().into_iter().flatten()
+            .find(|q| q["id"] == p.id.as_str()).map(|q| &q["video_server"]["runtime"][plat]);
+        if let Some(fid) = rt.and_then(|rt| rt["file"].as_str())
+            && archives.insert(fid.to_string())
+        {
+            runtime_bytes += rt.and_then(|rt| rt["bytes"].as_u64()).unwrap_or(0);
+        }
+    }
+    let archive_bytes: u64 = archives.iter().filter_map(|id| stack.file(id)).map(|f| f.bytes).sum();
+    let disk_bytes = download_bytes + derived_bytes + runtime_bytes - deleted_bytes - archive_bytes;
     Ok(Plan { jobs, derived, download_bytes, disk_bytes })
 }
 
@@ -108,7 +121,7 @@ fn file_job(f: &StackFile, kind: FileKind, points: Vec<String>, install: &Path, 
     let url = match (f.status, &f.revision, &f.source) {
         (Status::MirrorPending, _, Some(src)) => src.url(),
         (Status::MirrorPending, _, None) => return Err(format!("file {} is mirror-pending without a source", f.id)),
-        (_, Some(rev), _) => hf_url(&f.repo, rev, &f.path),
+        (_, Some(rev), _) => f.url(rev)?,
         (_, None, _) => return Err(format!("file {} has no pinned revision", f.id)),
     };
     Ok(FileJob {

@@ -57,7 +57,7 @@ class Schema(Base):
         self.red("schema", "status 'local'")
 
     def test_mirror_pending_with_a_revision(self):
-        file_(self.doc, "27b-mmproj")["revision"] = "0" * 40
+        file_(self.doc, "fn-hotsets-crow0924")["revision"] = "0" * 40
         self.red("schema", "revision must be null")
 
     def test_published_without_a_revision(self):
@@ -65,8 +65,14 @@ class Schema(Base):
         self.red("schema", "40-hex commit revision")
 
     def test_source_disagreeing_with_the_file(self):
-        file_(self.doc, "fn-tokenizer")["source"]["sha256"] = "a" * 64
+        file_(self.doc, "fn-hotsets-crow0924")["source"]["sha256"] = "a" * 64
         self.red("schema", "differ from its source")
+
+    def test_a_licence_shown_at_install_names_what_it_covers(self):
+        # #340: the selection screen says "<covers>: <name>"; it used to say
+        # "Qwen-Image weights" for every licence it showed.
+        del self.doc["licenses"]["qwen-research"]["covers"]
+        self.red("schema", "licence qwen-research is shown at install but names nothing it covers")
 
     def test_non_commercial_licence_hidden(self):
         self.doc["licenses"]["qwen-research"]["show_at_install"] = False
@@ -79,6 +85,50 @@ class Schema(Base):
     def test_shared_dest(self):
         file_(self.doc, "fn-sidecar")["dest"] = file_(self.doc, "fn-cnq")["dest"]
         self.red("schema", "share dest")
+
+
+class UpstreamHosts(Base):
+    """#340: an upstream file may come from GitHub (a raw file or a release asset)
+    and may sit behind a Hugging Face gate the user has to pass."""
+
+    def green_schema(self):
+        r = C.run(self.doc)
+        self.assertFalse([ln for ln in r.lines if ln.startswith("  FAIL") and "schema" in ln], r.lines)
+
+    def test_a_github_raw_file_and_a_release_asset_are_valid(self):
+        file_(self.doc, "qi-license")["host"] = "github"
+        f = file_(self.doc, "qi-vae")
+        f["host"], f["tag"] = "github-release", "v0.38.0"
+        self.green_schema()
+
+    def test_a_gated_hugging_face_file_is_valid(self):
+        file_(self.doc, "qi-vae")["gated"] = True
+        self.green_schema()
+
+    def test_unknown_host(self):
+        file_(self.doc, "qi-vae")["host"] = "gitlab"
+        self.red("schema", "host 'gitlab'")
+
+    def test_a_release_asset_needs_its_tag(self):
+        file_(self.doc, "qi-vae")["host"] = "github-release"
+        self.red("schema", "github-release needs a tag")
+
+    def test_a_tag_belongs_to_a_release_asset_only(self):
+        file_(self.doc, "qi-vae")["tag"] = "v1"
+        self.red("schema", "tag only with host github-release")
+
+    def test_gated_is_true_or_absent(self):
+        file_(self.doc, "qi-vae")["gated"] = "yes"
+        self.red("schema", "gated must be true")
+
+    def test_only_hugging_face_has_a_gate(self):
+        f = file_(self.doc, "qi-vae")
+        f["host"], f["gated"] = "github", True
+        self.red("schema", "gated only on host huggingface")
+
+    def test_a_mirror_pending_file_takes_its_host_from_source(self):
+        file_(self.doc, "fn-hotsets-crow0924")["host"] = "github"
+        self.red("schema", "mirror-pending: the host is its source's")
 
 
 class Paths(Base):
@@ -377,6 +427,7 @@ class TheWindowsLine(Base):
             "flash-next": "200k context. Great for coding and vision.",
             "27b": "128k context. Great speed, coding and vision.",
             "image-stack": "27B with Qwen-Image 2.1. Create pictures.",
+            "media-stack": "Qwen3.5-9B with Qwen-Image 2.1 and LTX-2.5. Create pictures and videos.",
         })
 
     def test_a_point_without_one(self):
@@ -395,6 +446,273 @@ class TheWindowsLine(Base):
         with mock.patch.dict(os.environ, {"USERNAME": "zzqbuilder"}):
             point(self.doc, "27b")["menu"]["gui"] = "Built by zzqbuilder."
             self.red("placeholders and paths", "names the user")
+
+
+def media_like(doc):
+    """27b rebuilt as a llama-server point with a video server (#340), valid as built."""
+    base = file_(doc, "27b-cnq")
+    doc["files"] += [
+        dict(base, id="g-model", path="model-Q8_0.gguf", dest="${MODELS}/g/model-Q8_0.gguf"),
+        dict(base, id="g-mmproj", path="mmproj-F16.gguf", dest="${MODELS}/g/mmproj-F16.gguf",
+             role="projector"),
+        dict(base, id="g-runtime", path="comfyui.zip", dest="${INSTALL}/setup/comfyui.zip", role="runtime"),
+    ]
+    pt = point(doc, "27b")
+    pt["files"] = ["g-model", "g-mmproj", "g-runtime"]
+    pt["engine"] = {
+        "kind": "llama-server",
+        "binary": {"windows": "${INSTALL}/bin/llama-server.exe", "linux": "${INSTALL}/bin/llama-server"},
+        "cwd": "${INSTALL}", "env": {}, "dirs": [], "port": 8099, "context": 131072,
+        "argv": ["-m", "${MODELS}/g/model-Q8_0.gguf", "--mmproj", "${MODELS}/g/mmproj-F16.gguf",
+                 "--port", "8099"],
+        "readiness": {"method": "GET", "path": "/health", "status": 200, "json": {"status": "ok"}},
+        "identity": {"method": "GET", "path": "/props", "field": "model_path", "endswith": "model-Q8_0.gguf"},
+    }
+    pt["video_server"] = {
+        "binary": {"windows": "${INSTALL}/comfyui/python_embeded/python.exe",
+                   "linux": "${INSTALL}/comfyui/venv/bin/python"},
+        "argv": ["-s", "${INSTALL}/comfyui/ComfyUI/main.py", "--port", "8188"],
+        "port": 8188,
+        "readiness": {"method": "GET", "path": "/system_stats", "status": 200},
+        "runtime": {"windows": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"},
+                    "linux": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"}},
+    }
+    return pt
+
+
+class LlamaEngineAndVideo(unittest.TestCase):
+    """engine.kind llama-server and video_server (#340), on a rebuilt 27b."""
+
+    def setUp(self):
+        self.doc = copy.deepcopy(REAL)
+        self.pt = media_like(self.doc)
+
+    def problems(self):
+        return C.check_schema(self.doc) + C.check_wiring(self.doc) + C.check_platforms(self.doc)
+
+    def red(self, needle):
+        self.assertTrue(any(needle in p for p in self.problems()), self.problems())
+
+    def test_the_fixture_is_green(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_unknown_engine_kind(self):
+        self.pt["engine"]["kind"] = "vllm"
+        self.red("engine kind 'vllm' is not one of")
+
+    def test_model_flag_names_no_container(self):
+        self.pt["engine"]["argv"][1] = "${MODELS}/g/mmproj-F16.gguf"
+        self.red("llama-server -m does not name its container")
+
+    def test_identity_of_another_file(self):
+        self.pt["engine"]["identity"]["endswith"] = "other.gguf"
+        self.red("identity must be /props model_path ending in model-Q8_0.gguf")
+
+    def test_mmproj_not_installed(self):
+        self.pt["engine"]["argv"][3] = "${MODELS}/g/missing.gguf"
+        self.red("--mmproj ${MODELS}/g/missing.gguf is no projector")
+
+    def test_serve_still_needs_its_slot_dir(self):
+        self.pt["engine"]["kind"] = "serve"
+        self.red("--slot-save-path None is not created")
+
+    def full_runtime(self):
+        for rt in self.pt["video_server"]["runtime"].values():
+            rt.update({"strip": "ComfyUI_windows_portable", "bytes": 4384588275,
+                       "model_paths": {"file": "ComfyUI/extra_model_paths.yaml",
+                                       "base": "${MODELS}/ltx-2.5",
+                                       "folders": ["diffusion_models", "text_encoders", "vae"]}})
+        return self.pt["video_server"]["runtime"]["windows"]
+
+    def test_a_full_runtime_is_green_and_its_bytes_count_as_derived(self):
+        self.full_runtime()
+        self.assertEqual(self.problems(), [])
+        self.assertEqual(C.point_sums(self.doc, self.pt)["derived"], 4384588275)
+
+    def test_runtime_strip_is_one_folder_name(self):
+        self.full_runtime()["strip"] = "a/../b"
+        self.red("runtime.windows.strip 'a/../b' is not one folder name")
+
+    def test_runtime_bytes_are_positive(self):
+        self.full_runtime()["bytes"] = 0
+        self.red("runtime.windows.bytes 0 is not a positive integer")
+
+    def test_model_paths_base_sits_under_a_placeholder(self):
+        self.full_runtime()["model_paths"]["base"] = "C:/models"
+        self.red("runtime.windows.model_paths.base 'C:/models' does not start with")
+
+    def test_model_paths_name_folders(self):
+        self.full_runtime()["model_paths"]["folders"] = []
+        self.red("runtime.windows.model_paths.folders must list folder kinds")
+
+    def test_model_paths_file_is_relative(self):
+        self.full_runtime()["model_paths"]["file"] = "../x.yaml"
+        self.red("runtime.windows.model_paths.file '../x.yaml' is not inside the runtime")
+
+    def test_video_server_field_missing(self):
+        del self.pt["video_server"]["runtime"]
+        self.red("video_server lacks runtime")
+
+    def test_video_port_differs_from_argv(self):
+        self.pt["video_server"]["port"] = 8189
+        self.red("video server --port differs from port 8189")
+
+    def test_video_shares_the_engine_port(self):
+        self.pt["video_server"]["port"] = 8099
+        self.pt["video_server"]["argv"][3] = "8099"
+        self.red("video server shares port 8099")
+
+    def test_runtime_file_without_role_runtime(self):
+        self.pt["video_server"]["runtime"]["linux"]["file"] = "g-model"
+        self.red("video_server.runtime.linux.file 'g-model' is no runtime file")
+
+    def test_video_path_outside_its_runtime(self):
+        self.pt["video_server"]["argv"][1] = "${INSTALL}/elsewhere/main.py"
+        self.red("video server path ${INSTALL}/elsewhere/main.py is neither installed nor in its runtime")
+
+    def test_video_without_a_linux_binary(self):
+        del self.pt["video_server"]["binary"]["linux"]
+        self.red("video_server.binary names ['windows'], expected windows and linux")
+
+    def test_video_binary_outside_its_runtime_dir(self):
+        self.pt["video_server"]["binary"]["windows"] = "${INSTALL}/bin/python.exe"
+        self.red("video_server.binary.windows is not inside its runtime dir")
+
+    def windows_only(self):
+        self.pt["platforms"] = ["windows"]
+        self.pt["_platforms"] = "the video runtime is the Windows portable build"
+        for m in (self.pt["engine"]["binary"], self.pt["video_server"]["binary"],
+                  self.pt["video_server"]["runtime"]):
+            del m["linux"]
+
+    def test_a_windows_only_point_with_a_reason_is_green(self):
+        self.windows_only()
+        self.assertEqual(self.problems(), [])
+
+    def test_a_windows_only_point_needs_a_reason(self):
+        self.windows_only()
+        del self.pt["_platforms"]
+        self.red("runs on windows only and gives no reason (_platforms)")
+
+    def test_an_unknown_platform(self):
+        self.pt["platforms"] = ["windows", "macos"]
+        self.red("platforms ['windows', 'macos'] is not a list of windows / linux")
+
+    def test_a_windows_only_point_naming_a_linux_binary(self):
+        self.windows_only()
+        self.pt["engine"]["binary"]["linux"] = "${INSTALL}/bin/llama-server"
+        self.red("engine.binary names ['linux', 'windows'], expected windows")
+
+
+class PointLists(unittest.TestCase):
+    """The hand-written point lists (#340), each broken in a copy of its source file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        for rel in {entry[1] for entry in C.POINT_LISTS}:
+            os.makedirs(os.path.dirname(os.path.join(self.root, rel)), exist_ok=True)
+            with open(os.path.join(C.REPO, rel), encoding="utf-8") as f:
+                text = f.read()
+            with open(os.path.join(self.root, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def edit(self, rel, old, new):
+        path = os.path.join(self.root, rel)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn(old, text, "fixture text moved in %s" % rel)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(old, new, 1))
+
+    def problems(self, doc=REAL):
+        return C.check_point_lists(doc, self.root)[0]
+
+    def test_the_repo_is_green(self):
+        problems, n = C.check_point_lists(REAL)
+        self.assertEqual(problems, [])
+        self.assertEqual(n, 9)
+
+    def test_a_new_point_only_in_stack_json(self):
+        doc = copy.deepcopy(REAL)
+        doc["points"].append(dict(point(doc, "image-stack"), id="test-only-point"))
+        problems = self.problems(doc)
+        hit = {label for label, *_ in C.POINT_LISTS if any(label in p for p in problems)}
+        self.assertEqual(hit, {label for label, _, _, rule, *_ in C.POINT_LISTS if rule != "subset"})
+
+    def test_cli_points_without_a_point(self):
+        self.edit("installer/app/src/cli.rs", '"image-stack", "media-stack"]', '"image-stack"]')
+        self.assertIn("cli.rs POINTS", "\n".join(self.problems()))
+
+    def test_boot_icon_missing(self):
+        self.edit("cli/crow_boot.py", '    "image-stack": ', '    "image-stackz": ')
+        self.assertTrue(any("crow_boot ICONS" in p and "lacks ['image-stack']" in p for p in self.problems()))
+
+    def test_fake_plan_without_a_point(self):
+        self.edit("installer/core/src/run.rs", 'if has("flash-next")', 'if false')
+        self.assertTrue(any("run.rs fake plan" in p and "flash-next" in p for p in self.problems()))
+
+    def test_mock_selects_an_unknown_point(self):
+        self.edit("installer/ui/mock.js", "var points = ['flash-next', '27b']", "var points = ['flash-next', 'video']")
+        self.assertTrue(any("mock.js selection" in p and "video" in p for p in self.problems()))
+
+    def test_a_list_that_moved(self):
+        self.edit("installer/ui/index.html", "var DESC = {", "var DESCRIPTIONS = {")
+        self.assertTrue(any("setup page DESC: list not found" in p for p in self.problems()))
+
+
+class OnlineToken(unittest.TestCase):
+    """#340: --online measures a gated repo (Lightricks/LTX-2.5) with the user's
+    Hugging Face token; Hugging Face hides an LFS sha256 without it."""
+
+    def test_the_token_is_found_where_huggingface_hub_looks(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".cache", "huggingface"))
+            with open(os.path.join(home, ".cache", "huggingface", "token"), "w") as fh:
+                fh.write("hf_file\n")
+            self.assertEqual(C.hf_token({}, home), "hf_file")
+            self.assertEqual(C.hf_token({"HUGGING_FACE_HUB_TOKEN": "hf_old"}, home), "hf_old")
+            self.assertEqual(C.hf_token({"HF_TOKEN": " hf_env ", "HUGGING_FACE_HUB_TOKEN": "x"}, home), "hf_env")
+            self.assertIsNone(C.hf_token({}, os.path.join(home, "nobody")))
+
+    def test_only_hugging_face_gets_the_token(self):
+        seen = []
+
+        class Resp:
+            headers = {}
+
+            def read(self, *a):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=0):
+            seen.append((req.full_url, req.get_header("Authorization")))
+            return Resp()
+
+        with mock.patch.object(C, "hf_token", return_value="hf_x"), \
+             mock.patch.object(C.urllib.request, "urlopen", fake_urlopen):
+            C.fetch("https://huggingface.co/api/models/a/b")
+            C.fetch("https://api.github.com/repos/a/b")
+            C.fetch("https://huggingface.co.evil.example/x")
+        self.assertEqual(seen, [("https://huggingface.co/api/models/a/b", "Bearer hf_x"),
+                                ("https://api.github.com/repos/a/b", None),
+                                ("https://huggingface.co.evil.example/x", None)])
+
+    def test_a_hidden_sha256_is_named_not_compared(self):
+        hub = C.Hub()
+        hub.trees[("Lightricks/LTX-2.5", "r")] = {
+            "vae/v.safetensors": {"size": 5, "lfs": {"oid": "*" * 64, "size": 5}}}
+        with self.assertRaises(LookupError) as cm:
+            hub.measure("Lightricks/LTX-2.5", "r", "vae/v.safetensors")
+        self.assertIn("HF_TOKEN", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@
 use crate::api::{Command, Event, FileJob, FileKind, Packages, Plan, PreflightReport, Selection, Source, StepStatus};
 use crate::fetch::{FetchError, FetchOptions};
 use crate::python::PythonInfo;
+use crate::runtime::RuntimeJob;
 use crate::state::{FileState, StateStore};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -95,6 +96,18 @@ pub trait Steps {
     /// The job will take no space where it lands (a hard link). Default: never.
     fn costs_no_disk(&mut self, _job: &FileJob) -> bool {
         false
+    }
+    /// #340: the video server runtimes the selection needs. Default: none.
+    fn runtimes(&mut self, _sel: &Selection) -> Vec<RuntimeJob> {
+        Vec::new()
+    }
+    /// The runtime folder holds exactly this archive's contents. Default: no.
+    fn runtime_current(&mut self, _job: &RuntimeJob) -> bool {
+        false
+    }
+    /// Unpack one runtime; the summary is the step's detail.
+    fn unpack_runtime(&mut self, _job: &RuntimeJob, _cancel: &AtomicBool) -> Result<String, String> {
+        Err("this installer cannot unpack a runtime".into())
     }
 }
 
@@ -285,6 +298,8 @@ struct Runner<'a> {
     state: StateStore,
     /// Ids of the convert step's inputs (the files it deletes).
     inputs: std::collections::BTreeSet<String>,
+    /// #340: the runtimes this selection unpacks (their archives are deleted).
+    runtimes: Vec<RuntimeJob>,
 }
 
 /// Run the whole install. Returns when Done was emitted and the input channel
@@ -293,7 +308,7 @@ pub fn run(steps: &mut dyn Steps, opts: &RunOptions, on: &mut dyn FnMut(Event), 
     let ctl = Arc::new(Control { cancel: AtomicBool::new(false), ctl: Mutex::default(), cv: Condvar::new() });
     ctl.listen(inputs);
     let state = StateStore { path: opts.state_path.clone(), ..StateStore::default() };
-    let mut r = Runner { steps, on, opts, ctl, state, inputs: Default::default() };
+    let mut r = Runner { steps, on, opts, ctl, state, inputs: Default::default(), runtimes: Vec::new() };
     match r.go() {
         Ok(()) => Outcome::Done,
         Err(Stop::Quit) => {
@@ -327,10 +342,21 @@ impl Runner<'_> {
         self.state.steps_done.iter().any(|s| s == step)
     }
 
-    /// A fetched file is had when it is on disk, or when it is a convert input
-    /// and the convert step (which deletes its inputs) is done.
+    /// A fetched file is had when it is on disk, or when it is consumed.
     fn have(&mut self, job: &FileJob) -> bool {
-        (self.done("convert") && self.inputs.contains(&job.id)) || self.steps.present(job)
+        self.consumed(job) || self.steps.present(job)
+    }
+
+    /// A file a done step has used up and deleted: a convert input once the
+    /// convert is done, a runtime archive once it is unpacked (#340).
+    fn consumed(&self, job: &FileJob) -> bool {
+        (self.done("convert") && self.inputs.contains(&job.id))
+            || self.runtimes.iter().any(|r| r.file_id == job.id && self.done(&Self::runtime_key(r)))
+    }
+
+    /// `runtime:<sha256>`: the archive the runtime folder was unpacked from.
+    fn runtime_key(r: &RuntimeJob) -> String {
+        format!("runtime:{}", r.sha256)
     }
 
     /// `crow:<sha256>` / `engine:<sha256>`: the install step of a package job.
@@ -397,6 +423,15 @@ impl Runner<'_> {
 
         let plan = self.steps.plan(&sel).map_err(Stop::Fatal)?;
         self.inputs = plan.derived.iter().flat_map(|d| d.inputs.iter().cloned()).collect();
+        // A runtime folder that no longer holds its archive is unpacked again,
+        // so its archive is fetched again (#340).
+        self.runtimes = self.steps.runtimes(&sel);
+        for r in self.runtimes.clone() {
+            let key = Self::runtime_key(&r);
+            if self.done(&key) && !self.steps.runtime_current(&r) {
+                self.state.steps_done.retain(|s| s != &key);
+            }
+        }
         self.emit(Event::Planned(plan.clone()));
         let root = sel.install_root.clone();
         let models = models_root(&root);
@@ -460,6 +495,22 @@ impl Runner<'_> {
             plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::Model | FileKind::Whisper)).collect();
         self.fetch_all(&models_jobs)?;
 
+        // #340: each runtime unpacked from its archive, which is then deleted.
+        for r in self.runtimes.clone() {
+            let key = Self::runtime_key(&r);
+            if self.done(&key) {
+                self.step_event("runtime", StepStatus::Ok, "Video runtime ready.");
+                continue;
+            }
+            let ctl = Arc::clone(&self.ctl);
+            self.step("runtime", &mut |s| s.unpack_runtime(&r, &ctl.cancel).map(|d| sentence(&d)))?;
+            self.mark(&key);
+            self.save();
+            if let Some(job) = plan.jobs.iter().find(|j| j.id == r.file_id) {
+                self.steps.discard(job);
+            }
+        }
+
         if !plan.derived.is_empty() {
             if self.done("convert") {
                 self.step_event("convert", StepStatus::Ok, "Text encoder ready.");
@@ -514,15 +565,17 @@ impl Runner<'_> {
     /// (`text_encoder/`) and its output exist side by side until convert
     /// deletes the inputs. What is already on disk counts as had.
     fn disk_check(&mut self, plan: &Plan, root: &Path) -> Result<(), Stop> {
-        let peak = plan.download_bytes + plan.derived.iter().map(|d| d.bytes).sum::<u64>();
+        // #340: a runtime still to unpack lands beside its archive.
+        let unpack: u64 = self.runtimes.iter().filter(|r| !self.done(&Self::runtime_key(r))).map(|r| r.bytes).sum();
+        let peak = plan.download_bytes + plan.derived.iter().map(|d| d.bytes).sum::<u64>() + unpack;
         let converted = self.done("convert");
         let mut had: u64 = if converted { plan.derived.iter().map(|d| d.bytes).sum() } else { 0 };
         for job in &plan.jobs {
             let fs = self.state.files.get(&job.id).cloned().unwrap_or_default();
             let installed = matches!(job.kind, FileKind::CrowPackage | FileKind::EnginePackage)
                 && self.done(&Self::install_key(job));
-            // a convert input is never fetched once the convert is done
-            let consumed = converted && self.inputs.contains(&job.id);
+            // a convert input or an unpacked archive is never fetched again
+            let consumed = self.consumed(job);
             had += if installed || consumed || (fs.verified && self.have(job)) || self.steps.costs_no_disk(job) {
                 job.bytes
             } else {
@@ -623,7 +676,7 @@ impl Runner<'_> {
         let known = self.state.files.get(&job.id).cloned().unwrap_or_default();
         // a convert input is never needed once the convert is done (a source
         // that held the converted output never had the input at all, #342)
-        let consumed = self.done("convert") && self.inputs.contains(&job.id);
+        let consumed = self.consumed(job);
         if consumed || (known.verified && self.have(job)) {
             self.emit(Event::FileVerified { id: job.id.clone() });
             return Ok(FileResult::Ok);
@@ -927,6 +980,16 @@ impl Steps for RealSteps {
         // a zip that cannot be deleted costs disk, not the install
         let _ = std::fs::remove_file(&job.dest);
     }
+    fn runtimes(&mut self, sel: &Selection) -> Vec<RuntimeJob> {
+        let models = models_root(&sel.install_root);
+        crate::runtime::jobs(self.stack(), sel, &models)
+    }
+    fn runtime_current(&mut self, job: &RuntimeJob) -> bool {
+        crate::runtime::is_current(job)
+    }
+    fn unpack_runtime(&mut self, job: &RuntimeJob, cancel: &AtomicBool) -> Result<String, String> {
+        crate::runtime::unpack(job, cancel, &mut |_, _| {})
+    }
     fn disk_free(&mut self, dir: &Path) -> u64 {
         crate::preflight::disk_free(dir)
     }
@@ -1020,6 +1083,8 @@ pub mod testing {
         pub present: std::collections::BTreeSet<String>,
         /// Free disk bytes; None is 1 TiB.
         pub disk_free: Option<u64>,
+        /// #340: the unpacked runtime folder was deleted.
+        pub runtime_gone: bool,
     }
 
     #[derive(Clone, Default)]
@@ -1078,6 +1143,10 @@ pub mod testing {
         }
         if has("flash-next") {
             jobs.push(job("fn-cnq", FileKind::Model, 10560, &["flash-next"], root));
+        }
+        if has("media-stack") {
+            // #340: the video runtime's archive, unpacked and then deleted.
+            jobs.push(job("comfyui-portable", FileKind::Model, 199, &["media-stack"], root));
         }
         let derived = if has("image-stack") {
             vec![crate::api::DerivedJob {
@@ -1226,6 +1295,29 @@ pub mod testing {
         fn check_point(&mut self, _py: &PythonInfo, _root: &Path, _models: &Path, point: &str) -> Result<(), String> {
             self.step(&format!("check {point}"), "check")
         }
+        fn runtimes(&mut self, sel: &Selection) -> Vec<RuntimeJob> {
+            if !sel.points.iter().any(|p| p == "media-stack") {
+                return Vec::new();
+            }
+            vec![RuntimeJob {
+                point: "media-stack".into(),
+                file_id: "comfyui-portable".into(),
+                archive: sel.install_root.join("fake").join("comfyui-portable"),
+                sha256: "comfyui-portable".into(),
+                dir: sel.install_root.join("comfyui"),
+                strip: "ComfyUI_windows_portable".into(),
+                model_paths: None,
+                bytes: 4000,
+            }]
+        }
+        fn runtime_current(&mut self, _job: &RuntimeJob) -> bool {
+            !self.shared.lock().unwrap().runtime_gone
+        }
+        fn unpack_runtime(&mut self, job: &RuntimeJob, _cancel: &AtomicBool) -> Result<String, String> {
+            self.step(&format!("unpack runtime {}", job.file_id), "runtime")?;
+            self.shared.lock().unwrap().runtime_gone = false;
+            Ok("ComfyUI runtime unpacked (3 files, 0.0 GB)".into())
+        }
         fn shortcuts(&mut self, _py: &PythonInfo, _root: &Path, dirs: &[PathBuf]) -> Result<(), String> {
             self.step(&format!("shortcuts {}", dirs.len()), "shortcuts")
         }
@@ -1264,6 +1356,9 @@ pub mod testing {
         v.push("python".into());
         for j in plan.jobs.iter().filter(|j| matches!(j.kind, FileKind::Model | FileKind::Whisper)) {
             v.push(format!("download {} from 0", j.id));
+        }
+        if points.contains(&"media-stack") {
+            v.push("unpack runtime comfyui-portable".into());
         }
         if !plan.derived.is_empty() {
             v.push("convert".into());

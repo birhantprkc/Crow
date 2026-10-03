@@ -14282,7 +14282,7 @@ class RemoteApiParityTests(RemoteCase):
     to the desktop with a stated replacement -- and a call from one client
     produces the push the other one needs."""
 
-    PAGE_METHODS = 104         # 88 at fb31ca2 + the six pairing controls (#249 stage 5) + stage_image_data, drop_seen (#312) + the eight image_* (#311)
+    PAGE_METHODS = 106         # 88 at fb31ca2 + the six pairing controls (#249 stage 5) + stage_image_data, drop_seen (#312) + the eight image_* (#311) + video_src, video_reveal (#340)
 
     def page_methods(self) -> set:
         page = crow_gui.PAGE
@@ -14314,7 +14314,9 @@ class RemoteApiParityTests(RemoteCase):
                           "roll_show", "provider_authorise",
                           # #311: the lightbox's actions on the desktop's file
                           "image_reveal", "image_copy", "image_open",
-                          "image_trash"})
+                          "image_trash",
+                          # #340: the clip's folder, on the desktop
+                          "video_reveal"})
         # NEGATIVE: the window, the layout and the pairing controls never.
         for name in ("maximise", "close", "set_theme", "rail_width",
                      "pane_go", "remote_allow", "remote_open", "copy"):
@@ -16874,6 +16876,214 @@ class TheWindowWarmsOnlyOnTheImageStackTests(unittest.TestCase):
         self._point("27b")
         self.assertFalse(crow_gui.warm_image_server())
         self.assertEqual(self.thread.call_count, 2)
+
+
+# #340. A 24-byte `ftyp` box and a little payload: what ComfyUI's SaveVideo
+# file starts with, and all `video_file_card` reads.
+_MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 64
+
+
+def _write_mp4(path: str, data: bytes = _MP4) -> str:
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
+
+
+class AClipIsVettedBeforeThePageHearsItsPathTests(unittest.TestCase):
+    """#340's `video_card`: bytes, size and place, before `{"k": "video"}`."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-vid-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.root = os.path.join(self.dir, "root")
+        self.away = os.path.join(self.dir, "away")
+        os.makedirs(self.root)
+        os.makedirs(self.away)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.root)
+        stored = crow_core._STORED_APPROVALS
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", stored)
+        crow_core._STORED_APPROVALS = set()
+        self.got: list = []
+        self.turn = crow_gui.Turn(self.got.append)
+
+    def test_a_clip_takes_its_jobs_size_and_becomes_a_card(self):
+        path = _write_mp4(os.path.join(self.root, "clip.mp4"))
+        self.turn.tool_progress("animate_image", _progress(
+            job="vid-1", kind="animate", phase="rendering", width=1920, height=1088))
+        self.turn.video_created(path, "animate_image", "vid-1")
+        msg = self.got[-1]
+        self.assertEqual({k: msg[k] for k in ("k", "path", "name", "w", "h",
+                                              "bytes", "source", "job")},
+                         {"k": "video", "path": path, "name": "clip.mp4",
+                          "w": 1920, "h": 1088, "bytes": len(_MP4),
+                          "source": "animate_image", "job": "vid-1"})
+        self.assertAlmostEqual(msg["mtime"], os.path.getmtime(path))
+
+    def test_a_clip_outside_every_approved_path_is_refused_on_its_tile(self):
+        path = _write_mp4(os.path.join(self.away, "x.mp4"))
+        self.turn.video_created(path, "animate_image", "vid-1")
+        self.turn.video_created(path, "run_command")
+        self.assertNotIn("video", [m["k"] for m in self.got])
+        self.assertEqual((self.got[0]["k"], self.got[0]["phase"], self.got[0]["kind"]),
+                         ("imgjob", "refused", "animate"))
+        self.assertIn("outside the working area", self.got[0]["line"])
+        self.assertEqual(self.got[1]["k"], "note")
+        self.assertTrue(self.got[1]["t"].startswith("video saved, not shown here"))
+
+    def test_the_bytes_decide_not_the_name(self):
+        fake = os.path.join(self.root, "x.mp4")
+        with open(fake, "w") as fh:
+            fh.write("not a clip at all, just text\n")
+        self.assertIsNone(crow_gui.video_card(fake)[0])
+        self.assertIn("bytes are not a MP4 video", crow_gui.video_card(fake)[1])
+        webm = _write_mp4(os.path.join(self.root, "a.webm"),
+                          b"\x1a\x45\xdf\xa3" + b"\x00" * 32)
+        self.assertEqual(crow_gui.video_card(webm)[0]["mime"], "video/webm")
+        self.assertIsNone(crow_gui.video_card(_write_mp4(
+            os.path.join(self.root, "a.webm.png")))[0])
+        real = _write_mp4(os.path.join(self.root, "big.mp4"))
+        with mock.patch.object(crow_gui, "VIDEO_MAX_BYTES", 10):
+            self.assertIn("over", crow_gui.video_card(real)[1])
+        self.assertIsNone(crow_gui.video_card(self.root)[0])      # a folder
+        self.assertIsNone(crow_gui.video_card(os.path.join(self.root, "gone.mp4"))[0])
+        self.assertIsNone(crow_gui.video_card(_write_png(
+            os.path.join(self.root, "still.png"), 8, 8))[0])
+
+
+class EveryClipActionReVetsItsPathTests(ApiCase):
+    """#340: the page plays only clips this chat announced, and asks again
+    whether the file is still a clip."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = os.path.join(self.dir, "root")
+        os.makedirs(self.root)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.root)
+        self.api_ = self.api()
+        self.mp4 = _write_mp4(os.path.join(self.root, "clip.mp4"))
+        self.ran: list = []
+        real = crow_gui.subprocess.Popen
+        self.addCleanup(setattr, crow_gui.subprocess, "Popen", real)
+        crow_gui.subprocess.Popen = lambda argv, **kw: self.ran.append(("popen", argv))
+        real_show = crow_gui.show_in_file_manager
+        self.addCleanup(setattr, crow_gui, "show_in_file_manager", real_show)
+        crow_gui.show_in_file_manager = lambda p: self.ran.append(("dbus", p)) or True
+
+    def announce(self):
+        crow_gui.Turn(self.api_.push).video_created(self.mp4, "animate_image", "vid-1")
+        self.drained(self.api_)
+
+    def test_an_unannounced_clip_is_refused(self):
+        self.assertEqual(self.api_.video_src(self.mp4), "")
+        self.assertTrue(self.api_.video_reveal(self.mp4))
+        self.assertEqual(self.api_.video_src(""), "")
+        self.assertEqual(self.ran, [])
+
+    def test_an_announced_image_is_no_clip(self):
+        png = _write_png(os.path.join(self.root, "crow.png"), 8, 8)
+        crow_gui.Turn(self.api_.push).image_created(png, "generate_image", "c1")
+        self.assertEqual(self.api_.video_src(png), "")
+
+    def test_an_announced_clip_that_stopped_being_one_is_refused(self):
+        self.announce()
+        with open(self.mp4, "w") as fh:
+            fh.write("#!/bin/sh\necho swapped\n")
+        self.assertEqual(self.api_.video_src(self.mp4), "")
+        self.assertTrue(self.api_.video_reveal(self.mp4))
+        self.assertEqual(self.ran, [])
+
+    def test_the_gtk_desktop_gets_a_file_url(self):
+        self.announce()
+        with mock.patch.object(crow_platform, "IS_WINDOWS", False):
+            self.assertEqual(self.api_.video_src(self.mp4),
+                             __import__("pathlib").Path(self.mp4).as_uri())
+
+    def test_windows_gets_the_bytes(self):
+        """WebView2 refuses `file://` in a page from NavigateToString."""
+        self.announce()
+        with mock.patch.object(crow_platform, "IS_WINDOWS", True):
+            self.assertEqual(self.api_.video_src(self.mp4),
+                             "data:video/mp4;base64," + base64.b64encode(_MP4).decode())
+
+    def test_reveal_selects_the_file(self):
+        self.announce()
+        self.assertEqual(self.api_.video_reveal(self.mp4), "")
+        self.assertEqual(self.ran, [("dbus", self.mp4)])
+
+    def test_the_clip_ends_its_job_in_the_band(self):
+        self.api_.push({"k": "imgjob", "job": "vid-1", "kind": "animate",
+                        "phase": "rendering"})
+        self.assertEqual(self.api_._imgjobs_running, {"vid-1"})
+        self.announce()
+        self.assertEqual(self.api_._imgjobs_running, set())
+        self.assertIn("video", [n["k"] for n in self.api_._notes])
+
+    def test_a_replayed_clip_draws_only_the_card_and_is_announced(self):
+        api = self.api()
+        self.assertEqual(api.video_src(self.mp4), "")
+        job = {"k": "imgjob", "job": "vid-1", "kind": "animate",
+               "phase": "rendering", "at": 0}
+        card = {"k": "video", "path": self.mp4, "name": "clip.mp4", "w": 1920,
+                "h": 1088, "bytes": len(_MP4), "job": "vid-1", "at": 0}
+        self.assertEqual([m["k"] for m in crow_gui._replay_marks([job, card], set())],
+                         ["video"])
+        api._replay([], [card])
+        self.assertTrue(api.video_src(self.mp4))
+
+
+class ClipsOnThePhoneTests(RemoteCase):
+    """#340: a phone plays the clip from the bytes; the folder stays the desktop's."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = os.path.join(self.dir, "root")
+        os.makedirs(self.root)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.root)
+        self.mp4 = _write_mp4(os.path.join(self.root, "clip.mp4"))
+
+    def test_the_video_methods_are_classified(self):
+        self.assertIn("video_src", crow_gui.REMOTE_PROXIED)
+        self.assertEqual(crow_gui.REMOTE_DESKTOP_BOUND["video_reveal"], "desktop")
+
+    def test_a_phone_gets_the_bytes(self):
+        api = self.mirrored()
+        crow_gui.Turn(api.push).video_created(self.mp4, "animate_image", "vid-1")
+        url = self.as_phone(api._remote_call, "video_src", [self.mp4])
+        self.assertEqual(url, "data:video/mp4;base64," + base64.b64encode(_MP4).decode())
+
+
+class TheClipCardIsInThePageTests(unittest.TestCase):
+    """#340: the page draws a `video` message as a player in the job's place."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = crow_gui.PAGE
+        cls.card = _page_js_between("  vidCard(e){", "\n  // #311. THE LIGHTBOX")
+
+    def test_the_player_replaces_the_tile_in_the_flow(self):
+        self.assertIn('case "video": this.vidCard(e); break;', self.page)
+        self.assertIn('this.turn("gen")', self.card)
+        self.assertIn("old.replaceWith(f)", self.card)
+        self.assertNotIn("innerHTML", self.card)
+        self.assertIn("v.controls=true", self.card)
+
+    def test_the_source_comes_from_the_vetted_api_and_a_data_url_becomes_a_blob(self):
+        self.assertIn("pywebview.api.video_src(path)", self.card)
+        self.assertIn("URL.createObjectURL", self.card)
+
+    def test_the_caption_says_what_actually_plays(self):
+        self.assertIn('"loadedmetadata"', self.card)
+        self.assertIn("v.videoWidth", self.card)
+
+    def test_the_folder_button_is_the_desktops(self):
+        self.assertIn("if(!window.CROW_REMOTE){", self.card)
+        self.assertIn("pywebview.api.video_reveal(path)", self.card)
+
+    def test_the_tile_names_a_video_job(self):
+        self.assertIn('e.kind==="animate" ? "Making a video: "', self.page)
 
 
 if __name__ == "__main__":

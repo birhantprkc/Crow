@@ -7,6 +7,9 @@ edition = "2024"
 hex = "0.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# #340: ComfyUI ships as a solid LZMA2 + BCJ2 7z; decoding only, one thread
+# (24 threads peaked at 10.2 GB on its 1.99 GB archive, one at 806 MB, 40.9 s).
+sevenz-rust2 = { version = "=0.23.0", default-features = false }
 sha2 = "0.11.0"
 thiserror = "2.0.21"
 ureq = "3.4.2"
@@ -22,5 +25,7 @@ libc = "0.2.189"
 tar = { version = "0.4.46", default-features = false }
 
 [dev-dependencies]
+# builds the small test archives
+sevenz-rust2 = { version = "=0.23.0", default-features = false, features = ["compress"] }
 tempfile = "3.27.0"
 tiny_http = "0.12.0"
