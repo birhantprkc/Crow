@@ -2044,11 +2044,14 @@ class ReleaseLevelTests(TurnLoopCase):
         # `generate_image` / `edit_image` seit #300 Phase 3: executing wie
         # render_page -- sie starten den Bildserver, halten die GPU minutenlang
         # und legen eine Datei an.
+        # `animate_image` seit #340: executing wie generate_image -- es startet
+        # ComfyUI, stoppt und startet das Sprachmodell und legt eine Datei an.
         self.assertEqual(asks["manual"],
-                         ["append_file", "build_bundle", "edit_file", "edit_image",
-                          "generate_image", "render_page", "run_command", "write_file"])
-        self.assertEqual(asks["allowedit"], ["build_bundle", "edit_image", "generate_image",
-                                             "render_page", "run_command"])
+                         ["animate_image", "append_file", "build_bundle", "edit_file",
+                          "edit_image", "generate_image", "render_page", "run_command",
+                          "write_file"])
+        self.assertEqual(asks["allowedit"], ["animate_image", "build_bundle", "edit_image",
+                                             "generate_image", "render_page", "run_command"])
         self.assertEqual(asks["auto"], [])
 
     def test_an_unknown_tool_is_treated_as_the_strictest_class(self):
@@ -29056,3 +29059,568 @@ class TheVideoCoreTests(unittest.TestCase):
         self.assertEqual(wf["398:374"]["inputs"]["tile_size"], 512)
         for node in ("395", "398:376", "398:362", "398:339", "403", "75"):
             self.assertIn(node, wf)
+
+
+# ------------------------------------------------- #340 steps 4 and 5 -------
+COMFY_LINE = ('"C:\\Crow\\comfyui\\python_embeded\\python.exe" -s '
+              'C:\\Crow\\comfyui\\ComfyUI\\main.py --windows-standalone-build '
+              '--disable-auto-launch --listen 127.0.0.1 --port 8188')
+
+
+class TheScanSeesComfyUITests(unittest.TestCase):
+    """#340: ComfyUI is a python.exe, so it is named by its main.py, never by
+    the interpreter alone -- and like sd-server it is a companion, not a point."""
+
+    LISTING = ("9191\t" + COMFY_LINE + "\n"
+               "9292\tC:\\Python\\python.exe tools\\check_stack.py --port 8188\n"
+               "5151\tC:\\Crow\\bin\\llama-server.exe -m q.gguf --port 8099\n")
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-340-scan-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_a_comfyui_line_is_the_video_kind_with_its_port(self):
+        found = crow_platform.find_servers(query=lambda: self.LISTING)
+        self.assertEqual([p for p, _ in found], ["9191", "5151"])
+        self.assertEqual(crow_platform.server_kind(found[0][1]), crow_platform.KIND_VIDEO)
+        self.assertEqual(crow_platform.server_port(found[0][1]), 8188)
+        self.assertEqual(crow_platform.server_port(
+            "python.exe -s ComfyUI\\main.py --listen 127.0.0.1"), 8188, "ComfyUI's default")
+        self.assertIsNone(crow_platform.server_kind("C:\\Python\\python.exe main.py"))
+        self.assertIn("ComfyUI", crow_platform._PROCESS_QUERY)
+
+    def test_proc_lists_comfyui_by_its_main_py(self):
+        def proc(pid, args):
+            where = os.path.join(self.dir, "proc", str(pid))
+            os.makedirs(where)
+            with open(os.path.join(where, "cmdline"), "wb") as fh:
+                fh.write(b"\0".join(a.encode() for a in args) + b"\0")
+        proc(41, ["/opt/crow/comfyui/venv/bin/python", "-s",
+                  "/opt/crow/comfyui/ComfyUI/main.py", "--port", "8190"])
+        proc(42, ["/usr/bin/python3", "main.py"])
+        listed = crow_platform._proc_servers(os.path.join(self.dir, "proc"))
+        self.assertEqual([(p, crow_platform.server_kind(l), crow_platform.server_port(l))
+                          for p, l in listed], [("41", "video", 8190)])
+
+    def test_it_is_no_point_but_stop_servers_ends_it(self):
+        killed = []
+        with mock.patch.object(crow_platform, "_run_query", return_value=self.LISTING), \
+             mock.patch.object(crow_platform, "_proc_servers", return_value=None), \
+             mock.patch.object(crow_platform, "IS_WINDOWS", True), \
+             mock.patch.object(crow_platform, "kill_pid",
+                               side_effect=lambda pid: killed.append(pid) or True):
+            self.assertEqual([p for p, _ in crow_core.running_servers()], ["5151"])
+            self.assertEqual([p for p, _ in crow_core.running_servers(include_image=True)],
+                             ["9191", "5151"])
+            self.assertEqual(crow_core.stop_servers(), 2)
+        self.assertEqual(killed, ["9191", "5151"])
+
+
+def _media_servers(engine_port: int, video_port: int, folder: str) -> dict:
+    """The `servers` block crow_boot writes for a point with a video server."""
+    return {"serve": {"argv": [os.path.join(folder, "llama-server.exe"), "-m", "q.gguf",
+                               "--port", str(engine_port)],
+                      "env": {"CROW_X": "1"}, "drop": ["CROW_HOTSETS"], "lib_path": [],
+                      "cwd": folder, "port": engine_port,
+                      "readiness": {"path": "/health", "status": 200}},
+            "video": {"argv": [os.path.join(folder, "python.exe"), "-s",
+                               os.path.join(folder, "ComfyUI", "main.py"),
+                               "--port", str(video_port)],
+                      "cwd": folder, "port": video_port,
+                      "readiness": {"path": "/system_stats", "status": 200}}}
+
+
+class TheContractCarriesTheVideoServerTests(unittest.TestCase):
+    """#340: the boot planned the video server and the engine; the window reads
+    both from active-point.json, so it starts them exactly as planned."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-340-contract-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.alive = {os.getpid()}
+        for target, attr, value in (
+                (crow_platform, "config_dir", lambda: self.dir),
+                (crow_platform, "pid_alive", lambda pid: pid in self.alive),
+                # media-stack joins the list with its stack.json entry (step 3)
+                (crow_core, "ACTIVE_POINTS",
+                 crow_core.ACTIVE_POINTS + (crow_core.ACTIVE_POINT_MEDIA,))):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_servers_mode_and_the_video_pid_round_trip(self):
+        servers = _media_servers(8099, 8188, self.dir)
+        crow_core.write_active_point("media-stack", "http://127.0.0.1:8099/v1",
+                                     {"serve": os.getpid(), "image": None, "video": None},
+                                     servers=servers, mode="image")
+        got = crow_core.read_active_point()
+        self.assertEqual(got["point"], "media-stack")
+        self.assertEqual(got["servers"], servers)
+        self.assertEqual(got["mode"], "image")
+        self.assertEqual(got["pids"], {"serve": os.getpid(), "image": None, "video": None})
+
+    def test_the_old_shape_is_written_without_the_new_keys(self):
+        crow_core.write_active_point("27b", "u", {"serve": os.getpid(), "image": None})
+        with open(crow_core.active_point_path(), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertNotIn("servers", doc)
+        self.assertNotIn("mode", doc)
+        self.assertEqual(doc["pids"], {"serve": os.getpid(), "image": None})
+
+    def test_a_running_video_server_keeps_the_file_alive_while_the_engine_is_down(self):
+        crow_core.write_active_point("media-stack", "u",
+                                     {"serve": None, "image": None, "video": 7777},
+                                     servers=_media_servers(8099, 8188, self.dir), mode="video")
+        self.assertIsNone(crow_core.read_active_point(), "7777 is not alive yet")
+        self.alive.add(7777)
+        self.assertEqual(crow_core.read_active_point()["mode"], "video")
+
+    def test_the_media_stack_may_paint_but_not_while_a_clip_renders(self):
+        crow_core.write_active_point("media-stack", "u",
+                                     {"serve": os.getpid(), "image": None, "video": None},
+                                     servers=_media_servers(8099, 8188, self.dir), mode="image")
+        weights = os.path.join(self.dir, "w")
+        open(weights, "w").close()
+        with mock.patch.object(crow_core, "image_server_binary", return_value=weights), \
+             mock.patch.object(crow_core, "_image_model_files", lambda _m: [weights] * 3), \
+             mock.patch.object(crow_core, "_image_server_answers", lambda *a, **k: False), \
+             mock.patch.object(crow_core.subprocess, "Popen",
+                               side_effect=AssertionError("Popen must not run")):
+            self.assertIsNone(crow_core.image_tools_unavailable())
+            self.alive.add(7777)
+            crow_core.write_active_point("media-stack", "u",
+                                         {"serve": None, "image": None, "video": 7777},
+                                         servers=_media_servers(8099, 8188, self.dir),
+                                         mode="video")
+            why = crow_core.image_server_start()
+        self.assertIn("video mode", why or "")
+
+
+class _FakeHttp:
+    """A tiny server on a free port: `routes` maps (method, path) to a callable
+    (handler, body) -> (code, bytes, content type); a path ending in `*` is a
+    prefix. Every request is recorded."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.requests: list[tuple] = []
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _any(self, method):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                path = urllib.parse.urlsplit(self.path).path
+                fake.requests.append((method, self.path, body))
+                route = fake.routes.get((method, path))
+                if route is None:
+                    for (m, prefix), fn in fake.routes.items():
+                        if m == method and prefix.endswith("*") and path.startswith(prefix[:-1]):
+                            route = fn
+                            break
+                code, data, kind = route(self, body) if route else (404, b"{}", "application/json")
+                self.send_response(code)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self._any("GET")
+
+            def do_POST(self):
+                self._any("POST")
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.url = "http://127.0.0.1:%d" % self.port
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def paths(self, method=None):
+        return [p for m, p, _b in self.requests if method in (None, m)]
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _json(doc, code=200):
+    return lambda _h, _b: (code, json.dumps(doc).encode(), "application/json")
+
+
+class _FakeProc:
+    def __init__(self, pid, code=None):
+        self.pid, self.code = pid, code
+
+    def poll(self):
+        return self.code
+
+
+class TheModeSwitchTests(unittest.TestCase):
+    """#340 step 4: one helper owns the card. Video stops sd-server and the
+    language model, then starts ComfyUI; image ends ComfyUI and starts the
+    language model again from the plan the boot wrote. Fake servers, fake
+    processes -- nothing here touches a GPU."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-340-mode-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.engine = _FakeHttp({("GET", "/health"): _json({"status": "ok"})})
+        self.addCleanup(self.engine.close)
+        self.comfy = _FakeHttp({("GET", "/system_stats"): _json({"system": {}}),
+                                ("POST", "/free"): lambda _h, _b: (200, b"", "text/plain")})
+        self.addCleanup(self.comfy.close)
+        self.servers = _media_servers(self.engine.port, self.comfy.port, self.dir)
+        self.events: list[tuple] = []
+        self.alive = {5001, 5002}
+        self.listed = {5001: "C:\\Crow\\bin\\llama-server.exe -m q.gguf --port 8099",
+                       5002: "C:\\Crow\\bin\\sd-server.exe --listen-port 8097"}
+        self.procs: list[_FakeProc] = []
+        self.exit_code = None
+
+        def popen(argv, **kw):
+            comfy = os.path.basename(argv[0]).startswith("python")
+            proc = _FakeProc(6001 + len(self.procs), self.exit_code if comfy else None)
+            self.procs.append(proc)
+            self.events.append(("popen", os.path.basename(argv[0]), kw.get("cwd")))
+            self.popen_kw = kw
+            self.alive.add(proc.pid)
+            return proc
+
+        def kill(pid):
+            self.events.append(("kill", int(pid)))
+            self.alive.discard(int(pid))
+            self.listed.pop(int(pid), None)
+            return True
+
+        def terminate(proc, grace=5.0):
+            self.events.append(("terminate", proc.pid))
+            self.alive.discard(proc.pid)
+
+        for target, attr, value in (
+                (crow_platform, "config_dir", lambda: self.dir),
+                (crow_platform, "log_dir", lambda: self.dir),
+                (crow_platform, "pid_alive", lambda pid: pid in self.alive),
+                (crow_platform, "find_servers",
+                 lambda query=None: [(str(p), l) for p, l in self.listed.items()]),
+                (crow_platform, "kill_pid", kill),
+                (crow_platform, "terminate_tree", terminate),
+                (crow_platform, "server_scope_prefix", lambda: []),
+                (crow_core.subprocess, "Popen", popen),
+                (crow_core, "VIDEO_POLL_S", 0.005),
+                (crow_core, "_VIDEO_PROC", None),
+                (crow_core, "_IMAGE_PROC", None),
+                (crow_core, "ACTIVE_POINTS",
+                 crow_core.ACTIVE_POINTS + (crow_core.ACTIVE_POINT_MEDIA,))):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        crow_core.write_active_point("media-stack", "http://127.0.0.1:%d/v1" % self.engine.port,
+                                     {"serve": 5001, "image": None, "video": None},
+                                     servers=self.servers, mode="image")
+
+    def test_video_stops_sd_server_and_the_engine_before_comfyui_starts(self):
+        self.assertIsNone(crow_core.use_mode("video"))
+        kinds = [e[0] for e in self.events]
+        self.assertEqual(sorted(e[1] for e in self.events if e[0] == "kill"), [5001, 5002])
+        self.assertEqual(kinds.index("popen"), len(kinds) - 1, self.events)
+        self.assertEqual(self.events[-1], ("popen", "python.exe", self.dir))
+        doc = crow_core.read_active_point()
+        self.assertEqual(doc["mode"], "video")
+        self.assertEqual(doc["pids"], {"serve": None, "image": None, "video": 6001})
+        self.assertEqual(doc["servers"], self.servers, "the plan survives the switch")
+        self.assertIsNone(crow_core.use_mode("video"), "already there")
+        self.assertEqual(len(self.procs), 1)
+
+    def test_image_frees_and_ends_comfyui_and_starts_the_engine_again(self):
+        crow_core.use_mode("video")
+        self.events.clear()
+        with mock.patch.dict(os.environ, {"CROW_HOTSETS": "left-over"}):
+            self.assertIsNone(crow_core.use_mode("image"))
+        self.assertIn("/free", self.comfy.paths("POST"))
+        self.assertEqual(self.events[0], ("terminate", 6001))
+        self.assertEqual(self.events[1], ("popen", "llama-server.exe", self.dir))
+        self.assertEqual(self.popen_kw["env"]["CROW_X"], "1")
+        self.assertNotIn("CROW_HOTSETS", self.popen_kw["env"])
+        self.assertIn("/health", self.engine.paths("GET"))
+        doc = crow_core.read_active_point()
+        self.assertEqual(doc["mode"], "image")
+        self.assertEqual(doc["pids"], {"serve": 6002, "image": None, "video": None})
+
+    def test_a_comfyui_another_window_started_is_ended_by_its_listed_pid(self):
+        self.alive.add(7001)
+        self.listed[7001] = COMFY_LINE
+        del self.listed[5001]
+        crow_core.write_active_point("media-stack", "u",
+                                     {"serve": None, "image": None, "video": 7001},
+                                     servers=self.servers, mode="video")
+        self.assertIsNone(crow_core.use_mode("image"))
+        self.assertIn(("kill", 7001), self.events)
+        self.assertEqual(crow_core.read_active_point()["pids"]["serve"], 6001)
+
+    def test_image_mode_with_the_engine_up_does_nothing(self):
+        self.assertIsNone(crow_core.use_mode("image"))
+        self.assertEqual(self.events, [])
+
+    def test_a_point_without_a_video_server_is_refused(self):
+        crow_core.write_active_point("27b", "u", {"serve": 5001, "image": None})
+        why = crow_core.use_mode("video")
+        self.assertIn("video server", why or "")
+        self.assertIn("27b", why)
+        self.assertEqual(self.events, [])
+        self.assertIn("unknown mode", crow_core.use_mode("audio"))
+
+    def test_a_comfyui_that_dies_brings_the_engine_back(self):
+        self.exit_code = 1
+        why = crow_core.use_mode("video")
+        self.assertIn("exited with 1", why or "")
+        self.assertEqual([e[1] for e in self.events if e[0] == "popen"],
+                         ["python.exe", "llama-server.exe"])
+        doc = crow_core.read_active_point()
+        self.assertEqual((doc["mode"], doc["pids"]["serve"]), ("image", 6002))
+
+    def test_an_engine_the_scan_does_not_list_is_not_killed(self):
+        del self.listed[5001]
+        why = crow_core.use_mode("video")
+        self.assertIn("5001", why or "")
+        self.assertNotIn(("kill", 5001), self.events)
+        self.assertFalse([e for e in self.events if e[0] == "popen"])
+
+
+MP4_BYTES = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 64
+
+
+class _AnimateCase(unittest.TestCase):
+    """A working area with a still, a fake ComfyUI and use_mode recorded."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-340-animate-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.work = os.path.join(self.dir, "work")
+        os.makedirs(self.work)
+        with open(os.path.join(self.work, "still.png"), "wb") as fh:
+            fh.write(_gray_png(1376, 768))
+        self.polls = 0
+        self.history_done_after = 3
+        self.history_error = None
+        self.on_poll = None
+        self.prompts: list[dict] = []
+
+        def upload(_h, body):
+            name = re.search(rb'filename="([^"]+)"', body).group(1).decode()
+            return 200, json.dumps({"name": name, "subfolder": "", "type": "input"}).encode(), \
+                "application/json"
+
+        self.prompt_answer = b'{"prompt_id": "p-1", "number": 0, "node_errors": {}}'
+
+        def prompt(_h, body):
+            self.prompts.append(json.loads(body))
+            return 200, self.prompt_answer, "application/json"
+
+        def history(_h, _b):
+            self.polls += 1
+            if self.on_poll:
+                self.on_poll(self.polls)
+            if self.polls < self.history_done_after:
+                return 200, b"{}", "application/json"
+            if self.history_error:
+                entry = {"status": {"completed": False, "status_str": "error", "messages": [
+                    ["execution_start", {}],
+                    ["execution_error", {"exception_message": self.history_error}]]},
+                    "outputs": {}}
+            else:
+                entry = {"status": {"completed": True, "status_str": "success", "messages": []},
+                         "outputs": {"75": {"images": [{"filename": "clip_00001_.mp4",
+                                                        "subfolder": "crow", "type": "output"}],
+                                            "animated": [True]}}}
+            return 200, json.dumps({"p-1": entry}).encode(), "application/json"
+
+        self.comfy = _FakeHttp({
+            ("POST", "/upload/image"): upload,
+            ("POST", "/prompt"): prompt,
+            ("GET", "/history/*"): history,
+            ("POST", "/interrupt"): lambda _h, _b: (200, b"", "text/plain"),
+            ("GET", "/view"): lambda _h, _b: (200, MP4_BYTES, "video/mp4")})
+        self.addCleanup(self.comfy.close)
+        self.modes: list[str] = []
+        self.mode_answer = {"video": None, "image": None}
+        self.stills: list[str] = []
+        root_before = crow_core.get_root()
+        self.addCleanup(crow_core.set_root, root_before)
+        crow_core.set_root(self.work)
+        for target, attr, value in (
+                (crow_core, "use_mode",
+                 lambda mode: self.modes.append(mode) or self.mode_answer[mode]),
+                (crow_core, "video_server_url", lambda: self.comfy.url),
+                (crow_core, "_video_stills", lambda path: list(self.stills)),
+                (crow_core, "VIDEO_POLL_S", 0.005)):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        crow_core.INTERRUPT.clear()
+        self.addCleanup(crow_core.INTERRUPT.clear)
+        crow_core.take_image_ride()
+        self.addCleanup(crow_core.take_image_ride)
+        self.states: list[dict] = []
+        crow_core._TURN_LOCAL.progress = self.states.append
+        self.addCleanup(setattr, crow_core._TURN_LOCAL, "progress", None)
+
+    def phases(self):
+        out = []
+        for state in self.states:
+            if not out or out[-1] != state["phase"]:
+                out.append(state["phase"])
+        return out
+
+
+class AnimateImageTests(_AnimateCase):
+    """#340 step 5: one call, one clip, the language model back afterwards."""
+
+    def test_a_clip_is_rendered_saved_and_the_engine_comes_back(self):
+        said = crow_core.tool_animate_image("still.png", "the crow tilts its head",
+                                            seconds=5, seed=42)
+        self.assertTrue(said.startswith("saved videos/"), said)
+        self.assertEqual(self.modes, ["video", "image"])
+        folder = os.path.join(self.work, "videos")
+        files = os.listdir(folder)
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0].endswith("-the-crow-tilts-its-head.mp4"), files)
+        with open(os.path.join(folder, files[0]), "rb") as fh:
+            self.assertEqual(fh.read(), MP4_BYTES)
+        wf = self.prompts[0]["prompt"]
+        self.assertEqual(wf["395"]["inputs"]["image"], "still.png")
+        self.assertEqual(wf["398:376"]["inputs"]["value"], "the crow tilts its head")
+        self.assertEqual(wf["398:362"]["inputs"]["value"], 5)
+        self.assertEqual(wf["398:339"]["inputs"]["noise_seed"], 42)
+        self.assertTrue(wf["403"]["inputs"]["aspect_ratio"].startswith("16:9"))
+        upload = next(b for m, p, b in self.comfy.requests if p == "/upload/image")
+        self.assertIn(_gray_png(1376, 768), upload)
+        self.assertIn("/view?filename=clip_00001_.mp4&subfolder=crow&type=output",
+                      self.comfy.paths("GET"))
+        self.assertIn("1920x1088", said)
+        self.assertIn("121 frames", said)
+        self.assertIn("seed 42", said)
+        self.assertEqual(self.phases()[0], "loading")
+        self.assertEqual(self.phases()[-1], "saved")
+        self.assertIn("rendering", self.phases())
+        self.assertEqual(self.states[0]["kind"], "animate")
+        self.assertEqual((self.states[0]["width"], self.states[0]["height"]), (1920, 1088))
+
+    def test_a_tall_still_renders_portrait_and_1440p_is_its_rung(self):
+        with open(os.path.join(self.work, "tall.png"), "wb") as fh:
+            fh.write(_gray_png(768, 1376))
+        said = crow_core.tool_animate_image("tall.png", "she waves", resolution="1440p")
+        self.assertIn("1408x2560", said)
+        self.assertTrue(self.prompts[0]["prompt"]["403"]["inputs"]["aspect_ratio"].startswith("9:16"))
+
+    def test_bad_arguments_never_touch_the_card(self):
+        for args, part in ((("nope.png", "m"), "no such image"),
+                           (("still.png", "  "), "motion is empty"),
+                           (("still.png", "m", 25), "seconds must be 1 to 20"),
+                           (("still.png", "m", 5, "4k"), "resolution must be one of"),
+                           (("still.png", "m", 5, None, -1), "seed must be 0 or more")):
+            said = crow_core.tool_animate_image(*args)
+            self.assertTrue(said.startswith("error: "), said)
+            self.assertIn(part, said)
+        self.assertEqual(self.modes, [])
+        self.assertEqual(self.comfy.requests, [])
+
+    def test_a_mode_switch_that_fails_is_the_answer_and_the_engine_is_asked_back(self):
+        self.mode_answer["video"] = "the video server exited with 1 before it answered"
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertTrue(said.startswith("error: the video server exited with 1"), said)
+        self.assertEqual(self.modes, ["video", "image"])
+        self.assertEqual(self.comfy.requests, [])
+        self.assertEqual(self.phases()[-1], "error")
+
+    def test_an_out_of_memory_clip_says_so(self):
+        self.history_error = "Allocation on device 0 would exceed allowed memory. (out of memory)"
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertTrue(said.startswith("error: the clip ran out of GPU memory"), said)
+        self.assertIn("Allocation on device", said)
+        self.assertEqual(self.modes, ["video", "image"])
+        self.assertFalse(os.path.isdir(os.path.join(self.work, "videos")))
+
+    def test_stop_interrupts_comfyui_and_brings_the_engine_back(self):
+        self.history_done_after = 10 ** 6
+        self.on_poll = lambda n: n == 2 and crow_core.INTERRUPT.set()
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertTrue(said.startswith(crow_core.STOPPED), said)
+        self.assertIn("/interrupt", self.comfy.paths("POST"))
+        self.assertEqual(self.modes, ["video", "image"])
+
+    def test_a_clip_that_never_ends_is_interrupted_at_the_timeout(self):
+        self.history_done_after = 10 ** 6
+        with mock.patch.object(crow_core, "VIDEO_JOB_TIMEOUT", 0.05):
+            said = crow_core.tool_animate_image("still.png", "m")
+        self.assertIn("did not finish within", said)
+        self.assertIn("/interrupt", self.comfy.paths("POST"))
+        self.assertEqual(self.modes, ["video", "image"])
+
+    def test_an_answer_without_a_prompt_id_ends_at_once(self):
+        self.prompt_answer = b'{"number": 0, "node_errors": {}}'
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertTrue(said.startswith("error: ComfyUI took the clip without a prompt id"), said)
+        self.assertEqual(self.polls, 0)
+        self.assertEqual(self.modes, ["video", "image"])
+
+    def test_an_engine_that_does_not_come_back_is_named_in_the_result(self):
+        self.mode_answer["image"] = "the language model did not answer within 300 s"
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertTrue(said.startswith("saved videos/"), said)
+        self.assertIn("the language model did not answer within 300 s", said)
+
+    def test_the_stills_ride_to_the_model(self):
+        for k in range(3):
+            path = os.path.join(self.dir, "s%d.png" % k)
+            with open(path, "wb") as fh:
+                fh.write(_gray_png(64, 36))
+            self.stills.append(path)
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertIn(crow_core.VIDEO_HANDED, said)
+        ride = crow_core.take_image_ride()
+        self.assertEqual(len(ride), 3)
+        self.stills.clear()
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertNotIn(crow_core.VIDEO_HANDED, said)
+        self.assertIsNone(crow_core.take_image_ride())
+
+
+class TheVideoStillsTests(unittest.TestCase):
+    """Three frames out of the clip, by ffmpeg when there is one."""
+
+    def test_no_ffmpeg_is_no_stills(self):
+        with mock.patch.object(crow_core.shutil, "which", return_value=None):
+            self.assertEqual(crow_core._video_stills("x.mp4"), [])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_start_middle_and_end_come_out_as_pngs(self):
+        folder = tempfile.mkdtemp(prefix="crow-340-stills-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        clip = os.path.join(folder, "c.mp4")
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc=duration=2:size=320x180:rate=24", "-pix_fmt", "yuv420p", clip],
+                       check=True, stdin=subprocess.DEVNULL)
+        stills = crow_core._video_stills(clip)
+        self.assertEqual(len(stills), 3)
+        for path in stills:
+            self.assertEqual(crow_core.image_dimensions(path), (320, 180))
+
+
+class TheVideoToolIsDeclaredTests(unittest.TestCase):
+    def test_declared_built_in_classed_and_never_cached(self):
+        self.assertIn("animate_image", [t["function"]["name"] for t in crow_core.BUILTIN_TOOLS])
+        self.assertIs(crow_core.TOOL_IMPL["animate_image"], crow_core.tool_animate_image)
+        self.assertEqual(crow_core.TOOL_CLASS["animate_image"], "executing")
+        self.assertIn("animate_image", crow_core.NEVER_CACHED)
+        self.assertIn("animate_image", crow_core.IMAGE_TOOL_NAMES)
+
+    def test_the_description_carries_the_phase_0_prompt_rules(self):
+        text = next(t["function"]["description"] for t in crow_core.TOOLS
+                    if t["function"]["name"] == "animate_image")
+        for part in ("<working root>/videos/", "one continuous motion", "not in the still",
+                     "sound"):
+            self.assertIn(part, text)

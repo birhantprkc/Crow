@@ -276,20 +276,34 @@ def binary_is_for_this_os(path: str) -> bool:
 # does not print one. Moved here from crow_core.py with its behaviour intact.
 # #196 C3: it also asks for crow-nest's `serve.exe` and the image server
 # `sd-server.exe`, which hold the card just as firmly as a llama-server does.
+# #340: ComfyUI is a python.exe, so it is asked for by the main.py on its line.
 _PROCESS_QUERY = ("Get-CimInstance Win32_Process -Filter \"Name like 'llama-server%'"
-                  " or Name = 'serve.exe' or Name like 'sd-server%'\""
+                  " or Name = 'serve.exe' or Name like 'sd-server%'"
+                  " or (Name like 'python%' and CommandLine like '%ComfyUI%main.py%')\""
                   " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
 
 # #196 C3: the three kinds of server the scan reports, named by executable.
 KIND_LLAMA = "llama-server"
 KIND_CROW_NEST = "crow-nest"     # serve.exe, both crow-nest operating points
 KIND_IMAGE = "image"             # sd-server.exe
+KIND_VIDEO = "video"             # #340: ComfyUI, a python running ComfyUI/main.py
 # The port each listens on when its command line names none: serve.rs
-# DEFAULT_PORT 8099; sd.cpp examples/server/runtime.h listen_port 1234.
+# DEFAULT_PORT 8099; sd.cpp examples/server/runtime.h listen_port 1234;
+# ComfyUI comfy/cli_args.py --port 8188.
 # llama-server's own default is not assumed -- discovery has always read --port.
-_DEFAULT_PORTS = {KIND_CROW_NEST: 8099, KIND_IMAGE: 1234}
+_DEFAULT_PORTS = {KIND_CROW_NEST: 8099, KIND_IMAGE: 1234, KIND_VIDEO: 8188}
 _PORT_FLAGS = {KIND_LLAMA: "--port", KIND_CROW_NEST: "--port",
-               KIND_IMAGE: "--listen-port"}
+               KIND_IMAGE: "--listen-port", KIND_VIDEO: "--port"}
+# ComfyUI's entry point as a whole word of the line: `ComfyUI\main.py` from the
+# portable folder, `/opt/.../ComfyUI/main.py` on Linux. A python running some
+# other main.py is not a server.
+_COMFYUI_MAIN = re.compile(r'(?:^|[\s"\\/])ComfyUI[\\/]main\.py(?:["\s]|$)')
+
+
+def _is_comfyui(command_line: str) -> bool:
+    """#340: a python interpreter whose line runs ComfyUI's main.py."""
+    return (_executable_name(command_line).lower().startswith("python")
+            and _COMFYUI_MAIN.search(command_line or "") is not None)
 
 
 def _kind_of_name(name: str) -> "str | None":
@@ -347,6 +361,8 @@ def server_kind(command_line: str) -> "str | None":
     kind = _kind_of_name(_executable_name(command_line))
     if kind is None and "llama-server" in (command_line or ""):
         return KIND_LLAMA
+    if kind is None and _is_comfyui(command_line):
+        return KIND_VIDEO
     return kind
 
 
@@ -408,9 +424,10 @@ def _proc_servers(proc_root: str = "/proc") -> "list[tuple[str, str]] | None":
         # same narrowing the Windows query gets from `Name like 'llama-server%'`:
         # a text editor with llama-server.log open is not a server, and a
         # measurement script that mentions one is not one either.
-        if _kind_of_name(os.path.basename(args[0])) is None:
+        line = " ".join(_quote(a) for a in args)
+        if _kind_of_name(os.path.basename(args[0])) is None and not _is_comfyui(line):
             continue
-        out.append((pid, " ".join(_quote(a) for a in args)))
+        out.append((pid, line))
     return out
 
 

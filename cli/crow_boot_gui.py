@@ -261,6 +261,10 @@ class Controller:
             return {"title": "Image server (sd-server)",
                     "detail": "Running without its language model, pid %s." % pids.get("image"),
                     "stop": stop}
+        if kind == crow_platform.KIND_VIDEO:
+            return {"title": "Video server (ComfyUI)",
+                    "detail": "Running without its language model, pid %s." % pids.get("video"),
+                    "stop": stop}
         m = re.search(r":(\d+)(?:/|$)", running.get("base_url") or "")
         port = int(m.group(1)) if m else (running.get("port") or crow_core.CROW_NEST_PORT)
         if kind == crow_platform.KIND_LLAMA:

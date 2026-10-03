@@ -393,5 +393,19 @@ class TheWindowStartsNoConsoleTests(unittest.TestCase):
         self.assertEqual(bare, [], "subprocess.run without **no_console_kwargs() at these lines")
 
 
+
+class AComfyUIAloneHasItsCardTests(GuiCase):
+    """#340: a ComfyUI left without its language model is shown and stoppable."""
+
+    def test_the_card_names_the_video_server(self):
+        line = (r'"C:\x\comfyui\python_embeded\python.exe" -s C:\x\comfyui\ComfyUI\main.py'
+                r' --port 8188')
+        ctl = self.controller(scan=lambda: [("9191", line)])
+        ctl.refresh()
+        running = ctl.view()["running"]
+        self.assertEqual(running["title"], "Video server (ComfyUI)")
+        self.assertIn("pid 9191", running["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

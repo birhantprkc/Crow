@@ -67,6 +67,13 @@ THE DECISIONS, and why each is this way:
   `crow_core._image_server_env()`. On failure, timeout or Ctrl+C, what this run
   started is ended by its handle (`crow_platform.terminate_tree`), the last 10
   log lines are shown, and no contract file is written.
+* A POINT WITH A VIDEO SERVER (#340) starts only its engine here. Its
+  contract file also carries `servers` -- the engine's argv, env, the keys to
+  drop, lib_path, cwd, port and probe, and ComfyUI's argv, cwd (the runtime
+  folder), port and probe -- plus `mode: "image"` and `pids.video`, so the
+  window starts ComfyUI and restarts the engine exactly as planned here
+  (`crow_core.use_mode`). The scan sees ComfyUI (`crow_platform.KIND_VIDEO`):
+  it blocks a start like sd-server does, and Stop ends it.
 * ONE POINT AT A TIME, checked before anything starts: the contract file
   (`crow_core.read_active_point`), then the process scan
   (`crow_core.running_servers(include_image=True)`; a serve is named by
@@ -757,7 +764,8 @@ class Boot:
             pids = doc.get("pids") or {}
             return {"kind": crow_platform.KIND_CROW_NEST, "point": doc.get("point"),
                     "source": "active-point",
-                    "pids": {"serve": pids.get("serve"), "image": pids.get("image")},
+                    "pids": {"serve": pids.get("serve"), "image": pids.get("image"),
+                             "video": pids.get("video")},
                     "base_url": doc.get("base_url") or base_url_for(crow_core.CROW_NEST_PORT),
                     "since": doc.get("started_at")}
         found = self.scan() or []
@@ -785,6 +793,11 @@ class Boot:
         if images:
             return {"kind": crow_platform.KIND_IMAGE, "point": None, "source": "scan",
                     "pids": {"serve": None, "image": image_pid}}
+        videos = by_kind.get(crow_platform.KIND_VIDEO, [])
+        if videos:
+            # #340: ComfyUI holds the card as firmly as any of them.
+            return {"kind": crow_platform.KIND_VIDEO, "point": None, "source": "scan",
+                    "pids": {"serve": None, "image": None, "video": videos[0][0]}}
         url = base_url_for(crow_core.CROW_NEST_PORT)
         point = self.point_for(url)
         if point:
@@ -803,11 +816,15 @@ class Boot:
             return "a llama.cpp server%s%s, pid %s" % (model, where, pids.get("serve"))
         if kind == crow_platform.KIND_IMAGE:
             return "an image server (sd-server) without its language model, pid %s" % pids.get("image")
+        if kind == crow_platform.KIND_VIDEO:
+            return "a video server (ComfyUI) without its language model, pid %s" % pids.get("video")
         bits = []
         if pids.get("serve"):
             bits.append("serve pid %s" % pids["serve"])
         if pids.get("image"):
             bits.append("sd-server pid %s" % pids["image"])
+        if pids.get("video"):
+            bits.append("ComfyUI pid %s" % pids["video"])
         return "%s%s" % (self.label(running.get("point")),
                          ", " + ", ".join(bits) if bits else "")
 
@@ -819,7 +836,8 @@ class Boot:
                  "   Only one operating point can run at a time."]
         lines.append('   To stop it: choose "Stop the running point" in this menu, or run')
         lines.append("     python %s --stop" % os.path.join("cli", "crow_boot.py"))
-        hand = [kill_hint(p) for p in (pids.get("serve"), pids.get("image")) if p]
+        hand = [kill_hint(p) for p in (pids.get("serve"), pids.get("image"), pids.get("video"))
+                if p]
         if hand:
             lines.append("   or by hand: %s" % " and ".join(hand))
         return "\n".join(lines)
@@ -976,8 +994,22 @@ class Boot:
 
         seconds = self.clock() - began
         pids = {"serve": serve.pid, "image": image.pid if image is not None else None}
+        extra = {}
+        if plan["video"]:
+            # #340: the window starts ComfyUI and restarts this engine itself
+            # (crow_core.use_mode), from exactly what this plan resolved.
+            pids["video"] = None
+            extra = {"mode": "image", "servers": {
+                "serve": {"argv": plan["serve"]["argv"], "env": plan["serve"]["env"],
+                          "drop": sorted(engine_env_keys(self.stack)),
+                          "lib_path": plan["lib_path"], "cwd": plan["serve"]["cwd"],
+                          "port": plan["serve"]["port"],
+                          "readiness": plan["serve"]["readiness"]},
+                "video": {"argv": plan["video"]["argv"], "cwd": plan["video"]["runtime"],
+                          "port": plan["video"]["port"],
+                          "readiness": plan["video"]["readiness"]}}}
         try:
-            where = self.write_active(plan["id"], plan["base_url"], pids)
+            where = self.write_active(plan["id"], plan["base_url"], pids, **extra)
         except (OSError, ValueError) as exc:
             where = None
             self.say("%s the contract file could not be written: %s" % (self.style.icon("warn"), exc))
@@ -1079,7 +1111,8 @@ class Boot:
                 targets.append(("llama", str(pid)))
                 llama_names.append(os.path.basename(crow_core.served_model(line)) or "llama.cpp")
                 continue
-            role = "image" if kind == crow_platform.KIND_IMAGE else "serve"
+            role = {crow_platform.KIND_IMAGE: "image",
+                    crow_platform.KIND_VIDEO: "video"}.get(kind, "serve")
             targets.append((role, str(pid)))
             if role == "serve" and not point:
                 port = crow_platform.server_port(line) or crow_core.CROW_NEST_PORT
@@ -1118,7 +1151,8 @@ class Boot:
                 self.sleep(0.25)
         took = self.clock() - began
         self._remove(path)
-        names = {"serve": "serve", "image": "sd-server", "llama": "llama-server"}
+        names = {"serve": "serve", "image": "sd-server", "llama": "llama-server",
+                 "video": "ComfyUI"}
         done = ", ".join("%s pid %s" % (names[r], p) for r, p in targets)
         if left:
             self.say("%s Asked %s to stop (%s), but pid %s is still there. End it by hand: %s"

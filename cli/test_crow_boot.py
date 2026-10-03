@@ -1061,5 +1061,87 @@ class TheShortcutOpensTheWindowTests(BootCase):
         self.assertIn("--terminal goes with --create-shortcut", err.getvalue())
 
 
+
+COMFY_LINE = (r'"C:\x\comfyui\python_embeded\python.exe" -s C:\x\comfyui\ComfyUI\main.py'
+              r' --listen 127.0.0.1 --port 8188')
+
+
+class TheContractCarriesThePlanTests(BootCase):
+    """#340: a point with a video server writes the engine's and ComfyUI's plan
+    into active-point.json, the window starts both from there (use_mode)."""
+
+    def test_the_plan_of_both_servers_is_in_the_contract(self):
+        stack = media_stack()
+        plan = crow_boot.plan_point(stack, "27b", self.install, self.models)
+        for path in crow_boot.missing_files(plan, self.install, self.models):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").close()
+        probes = iter([NOTHING, OK_HEALTH])
+        popen = FakePopen()
+        boot = crow_boot.Boot(stack, self.install, self.models, out=self.out, style=crow_boot.Style(),
+                              popen=popen, get=lambda url, timeout: next(probes), sleep=self.clock.sleep,
+                              clock=self.clock, read=lambda prompt="": "0", scan=lambda: [],
+                              llama=FakeLlama(), point_for=lambda url, timeout=3.0: None,
+                              model_path=lambda url, timeout=3.0: "x/model-Q8_0.gguf",
+                              terminate=self.terminated.append, log_dir=self.logs)
+        self.assertEqual(boot.start("27b"), crow_boot.EXIT_OK, self.out.getvalue())
+        doc = self.contract()
+        self.assertEqual(doc["mode"], "image")
+        self.assertEqual(doc["pids"], {"serve": popen.procs[0].pid, "image": None, "video": None})
+        serve, video = doc["servers"]["serve"], doc["servers"]["video"]
+        self.assertEqual(serve["argv"], plan["serve"]["argv"])
+        self.assertEqual((serve["env"], serve["cwd"], serve["port"], serve["readiness"]),
+                         (plan["serve"]["env"], plan["serve"]["cwd"], 8099, plan["serve"]["readiness"]))
+        self.assertEqual(serve["drop"], sorted(crow_boot.engine_env_keys(stack)))
+        self.assertEqual(serve["lib_path"], plan["lib_path"])
+        self.assertEqual(video, {"argv": plan["video"]["argv"], "cwd": plan["video"]["runtime"],
+                                 "port": 8188, "readiness": plan["video"]["readiness"]})
+
+    def test_a_point_without_one_writes_the_old_shape(self):
+        self.layout("27b")
+        probes = iter([NOTHING, OK_HEALTH])
+        self.assertEqual(self.boot(get=lambda url, timeout: next(probes)).start("27b"),
+                         crow_boot.EXIT_OK)
+        doc = self.contract()
+        self.assertNotIn("servers", doc)
+        self.assertNotIn("mode", doc)
+
+
+class AComfyUIIsAServerTooTests(BootCase):
+    """#340: ComfyUI holds the card like sd-server does, so it blocks a start,
+    is named, and --stop ends it."""
+
+    def test_a_comfyui_alone_blocks_a_start_and_is_named(self):
+        popen = FakePopen()
+        code = self.boot(popen=popen, scan=lambda: [("9191", COMFY_LINE)]).start("27b")
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_REFUSED)
+        self.assertIn("a video server (ComfyUI) without its language model, pid 9191", text)
+        self.assertIn(crow_boot.kill_hint("9191"), text)
+        self.assertEqual(popen.calls, [])
+
+    def test_the_contract_in_video_mode_names_comfyui(self):
+        crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",
+                                     {"serve": None, "image": None, "video": 9191}, mode="video")
+        code = self.boot().start("27b")
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_REFUSED)
+        self.assertIn("ComfyUI pid 9191", text)
+        self.assertIn(crow_boot.kill_hint(9191), text)
+
+    def test_stop_ends_comfyui(self):
+        crow_core.write_active_point("27b", "http://127.0.0.1:8099/v1",
+                                     {"serve": None, "image": None, "video": 9191}, mode="video")
+        killed = []
+        listed = [("9191", COMFY_LINE)]
+        code = self.boot(scan=lambda: [r for r in listed if r[0] not in killed],
+                         kill=killed.append, alive=lambda pid: str(pid) not in killed).stop()
+        text = self.out.getvalue()
+        self.assertEqual(code, crow_boot.EXIT_OK, text)
+        self.assertEqual(killed, ["9191"])
+        self.assertIn("ComfyUI pid 9191", text)
+        self.assertIsNone(self.contract())
+
+
 if __name__ == "__main__":
     unittest.main()

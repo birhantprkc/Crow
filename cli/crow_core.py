@@ -1316,6 +1316,33 @@ TOOLS = [
                                                 "last image's shape, snapped "
                                                 "to that list.")},
         ["images", "instruction", "description"]),
+    # #340. THE STILL MOVES. Its rules for `motion` are what Phase 0's clips
+    # and the owner's test clip showed: one motion that carries through, nothing
+    # the still does not hold, sound as words.
+    _fn("animate_image",
+        "Turn a still picture into a short video clip with the local video "
+        "model (LTX-2.5). Write `motion` as one continuous motion plus the "
+        "camera, e.g. 'the crow tilts its head twice and flaps one wing; the "
+        "camera holds still with a slow push in'. Only what is in the still "
+        "moves: no props that are not in the still, no zoom into detail the "
+        "still does not have; describe any sound in words. While the clip "
+        "renders the language model steps aside and comes back afterwards. "
+        "About 1 minute for 5 s at 1080p, 2.5 minutes for 10 s, 6 minutes "
+        "for 20 s. The MP4 is saved in <working root>/videos/; stills of it "
+        "are handed back to you.",
+        {"image": dict(_STR, description="The still, a path in the working "
+                                         "area. A taller-than-wide still "
+                                         "renders upright (9:16)."),
+         "motion": dict(_STR, description="One continuous motion and the "
+                                          "camera, in one or two sentences."),
+         "seconds": {"type": "integer",
+                     "description": "Length, 1 to 20. Default 5."},
+         "resolution": dict(_STR, description="1080p (1920x1088, default) or "
+                                              "1440p (2560x1408)."),
+         "seed": {"type": "integer",
+                  "description": "Fixed seed to repeat a result. Default: "
+                                 "random, named in the result."}},
+        ["image", "motion"]),
 ]
 
 # THE BUILT-INS AS SHIPPED -- twelve until #143 added the delegation three --
@@ -1825,8 +1852,10 @@ def running_servers(query: Callable[[], str] | None = None,
     found = crow_platform.find_servers(query)
     if include_image:
         return found
+    # #340: ComfyUI is a companion the same way -- the Media Stack's video side.
+    companions = (crow_platform.KIND_IMAGE, crow_platform.KIND_VIDEO)
     return [(pid, line) for pid, line in found
-            if crow_platform.server_kind(line) != crow_platform.KIND_IMAGE]
+            if crow_platform.server_kind(line) not in companions]
 
 
 _DASH_M = re.compile(r'-m\s+("([^"]+)"|(\S+))')
@@ -1908,6 +1937,10 @@ def crow_nest_ready(base_url: str, timeout: float = 2.0) -> bool:
 
 ACTIVE_POINTS = ("flash-next", "27b", "image-stack")
 ACTIVE_POINT_IMAGE = "image-stack"
+# #340: images and videos, one at a time on the card (use_mode). It joins
+# ACTIVE_POINTS with the stack.json entry (plan step 3): the point-lists check
+# (tools/check_stack.py) holds every list to the stack's points.
+ACTIVE_POINT_MEDIA = "media-stack"
 
 
 def active_point_path() -> str:
@@ -1926,6 +1959,15 @@ def read_active_point() -> "dict | None":
          "started_at": "2026-10-01T10:00:00+02:00",      # ISO-8601
          "pids":       {"serve": 5151, "image": 6161 | null}}
 
+    #340, ONLY FOR A POINT WITH A VIDEO SERVER, three more: `pids.video`,
+    `mode` ("image" | "video", which side holds the card, use_mode) and
+    `servers` -- the plan crow_boot made, so the window starts ComfyUI and
+    restarts the engine exactly as the boot would::
+
+         "servers": {"serve": {"argv", "env", "drop", "lib_path", "cwd",
+                               "port", "readiness"},
+                     "video": {"argv", "cwd", "port", "readiness"}}
+
     TOLERANT ON PURPOSE: a missing, unreadable or corrupt file, or one whose
     `point` is not one of the three, is None -- "no boot script ran", which
     keeps today's behaviour for a llama.cpp user.
@@ -1935,6 +1977,9 @@ def read_active_point() -> "dict | None":
     script or of a point stopped by other means, and is None too -- otherwise
     a later llama.cpp session would have its images gated off forever. The
     other fields are handed back as found and not checked here.
+
+    #340: while a clip renders the engine is down by design and ComfyUI holds
+    the card, so a live `pids.video` keeps the file just as a live serve does.
     """
     try:
         with open(active_point_path(), encoding="utf-8") as fh:
@@ -1944,7 +1989,11 @@ def read_active_point() -> "dict | None":
     if not isinstance(doc, dict) or doc.get("point") not in ACTIVE_POINTS:
         return None
     pids = doc.get("pids")
-    if not isinstance(pids, dict) or not crow_platform.pid_alive(pids.get("serve")):
+    if not isinstance(pids, dict):
+        return None
+    video = pids.get("video")
+    if not crow_platform.pid_alive(pids.get("serve")) and not (
+            video and crow_platform.pid_alive(video)):
         return None
     return doc
 
@@ -1986,7 +2035,9 @@ def running_server_label(pid, line: str) -> str:
 
 
 def write_active_point(point: str, base_url: str, pids: dict,
-                       started_at: "str | None" = None) -> str:
+                       started_at: "str | None" = None,
+                       servers: "dict | None" = None,
+                       mode: "str | None" = None) -> str:
     """Write the contract file `read_active_point` reads (schema there).
     Returns its path. Raises ValueError for an unknown point, OSError when the
     file cannot be written.
@@ -2003,6 +2054,14 @@ def write_active_point(point: str, base_url: str, pids: dict,
            "started_at": started_at or datetime.datetime.now().astimezone()
            .isoformat(timespec="seconds"),
            "pids": {"serve": pids.get("serve"), "image": pids.get("image")}}
+    # #340: the three keys only a point with a video server carries; every
+    # other point's file stays the shape it always had.
+    if "video" in pids:
+        doc["pids"]["video"] = pids.get("video")
+    if servers is not None:
+        doc["servers"] = servers
+    if mode is not None:
+        doc["mode"] = mode
     path = active_point_path()
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
@@ -12154,7 +12213,7 @@ def tool_read_image(path: str, **_) -> str:
 IMAGE_SERVER_URL = "http://127.0.0.1:8097"
 IMAGE_MODEL_NAME = "qwen-image-2.1"
 IMAGE_MODEL_DIR_ENV = "CROW_IMAGE_MODEL_DIR"
-IMAGE_TOOL_NAMES = ("generate_image", "edit_image")
+IMAGE_TOOL_NAMES = ("generate_image", "edit_image", "animate_image")
 IMAGE_HANDED = " It is handed to you as an image below."
 
 # ONE JOB MAY TAKE 20 MINUTES, AND NOT ONE SECOND MORE. The slowest measured
@@ -12306,9 +12365,14 @@ def image_tools_unavailable() -> "str | None":
     the port before it asks this.
     """
     point = read_active_point()
-    if point is not None and point["point"] != ACTIVE_POINT_IMAGE:
+    if point is not None and point["point"] not in (ACTIVE_POINT_IMAGE,
+                                                    ACTIVE_POINT_MEDIA):
         return ("image generation needs the Image Stack operating point; the "
                 "running point is %s (%s)" % (point["point"], active_point_path()))
+    if point is not None and point.get("mode") == "video":
+        # #340: ComfyUI holds the card; an sd-server beside it would overbook it.
+        return ("the card is in video mode: a clip is rendering on the video "
+                "server. Ask again when it is done.")
     if image_server_binary() is None:
         return ("the image server is not installed: no sd-server in %s"
                 % " or ".join(crow_platform.server_search_dirs()))
@@ -13181,6 +13245,557 @@ def video_workflow(template: dict, image_name: str, motion: str, seconds: int,
         "megapixels": megapixels, "multiple": multiple})
     wf[_VN_SAVE]["inputs"]["filename_prefix"] = "crow/clip"
     return wf
+
+
+def _video_size(resolution: str, portrait: bool) -> "tuple[int, int]":
+    """The size ComfyUI's ResolutionSelector picks (comfy_extras/
+    nodes_resolution.py @ v0.38.0): 1080p is 1920x1088, 1440p 2560x1408."""
+    import math
+    megapixels, multiple = VIDEO_RESOLUTIONS[resolution]
+    w_r, h_r = (9, 16) if portrait else (16, 9)
+    scale = math.sqrt(megapixels * 1024 * 1024 / (w_r * h_r))
+    return (round(w_r * scale / multiple) * multiple,
+            round(h_r * scale / multiple) * multiple)
+
+
+# ------------------------------------------------- the card's two modes (#340)
+# The Media Stack holds the 9B language model plus ONE of the two media
+# servers. Phase 0: VRAM peaked at ~32.0 of 32.6 GB in every clip, and a 20 s
+# clip used 50.9 GB of 63.4 GiB host RAM -- ComfyUI cannot share the card with
+# the engine or with sd-server. use_mode() is the one place that moves it.
+VIDEO_POLL_S = 1.0
+# The Phase 0 runner's limit. The slowest measured clip (20 s at 1080p) took
+# 361 s; a job past 30 minutes is stuck, and the call ends it.
+VIDEO_JOB_TIMEOUT = 30 * 60
+# NOT MEASURED: the Phase 0 server log has no timestamps. sd-server's boot
+# allowance (crow_boot IMAGE_TIMEOUT_S), since ComfyUI loads its models per
+# job, not at start.
+VIDEO_BOOT_WAIT = 300.0
+# crow_boot's timeout for the 27B and the Image Stack's serve.
+ENGINE_BOOT_WAIT = 300.0
+# crow_boot STOP_WAIT_S: a process asked to end is gone before the next one
+# takes the card.
+MODE_STOP_WAIT = 30.0
+VIDEO_HANDED = (" Three stills of it (first, middle and last frame) are "
+                "handed to you below.")
+_MODE_LOCK = threading.RLock()
+# The ComfyUI THIS process started: (Popen, log path), like _IMAGE_PROC.
+_VIDEO_PROC: "tuple | None" = None
+
+
+def _media_servers() -> "tuple[dict | None, dict | None]":
+    """(the contract, its `servers`), servers None for a point without a
+    video server or without the engine's plan to restart it."""
+    doc = read_active_point()
+    servers = (doc or {}).get("servers")
+    if (not isinstance(servers, dict) or not isinstance(servers.get("video"), dict)
+            or not isinstance(servers.get("serve"), dict)):
+        return doc, None
+    return doc, servers
+
+
+def video_server_url() -> str:
+    """ComfyUI's address from the boot's plan, else VIDEO_SERVER_URL."""
+    _doc, servers = _media_servers()
+    port = servers["video"].get("port") if servers else None
+    return "http://127.0.0.1:%d" % int(port) if port else VIDEO_SERVER_URL
+
+
+def _answers(url: str, status: int, timeout: float = 2.0) -> bool:
+    """The readiness probe the stack names: this status on this URL."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status == status
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return exc.code == status
+    except Exception:                      # noqa: BLE001 - not answering is the answer
+        return False
+
+
+def _ready_url(spec: dict) -> "tuple[str, int]":
+    ready = spec.get("readiness") or {}
+    return ("http://127.0.0.1:%d%s" % (int(spec["port"]), ready.get("path") or "/"),
+            int(ready.get("status") or 200))
+
+
+def _spawn_server(argv: list, cwd, env: dict, log: str):
+    """Start one detached server with its output in `log` (the previous run
+    kept, #166). The Popen, or the OSError's text."""
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    _keep_previous_log(log)
+    try:
+        with open(log, "wb") as sink:
+            return subprocess.Popen(
+                crow_platform.server_scope_prefix() + list(argv),
+                cwd=cwd or None, stdout=sink, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, env=env,
+                **crow_platform.spawn_kwargs(detached=True))
+    except OSError as exc:
+        return str(exc)
+
+
+def _wait_ready(proc, spec: dict, wait: float, name: str, log: str,
+                stoppable: bool) -> "str | None":
+    """Poll the stack's probe until it answers. None, or why not.
+
+    THE WAY BACK IS NOT STOPPABLE: the engine's restart after a clip runs
+    with INTERRUPT still set from the stop that ended the clip, and a model
+    left down is worse than a wait.
+    """
+    url, status = _ready_url(spec)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        code = proc.poll()
+        if code is not None:
+            return ("%s exited with %s before it answered. Its last lines:\n%s"
+                    % (name, code, _image_log_tail(log)))
+        if _answers(url, status):
+            return None
+        if stoppable and INTERRUPT.is_set():
+            return STOPPED + " while %s was starting" % name
+        time.sleep(VIDEO_POLL_S)
+    return ("%s did not answer within %.0f s. Its last lines:\n%s"
+            % (name, wait, _image_log_tail(log)))
+
+
+def _wait_gone(pids, wait: float = MODE_STOP_WAIT) -> list:
+    """The pids still alive after `wait`; [] once all are gone."""
+    deadline = time.monotonic() + wait
+    left = [p for p in pids if crow_platform.pid_alive(p)]
+    while left and time.monotonic() < deadline:
+        time.sleep(VIDEO_POLL_S)
+        left = [p for p in left if crow_platform.pid_alive(p)]
+    return left
+
+
+def video_server_start(spec: dict) -> "str | None":
+    """Start ComfyUI from the boot's plan and wait for /system_stats.
+
+    ITS OWN FOLDER AS cwd, the runtime the installer unpacked: the portable
+    build resolves `ComfyUI/main.py` and its `user/` against it.
+    """
+    global _VIDEO_PROC
+    log = os.path.join(crow_platform.log_dir(), "comfyui-%d.log" % int(spec["port"]))
+    proc = _spawn_server(spec["argv"], spec.get("cwd"), dict(os.environ), log)
+    if isinstance(proc, str):
+        return "the video server could not be started: %s" % proc
+    _VIDEO_PROC = (proc, log)
+    why = _wait_ready(proc, spec, VIDEO_BOOT_WAIT, "the video server", log, True)
+    if why is not None:
+        _VIDEO_PROC = None
+        crow_platform.terminate_tree(proc)
+        return why
+    log_note("video server started (pid %d, log %s)" % (proc.pid, log), "video")
+    return None
+
+
+def video_server_stop(spec: "dict | None" = None) -> None:
+    """Ask ComfyUI to drop its models, then end the one THIS process started.
+
+    `POST /free` first, the plan's order: it only sets flags for the next
+    queue turn (server.py @ v0.38.0), so the process end is what frees the
+    card; the ask costs nothing when the process is already gone.
+    """
+    global _VIDEO_PROC
+    if spec is not None:
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/free" % int(spec["port"]),
+                data=json.dumps({"unload_models": True, "free_memory": True}).encode(),
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=5).close()
+        except Exception:                  # noqa: BLE001 - best effort
+            pass
+    held, _VIDEO_PROC = _VIDEO_PROC, None
+    if held is not None:
+        crow_platform.terminate_tree(held[0])
+
+
+def _video_server_end() -> None:
+    """At exit: the handle only, never a name (image_server_stop's rule)."""
+    video_server_stop(None)
+
+
+atexit.register(_video_server_end)
+
+
+def _engine_start(spec: dict) -> "tuple[int | None, str | None]":
+    """Start the language model from the boot's plan: (pid, None) or (None, why).
+
+    crow_boot's environment rule: every key any point's engine declares is
+    dropped (`drop`), the point's own are set, `lib_path` goes in front of
+    LD_LIBRARY_PATH (#341).
+    """
+    env = {k: v for k, v in os.environ.items() if k not in (spec.get("drop") or ())}
+    env.update({str(k): str(v) for k, v in (spec.get("env") or {}).items()})
+    lib = [d for d in spec.get("lib_path") or [] if d]
+    if lib:
+        have = [d for d in env.get("LD_LIBRARY_PATH", "").split(os.pathsep) if d]
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(lib + [d for d in have if d not in lib])
+    log = os.path.join(crow_platform.log_dir(), "serve-%d.log" % int(spec["port"]))
+    proc = _spawn_server(spec["argv"], spec.get("cwd"), env, log)
+    if isinstance(proc, str):
+        return None, "the language model could not be started: %s" % proc
+    why = _wait_ready(proc, spec, ENGINE_BOOT_WAIT, "the language model", log, False)
+    if why is not None:
+        crow_platform.terminate_tree(proc)
+        return None, why
+    log_note("language model started again (pid %d, log %s)" % (proc.pid, log), "video")
+    return proc.pid, None
+
+
+def _engine_back(doc: dict, servers: dict) -> "str | None":
+    """The engine up again and the contract saying so; None, or why not."""
+    pid, why = _engine_start(servers["serve"])
+    if why is not None:
+        return why
+    write_active_point(doc["point"], doc["base_url"],
+                       {"serve": pid, "image": None, "video": None},
+                       started_at=doc.get("started_at"), servers=servers, mode="image")
+    return None
+
+
+def use_mode(mode: str) -> "str | None":
+    """#340 step 4. Give the card to the image side or the video side.
+
+    "video": sd-server and the language model end, then ComfyUI starts.
+    "image": ComfyUI ends and the language model starts again; sd-server
+    comes up on the next image call, as on the Image Stack.
+    None when the card is there, else the sentence why not.
+
+    KILLED BY PID ONLY WHEN THE SCAN LISTS IT (crow_boot.stop's rule): the
+    contract's engine pid is ended only while the process scan shows a model
+    server with that pid -- a pid outlives its process. Between the engine's
+    end and ComfyUI's start the file names a dead serve; the lock keeps this
+    process's own callers out of that gap.
+    """
+    if mode not in ("image", "video"):
+        return "error: unknown mode %r (image or video)" % (mode,)
+    with _MODE_LOCK:
+        doc, servers = _media_servers()
+        if servers is None:
+            if mode == "image":
+                return None
+            return ("video generation needs an operating point with a video "
+                    "server (the Media Stack); the running point is %s"
+                    % (doc["point"] if doc else
+                       "unknown -- no %s from the boot menu" % active_point_path()))
+        pids = doc.get("pids") or {}
+        if mode == "image":
+            if doc.get("mode") != "video":
+                return None
+            video_server_stop(servers["video"])
+            # A ComfyUI this process holds no handle to (another window, a
+            # crashed one) ends by its pid -- only while the scan lists it.
+            theirs = pids.get("video")
+            if theirs and crow_platform.pid_alive(theirs) and any(
+                    p == str(theirs) and crow_platform.server_kind(line)
+                    == crow_platform.KIND_VIDEO
+                    for p, line in running_servers(include_image=True)):
+                crow_platform.kill_pid(theirs)
+            left = _wait_gone([p for p in [theirs] if p])
+            if left:
+                return ("the video server (pid %s) did not end within %.0f s; "
+                        "the language model was not started beside it"
+                        % (left[0], MODE_STOP_WAIT))
+            return _engine_back(doc, servers)
+        if doc.get("mode") == "video" and _answers(*_ready_url(servers["video"])):
+            return None
+        listed = running_servers(include_image=True)
+        listed_pids = {str(p) for p, _line in listed}
+        victims = [p for p, line in listed
+                   if crow_platform.server_kind(line) == crow_platform.KIND_IMAGE]
+        engine = pids.get("serve")
+        if engine and str(engine) in listed_pids:
+            victims.append(str(engine))
+        elif engine and crow_platform.pid_alive(engine):
+            return ("the language model's pid %s from %s is not a model server "
+                    "the process scan lists; it is left alone and no clip is "
+                    "started" % (engine, active_point_path()))
+        image_server_stop()
+        for pid in victims:
+            crow_platform.kill_pid(pid)
+        left = _wait_gone(victims)
+        if left:
+            return ("pid %s did not end within %.0f s; the video server was "
+                    "not started beside it" % (", ".join(left), MODE_STOP_WAIT))
+        why = video_server_start(servers["video"])
+        if why is not None:
+            back = _engine_back(doc, servers)
+            return why + ("" if back is None else
+                          "\nThe language model could not be started again: " + back)
+        write_active_point(doc["point"], doc["base_url"],
+                           {"serve": None, "image": None,
+                            "video": _VIDEO_PROC[0].pid},
+                           started_at=doc.get("started_at"), servers=servers,
+                           mode="video")
+        return None
+
+
+# ------------------------------------------------- animate_image (#340 step 5)
+def _video_request(path: str, body: "dict | None" = None, timeout: float = 30.0,
+                   data: "bytes | None" = None, headers: "dict | None" = None
+                   ) -> bytes:
+    """One request to ComfyUI; the raw answer. Raises on transport/HTTP errors."""
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+    req = urllib.request.Request(video_server_url() + path, data=data,
+                                 headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _video_upload(path: str) -> str:
+    """The still into ComfyUI's input folder; the name LoadImage takes.
+
+    `overwrite`: two stills named alike from two folders are two jobs, and the
+    current one must be the one on disk (server.py image_upload @ v0.38.0
+    otherwise renames or, by hash, keeps the old file).
+    """
+    import uuid
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(path)) or "still.png"
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    boundary = "crow-" + uuid.uuid4().hex
+    body = (("--%s\r\nContent-Disposition: form-data; name=\"image\"; "
+             "filename=\"%s\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+             % (boundary, name)).encode() + raw
+            + ("\r\n--%s\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\n"
+               "true\r\n--%s--\r\n" % (boundary, boundary)).encode())
+    answer = json.loads(_video_request(
+        "/upload/image", data=body, timeout=60,
+        headers={"Content-Type": "multipart/form-data; boundary=" + boundary}))
+    sub = answer.get("subfolder") or ""
+    return (sub + "/" if sub else "") + answer["name"]
+
+
+def _video_stills(path: str) -> "list[str]":
+    """First, middle and last frame of the clip as PNGs, or [] without ffmpeg.
+
+    ffmpeg is the machine's, not Crow's: none ships with the install, and the
+    clip is complete without the stills -- they only let the model look.
+    Written over the same three files each time (state dir), so nothing piles up.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return []
+    kw = dict(capture_output=True, stdin=subprocess.DEVNULL, timeout=120,
+              **crow_platform.no_console_kwargs())
+    seeks = [["-ss", "0"]]
+    ffprobe = shutil.which("ffprobe")
+    try:
+        if ffprobe:
+            out = subprocess.run([ffprobe, "-v", "error", "-show_entries",
+                                  "format=duration", "-of", "csv=p=0", path], **kw)
+            seconds = float(out.stdout.decode().strip() or 0)
+            if seconds > 0:
+                seeks.append(["-ss", "%.3f" % (seconds / 2)])
+        seeks.append(["-sseof", "-0.1"])
+        folder = os.path.join(crow_platform.state_dir(), "video-stills")
+        os.makedirs(folder, exist_ok=True)
+        stills = []
+        for k, seek in enumerate(seeks, 1):
+            still = os.path.join(folder, "still-%d.png" % k)
+            done = subprocess.run([ffmpeg, "-v", "error", "-y"] + seek
+                                  + ["-i", path, "-frames:v", "1", still], **kw)
+            if done.returncode != 0 or not os.path.isfile(still):
+                return []
+            stills.append(still)
+        return stills
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+def _save_video(data: bytes, about: str, ext: str) -> str:
+    """<root>/videos/<YYYYmmdd-HHMMSS>-<slug><ext>, never overwriting (_save_image)."""
+    folder = os.path.join(get_root() or os.getcwd(), "videos")
+    os.makedirs(folder, exist_ok=True)
+    stem = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), _image_slug(about))
+    for n in range(1, 1000):
+        path = os.path.join(folder, stem + (ext if n == 1 else "-%d%s" % (n, ext)))
+        try:
+            with open(path, "xb") as fh:
+                fh.write(data)
+            return path
+        except FileExistsError:
+            continue
+    raise OSError("no free file name for %s in %s" % (stem, folder))
+
+
+_VIDEO_OOM_MARKS = ("OutOfMemory", "Allocation on device", "out of memory")
+
+
+def _run_video_job(wf: dict, base: dict) -> "tuple[bytes | None, str, float, str | None]":
+    """Queue the clip and wait for it: (bytes, file name, seconds, None) or
+    (None, "", seconds, the error or STOPPED line). The Phase 0 runner's loop:
+    `POST /prompt`, then `/history/{id}` until it holds the job."""
+    import uuid
+    began = time.monotonic()
+
+    def emit(phase, line):
+        report_progress(**dict(base, phase=phase, i=None, n=None, eta_s=None,
+                               line=line[:200]))
+
+    def took():
+        return time.monotonic() - began
+
+    try:
+        queued = json.loads(_video_request(
+            "/prompt", {"prompt": wf, "client_id": uuid.uuid4().hex}, timeout=60))
+    except urllib.error.HTTPError as exc:
+        said = exc.read().decode("utf-8", "replace")[:500]
+        exc.close()
+        emit("error", "ComfyUI refused the workflow")
+        return None, "", took(), "error: ComfyUI refused the workflow: %s" % said
+    except Exception as exc:               # noqa: BLE001
+        emit("error", str(exc))
+        return None, "", took(), "error: the video server did not take the clip: %s" % exc
+    job = queued.get("prompt_id")
+    if not job:
+        emit("error", "no prompt id in ComfyUI's answer")
+        return None, "", took(), ("error: ComfyUI took the clip without a prompt id: %s"
+                                  % json.dumps(queued)[:300])
+    shown = -1
+    while True:
+        if INTERRUPT.is_set():
+            _video_interrupt(job)
+            emit("stopped", "the clip was interrupted")
+            return None, "", took(), STOPPED + " -- the clip was interrupted in ComfyUI"
+        if took() > VIDEO_JOB_TIMEOUT:
+            _video_interrupt(job)
+            emit("error", "no end after %.0f s" % VIDEO_JOB_TIMEOUT)
+            return None, "", took(), (
+                "error: the clip did not finish within %.0f s; ComfyUI was "
+                "interrupted" % VIDEO_JOB_TIMEOUT)
+        try:
+            history = json.loads(_video_request("/history/%s" % job) or b"{}")
+        except Exception as exc:           # noqa: BLE001 - the server went away
+            emit("error", "the video server stopped answering")
+            log = _VIDEO_PROC[1] if _VIDEO_PROC else None
+            return None, "", took(), (
+                "error: the video server stopped answering during the clip (%s)%s"
+                % (exc, (". Its last lines:\n" + _image_log_tail(log)) if log else ""))
+        entry = (history or {}).get(job)
+        if entry is not None:
+            status = entry.get("status") or {}
+            if status.get("completed"):
+                out = (entry.get("outputs") or {}).get(_VN_SAVE) or {}
+                files = out.get("images") or out.get("videos") or out.get("gifs") or []
+                if not files:
+                    emit("error", "no output file")
+                    return None, "", took(), ("error: the clip finished without an "
+                                              "output file: %s" % json.dumps(out)[:300])
+                f = files[0]
+                query = urllib.parse.urlencode({"filename": f["filename"],
+                                                "subfolder": f.get("subfolder", ""),
+                                                "type": f.get("type", "output")})
+                try:
+                    data = _video_request("/view?" + query, timeout=120)
+                except Exception as exc:   # noqa: BLE001
+                    emit("error", str(exc))
+                    return None, "", took(), "error: the clip could not be fetched: %s" % exc
+                return data, f["filename"], took(), None
+            said = next((m[1].get("exception_message", "") for m in status.get("messages") or []
+                         if m and m[0] == "execution_error" and isinstance(m[1], dict)),
+                        "") or json.dumps(status)[:500]
+            said = said.strip()[:1000]
+            emit("error", said)
+            if any(mark in said for mark in _VIDEO_OOM_MARKS):
+                return None, "", took(), "error: the clip ran out of GPU memory: %s" % said
+            return None, "", took(), "error: the clip failed in ComfyUI: %s" % said
+        seconds = int(took())
+        if seconds != shown:
+            shown = seconds
+            emit("rendering", "rendering the clip, %d s" % seconds)
+        time.sleep(VIDEO_POLL_S)
+
+
+def _video_interrupt(job) -> None:
+    try:
+        _video_request("/interrupt", {"prompt_id": job} if job else {}, timeout=10)
+    except Exception:                      # noqa: BLE001 - best effort
+        pass
+
+
+def tool_animate_image(image: str = "", motion: str = "", seconds=None,
+                       resolution=None, seed=None, **_) -> str:
+    """#340 step 5. A still becomes a clip: LTX-2.5 on ComfyUI, one call.
+
+    THE LANGUAGE MODEL STEPS ASIDE AND COMES BACK in this one call
+    (use_mode): the clip needs the whole card, and the turn that called the
+    tool needs the model to read the answer. The way back runs whatever
+    happened -- an error, a stop, a timeout.
+    """
+    path, bad = _image_input(image)
+    if bad:
+        return bad
+    if not str(motion or "").strip():
+        return ("error: motion is empty -- describe one continuous motion and "
+                "the camera")
+    args, bad = _video_args(seconds, resolution)
+    if bad:
+        return bad
+    secs, res = args
+    value, bad = _image_seed(seed)
+    if bad:
+        return bad
+    dims = image_dimensions(path)
+    if not dims or not all(dims):
+        return "error: cannot read the size of %s" % path
+    portrait = dims[1] > dims[0]
+    width, height = _video_size(res, portrait)
+    import uuid
+    base = {"job": "vid-" + uuid.uuid4().hex[:12], "kind": "animate", "stage": "",
+            "width": width, "height": height}
+    report_progress(**dict(base, phase="loading", i=None, n=None, eta_s=None,
+                           line="switching the card to video (the language "
+                                "model steps aside)"))
+    data, name, took, err = None, "", 0.0, use_mode("video")
+    if err is None:
+        try:
+            report_progress(**dict(base, phase="queued", i=None, n=None, eta_s=None,
+                                   line="sending the still"))
+            with open(VIDEO_WORKFLOW, encoding="utf-8") as fh:
+                template = json.load(fh)
+            wf = video_workflow(template, _video_upload(path), str(motion), secs,
+                                res, value, portrait)
+            data, name, took, err = _run_video_job(wf, base)
+        except Exception as exc:           # noqa: BLE001 - the way back must run
+            err = "error: the clip could not be sent: %s" % exc
+    else:
+        if not err.startswith(STOPPED) and not err.startswith("error: "):
+            err = "error: " + err
+        report_progress(**dict(base, phase="error", i=None, n=None, eta_s=None,
+                               line=err.splitlines()[0][:200]))
+    back = use_mode("image")
+    after = "" if back is None else (
+        " The language model could not be started again: %s" % back)
+    if err is not None:
+        return err + after
+    try:
+        saved = _save_video(data, str(motion), os.path.splitext(name)[1] or ".mp4")
+    except OSError as exc:
+        return "error: the clip could not be saved: %s%s" % (exc, after)
+    report_progress(**dict(base, phase="saved", i=None, n=None, eta_s=0.0, line=saved))
+    shown = saved
+    root = get_root()
+    if root and _inside(root, saved):
+        shown = os.path.relpath(saved, root).replace(os.sep, "/")
+    said = ("saved %s (%s) -- %dx%d, %d frames (%d s at %d fps), %s bytes, "
+            "%.1f s, seed %d." % (shown, saved, width, height, video_frames(secs),
+                                  secs, VIDEO_FPS, "{:,}".format(len(data)), took, value))
+    stills = _video_stills(saved)
+    if stills:
+        try:
+            parts = [image_part(p) for p in stills]
+            _IMAGE_RIDE.clear()
+            _IMAGE_RIDE.append(parts)
+            said += VIDEO_HANDED
+        except CrowError:
+            pass
+    return said + after
 
 
 def _image_sample_params() -> dict:
@@ -16969,6 +17584,7 @@ TOOL_IMPL = {
     "session_search": tool_session_search,
     "generate_image": tool_generate_image,
     "edit_image": tool_edit_image,
+    "animate_image": tool_animate_image,
 }
 
 
@@ -16995,6 +17611,8 @@ TOOL_CLASS = {
     # process (the image server), hold the GPU for minutes and write a file.
     "generate_image": "executing",
     "edit_image": "executing",
+    # #340: the same, and it stops and restarts the language model too.
+    "animate_image": "executing",
     "list_dir": "reading",
     "find_files": "reading",
     "search_text": "reading",
@@ -24116,7 +24734,7 @@ NEVER_CACHED = frozenset({"run_command", "memory", "skill",
                           "build_bundle", "render_page",
                           # #300 phase 3: two calls with one prompt are two
                           # pictures (a random seed each), never a replay.
-                          "generate_image", "edit_image"})
+                          "generate_image", "edit_image", "animate_image"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 
@@ -25637,6 +26255,7 @@ def run_turn(
                     # look at it. An "error: " here would tell it the
                     # generation failed and send it generating again.
                     result = (result.replace(IMAGE_HANDED, "")
+                              .replace(VIDEO_HANDED, "")
                               + " It is not shown to you: " + blind)
                     conversation.append("tool", result, tool_call_id=call["id"])
                     continue
