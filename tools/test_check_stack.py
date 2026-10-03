@@ -57,7 +57,7 @@ class Schema(Base):
         self.red("schema", "status 'local'")
 
     def test_mirror_pending_with_a_revision(self):
-        file_(self.doc, "27b-mmproj")["revision"] = "0" * 40
+        file_(self.doc, "fn-hotsets-crow0924")["revision"] = "0" * 40
         self.red("schema", "revision must be null")
 
     def test_published_without_a_revision(self):
@@ -65,7 +65,7 @@ class Schema(Base):
         self.red("schema", "40-hex commit revision")
 
     def test_source_disagreeing_with_the_file(self):
-        file_(self.doc, "fn-tokenizer")["source"]["sha256"] = "a" * 64
+        file_(self.doc, "fn-hotsets-crow0924")["source"]["sha256"] = "a" * 64
         self.red("schema", "differ from its source")
 
     def test_non_commercial_licence_hidden(self):
