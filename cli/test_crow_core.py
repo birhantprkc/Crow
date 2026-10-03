@@ -28980,3 +28980,72 @@ class TheActivePointGatesTheImageServerTests(unittest.TestCase):
             self.assertIsNone(crow_core.read_active_point(), pids)
         self.assertFalse(crow_platform.pid_alive(dead))
         self.assertTrue(crow_platform.pid_alive(os.getpid()))
+
+
+class TheVideoCoreTests(unittest.TestCase):
+    """#340: frames, arguments and the workflow animate_image sends to ComfyUI."""
+
+    def setUp(self):
+        with open(crow_core.VIDEO_WORKFLOW, encoding="utf-8") as fh:
+            self.template = json.load(fh)
+
+    @staticmethod
+    def selected(node):
+        """ComfyUI's ResolutionSelector (comfy_extras/nodes_resolution.py @ v0.38.0)."""
+        import math
+        w_r, h_r = (9, 16) if node["aspect_ratio"].startswith("9:16") else (16, 9)
+        scale = math.sqrt(node["megapixels"] * 1024 * 1024 / (w_r * h_r))
+        m = node["multiple"]
+        return round(w_r * scale / m) * m, round(h_r * scale / m) * m
+
+    def test_frames_are_24_per_second_plus_one(self):
+        for secs, frames in ((5, 121), (10, 241), (20, 481), (1, 25)):
+            self.assertEqual(crow_core.video_frames(secs), frames)
+            self.assertEqual(frames % 8, 1)
+
+    def test_arguments_default_and_normalise(self):
+        self.assertEqual(crow_core._video_args(None, None), ((5, "1080p"), None))
+        self.assertEqual(crow_core._video_args("10", " 1440P "), ((10, "1440p"), None))
+        self.assertEqual(crow_core._video_args(20.0, "1080p"), ((20, "1080p"), None))
+
+    def test_arguments_out_of_range_name_the_rule(self):
+        for secs in (0, 21, -3):
+            args, err = crow_core._video_args(secs, None)
+            self.assertIsNone(args)
+            self.assertIn("seconds must be 1 to 20", err)
+        for secs in ("five", 5.5):
+            self.assertIn("seconds must be a whole number", crow_core._video_args(secs, None)[1])
+        self.assertIn("resolution must be one of 1080p, 1440p, got '4k'",
+                      crow_core._video_args(5, "4k")[1])
+
+    def test_the_workflow_carries_this_call_and_leaves_the_template(self):
+        before = copy.deepcopy(self.template)
+        wf = crow_core.video_workflow(self.template, "crow-in-1.png", "she turns her head", 10,
+                                      "1080p", 1234, portrait=False)
+        self.assertEqual(self.template, before)
+        self.assertEqual(wf["395"]["inputs"]["image"], "crow-in-1.png")
+        self.assertEqual(wf["398:376"]["inputs"]["value"], "she turns her head")
+        self.assertEqual(wf["398:362"]["inputs"]["value"], 10)
+        self.assertEqual(wf["398:339"]["inputs"]["noise_seed"], 1234)
+        self.assertEqual(self.selected(wf["403"]["inputs"]), (1920, 1088))
+
+    def test_the_rungs_and_the_portrait_shape(self):
+        sizes = {(res, portrait): self.selected(crow_core.video_workflow(
+                    self.template, "x.png", "m", 5, res, 1, portrait)["403"]["inputs"])
+                 for res in crow_core.VIDEO_RESOLUTIONS for portrait in (False, True)}
+        self.assertEqual(sizes[("1080p", False)], (1920, 1088))
+        self.assertEqual(sizes[("1440p", False)], (2560, 1408))
+        self.assertEqual(sizes[("1080p", True)], (1088, 1920))
+
+    def test_the_shipped_template_is_the_phase_0_graph(self):
+        wf = self.template
+        # the prompt string, not the e2b CLIPLoader, behind the bypassed enhancer
+        self.assertEqual(wf["398:382"]["inputs"]["on_true"], ["398:376", 0])
+        self.assertNotIn("398:393", wf)
+        self.assertFalse(any(v == ["398:393", 0] for n in wf.values() for v in n["inputs"].values()))
+        self.assertIs(wf["398:383"]["inputs"]["value"], False, "prompt enhance stays off")
+        self.assertEqual(wf["398:384"]["inputs"]["unet_name"],
+                         "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors")
+        self.assertEqual(wf["398:374"]["inputs"]["tile_size"], 512)
+        for node in ("395", "398:376", "398:362", "398:339", "403", "75"):
+            self.assertIn(node, wf)

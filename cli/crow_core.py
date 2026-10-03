@@ -13115,6 +13115,74 @@ def _image_aspect(aspect_ratio) -> "tuple[str | None, str | None]":
                   % (", ".join(IMAGE_SIZES), aspect_ratio))
 
 
+# ---------------------------------------------------------------- video (#340)
+# animate_image: LTX-2.5 distilled int8 on ComfyUI headless, the official
+# template video_ltx2_5_i2v.json exported to API format by ComfyUI's own
+# frontend (cli/workflows/ltx25_i2v_api.json, with the two Phase 0 fixes).
+# MEASURED 2026-10-02 on the RTX 5090 (#340 Phase 0, n=5 per length, models
+# loaded per clip): 1920x1088 5 s median 65.6 s, 10 s 146.2 s, 20 s 349-361 s
+# (n=3); 2560x1408 5 s 121-153 s (n=2). 3840x2176 is left out: one of two
+# clips ran out of memory and took the server down.
+VIDEO_SERVER_URL = "http://127.0.0.1:8188"
+VIDEO_WORKFLOW = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "workflows", "ltx25_i2v_api.json")
+VIDEO_FPS = 24
+VIDEO_MAX_SECONDS = 20
+VIDEO_DEFAULT_SECONDS = 5
+# resolution -> the template's ResolutionSelector (megapixels, multiple): 2.0/32
+# is 1920x1088 at 16:9, 3.515625/64 is 2560x1408 (PREREG addendum 1).
+VIDEO_RESOLUTIONS = {"1080p": (2.0, 32), "1440p": (3.515625, 64)}
+VIDEO_DEFAULT_RESOLUTION = "1080p"
+# The template's node ids (API format; "398:" is the subgraph).
+_VN_IMAGE, _VN_PROMPT, _VN_SECONDS, _VN_SEED = "395", "398:376", "398:362", "398:339"
+_VN_SIZE, _VN_SAVE = "403", "75"
+
+
+def video_frames(seconds: int) -> int:
+    """Frames LTX-2.5 renders for `seconds` at 24 fps: 24*s + 1 (F % 8 == 1)."""
+    return VIDEO_FPS * int(seconds) + 1
+
+
+def _video_args(seconds, resolution) -> "tuple[tuple[int, str] | None, str | None]":
+    """(seconds, resolution) checked, or the error the model reads."""
+    if seconds is None or seconds == "":
+        seconds = VIDEO_DEFAULT_SECONDS
+    try:
+        secs = int(seconds)
+    except (TypeError, ValueError):
+        return None, "error: seconds must be a whole number, got %r" % (seconds,)
+    if isinstance(seconds, float) and seconds != secs:
+        return None, "error: seconds must be a whole number, got %r" % (seconds,)
+    if not 1 <= secs <= VIDEO_MAX_SECONDS:
+        return None, "error: seconds must be 1 to %d, got %d" % (VIDEO_MAX_SECONDS, secs)
+    res = str(resolution or VIDEO_DEFAULT_RESOLUTION).strip().lower()
+    if res not in VIDEO_RESOLUTIONS:
+        return None, ("error: resolution must be one of %s, got %r"
+                      % (", ".join(VIDEO_RESOLUTIONS), resolution))
+    return (secs, res), None
+
+
+def video_workflow(template: dict, image_name: str, motion: str, seconds: int,
+                   resolution: str, seed: int, portrait: bool) -> dict:
+    """The API prompt for one clip: the template with this call's fields set.
+
+    Only the fields Phase 0 varied, plus the shape: a still taller than wide
+    renders 9:16 (the selector's portrait ratio), otherwise 16:9.
+    """
+    import copy
+    wf = copy.deepcopy(template)
+    megapixels, multiple = VIDEO_RESOLUTIONS[resolution]
+    wf[_VN_IMAGE]["inputs"]["image"] = image_name
+    wf[_VN_PROMPT]["inputs"]["value"] = motion
+    wf[_VN_SECONDS]["inputs"]["value"] = int(seconds)
+    wf[_VN_SEED]["inputs"]["noise_seed"] = int(seed)
+    wf[_VN_SIZE]["inputs"].update({
+        "aspect_ratio": "9:16 (Portrait Widescreen)" if portrait else "16:9 (Widescreen)",
+        "megapixels": megapixels, "multiple": multiple})
+    wf[_VN_SAVE]["inputs"]["filename_prefix"] = "crow/clip"
+    return wf
+
+
 def _image_sample_params() -> dict:
     """The measured sampler: 40 Euler steps, txt_cfg 1.0 (the pipeline's
     `true_cfg_scale` default -- "meant to be sampled without guidance")."""
