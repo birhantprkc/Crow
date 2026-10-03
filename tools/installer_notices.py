@@ -16,7 +16,10 @@ The file is generated, never written by hand:
   2. every licence file the crate source carries (LICENSE*, COPYING*, NOTICE*,
      UNLICENSE*, the manifest's license-file), plus the texts named in EXTRA_FILES
      and installer/licenses/sources.json for what the crate sources lack;
-  3. identical texts are printed once and listed with every crate that uses them.
+  3. identical texts (whitespace aside) are printed once and listed with every
+     crate that uses them; an Apache-2.0 file is split into the licence terms,
+     printed once per wording, and what the crate adds -- its filled-in copyright
+     line, or text before or after the terms (split_apache, apache_own).
 
 Checked here: the file is what the current Cargo.lock produces, every crate has
 at least one text and its SPDX expression is covered by them ("A AND B" needs
@@ -171,6 +174,43 @@ def covered(expr, kinds):
     return disj()
 
 
+def norm(text):
+    return " ".join(text.split())
+
+
+APACHE_END = "END OF TERMS AND CONDITIONS"
+
+
+def split_apache(text):
+    """(before, terms, appendix) of an Apache-2.0 licence file, or None.
+
+    Apache-2.0 asks for one copy of the licence with the work (4a) and the
+    work's NOTICE file (4d). Crates ship the same terms over and over, so the
+    notices print each wording of the terms once; what a crate adds before or
+    after them stays with that crate (apache_own)."""
+    i = text.find("Apache License")
+    j = text.find(APACHE_END)
+    if i < 0 or j < i or "TERMS AND CONDITIONS FOR USE" not in text[i:j]:
+        return None
+    j += len(APACHE_END)
+    return text[:i].strip("\n"), text[i:j], text[j:].strip("\n")
+
+
+def apache_own(appendix):
+    """What of an Apache APPENDIX is the crate's own. The appendix is the
+    licence's template for applying it ("Copyright [yyyy] [name of copyright
+    owner]"); when it is only that, the crate's own part is the copyright line
+    it filled in, if any. An appendix that carries more (ring appends further
+    licences) is kept whole."""
+    n = norm(appendix)
+    if n.startswith("APPENDIX: How to apply the Apache License") and \
+            n.endswith("limitations under the License."):
+        return "\n".join(line.strip() for line in appendix.splitlines()
+                         if re.match(r"\s*Copyright\b", line)
+                         and not re.search(r"[\[{]yyyy[\]}]", line))
+    return appendix
+
+
 def build(repo):
     """(file text, [(check, ok, detail)])."""
     installer = os.path.join(repo, "installer")
@@ -196,17 +236,29 @@ def build(repo):
     checksums = lock_checksums(installer)
     mpl = []                                 # [(name, version, repository, sha256)]
 
-    texts = {}                               # text -> index
-    order = []                               # [(title, text)]
+    texts = {}                               # whitespace-normalised text -> index
+    order = []                               # [(title, text, users)]
     rows = []
     missing = []
     uncovered = []
 
     def add(title, text):
-        if text not in texts:
-            texts[text] = len(order) + 1
+        key = norm(text)                     # texts that differ only in spacing are one
+        if key not in texts:
+            texts[key] = len(order) + 1
             order.append((title, text, []))
-        return texts[text]
+        return texts[key]
+
+    def add_licence(title, text):
+        parts = split_apache(text)
+        if parts is None:
+            return [add(title, text)]
+        before, terms, appendix = parts
+        refs = [add("Apache License 2.0, terms (as in %s)" % title, terms)]
+        own = "\n\n".join(x for x in (before, apache_own(appendix)) if x.strip())
+        if own:
+            refs.append(add("%s -- besides the Apache-2.0 terms" % title, own))
+        return refs
 
     for (name, version) in sorted(crates, key=lambda k: (k[0].lower(), k[1])):
         p = packages.get((name, version))
@@ -221,17 +273,17 @@ def build(repo):
         if p.get("license_file") and p["license_file"] not in files:
             files.append(p["license_file"])
         files += [f for f in EXTRA_FILES.get(name, []) if os.path.isfile(os.path.join(root, f))]
-        refs = []
-        for f in files:
-            refs.append(add("%s %s: %s" % (name, version, f.replace("\\", "/")),
-                            read_text(os.path.join(root, f))))
-        if not refs:
-            for f in vendored.get(name, []):
-                refs.append(add("%s (installer/licenses/%s)" % (name, f),
-                                read_text(os.path.join(licdir, f))))
-        if not refs:
+        found = [("%s %s: %s" % (name, version, f.replace("\\", "/")), read_text(os.path.join(root, f)))
+                 for f in files]
+        if not found:
+            found = [("%s (installer/licenses/%s)" % (name, f), read_text(os.path.join(licdir, f)))
+                     for f in vendored.get(name, [])]
+        if not found:
             missing.append("%s %s (%s)" % (name, version, p.get("license")))
-        kinds = set().union(*(kinds_of(order[r - 1][1]) for r in refs))
+        refs = []
+        for title, text in found:
+            refs += [r for r in add_licence(title, text) if r not in refs]
+        kinds = set().union(*(kinds_of(text) for _, text in found))
         try:
             if not covered(p.get("license") or "", kinds):
                 uncovered.append("%s %s: %s, texts show %s"
