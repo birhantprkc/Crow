@@ -69,12 +69,17 @@ The CUDA backend is built against NVIDIA's CUDA Toolkit -- version 13.3 on the
 development machine -- and is subject to the NVIDIA Software License Agreement
 and the CUDA Supplement to it.
 
-A release ships two NVIDIA libraries alongside the binaries, because they are
-required at runtime and are not in this repository: cublas64_13.dll and
-cublasLt64_13.dll. They stay under NVIDIA's own terms and are NOT covered by
-the MIT grant above. NVIDIA permits redistribution of the libraries it
-designates as redistributable, under the conditions stated in that agreement,
-and both of these are on that list.
+The Windows package ships two NVIDIA libraries alongside the binaries, because
+they are required at runtime and are not in this repository: cublas64_13.dll
+and cublasLt64_13.dll. The Linux package ships three, for sd-server:
+cuda/lib/libcudart.so.13, cuda/lib/libcublas.so.13 and
+cuda/lib/libcublasLt.so.13. They stay under NVIDIA's own terms and are NOT
+covered by the MIT grant above. NVIDIA permits redistribution of the libraries
+it designates as redistributable, under the conditions stated in that
+agreement, and all five are on that list: Attachment A of the CUDA EULA names
+cublas.dll and cublasLt.dll for Windows, versioned file names included (its own
+example is cudart64_90.dll), and libcudart.so, libcublas.so and libcublasLt.so
+for Linux (read at docs.nvidia.com/cuda/eula on 2026-10-03).
 
 
 --------------------------------------------------------------------------------
@@ -108,3 +113,282 @@ sha256, each package's npm integrity string and each licence file's sha256;
 `tools/check_pathtracer_kit.py` holds the bundle, the licence files and this
 entry against it. A page the model builds with the kit inlines the bundle, and
 the bundle keeps three.js's `@license` comment at its end.
+
+
+--------------------------------------------------------------------------------
+stable-diffusion.cpp and what it compiles in -- bin/sd-server
+--------------------------------------------------------------------------------
+
+`sd-server` ships in the Linux package (tools/pack-release.sh) and in the
+Windows package when it is packed with `pack-release.ps1 -SdBuildDir`. It is
+built from stable-diffusion.cpp 2f886889e6e8b78738d6b87f7191f6018557c551
+(tag master-920-2f88688, tools/build-sd-server.sh) with these parts compiled
+in, each under its own terms, none of them modified:
+
+    stable-diffusion.cpp   MIT            Copyright (c) 2023 leejet
+    ggml 4bf5f600          MIT            Copyright (c) 2023-2026 The ggml authors
+    cpp-httplib            MIT            Copyright (c) 2025 Yuji Hirose
+    nlohmann/json          MIT            Copyright (c) 2013-2022 Niels Lohmann
+    kuba--/zip             MIT            "All Rights Reserved." (no holder named)
+    utf8proc               MIT + Unicode  text below
+    darts-clone            BSD-2-Clause   Copyright (c) 2008-2011, Susumu Yata
+    Oniguruma              BSD-2-Clause   Copyright (c) 2002-2021 K.Kosako
+    libwebp 0c9546f7       BSD-3-Clause   Copyright (c) 2010, Google Inc.
+                           + patent grant
+    libwebm 5bf12267       BSD-3-Clause   Copyright (c) 2010, Google Inc.
+    miniz 2.2.0            public domain  (Unlicense)
+    stb_image, stb_image_write, stb_image_resize
+                           public domain  (Unlicense, the licence's Alternative B)
+
+The MIT licence of the first five, with the copyright lines above:
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+darts-clone (thirdparty/LICENSE.darts_clone.txt at the pin, byte for byte):
+
+    Copyright (c) 2008-2011, Susumu Yata
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+    - Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+    - Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+    - Neither the name of the <ORGANIZATION> nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Oniguruma (thirdparty/oniguruma/COPYING at the pin):
+
+    Oniguruma LICENSE
+    -----------------
+
+    Copyright (c) 2002-2021  K.Kosako  <kkosako0@gmail.com>
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+    1. Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+    THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+    ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+    ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+    OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+    HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+    LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+    OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+    SUCH DAMAGE.
+
+libwebp and libwebm (COPYING and LICENSE.TXT at their pins; the two texts
+are identical):
+
+    Copyright (c) 2010, Google Inc. All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are
+    met:
+
+      * Redistributions of source code must retain the above copyright
+        notice, this list of conditions and the following disclaimer.
+
+      * Redistributions in binary form must reproduce the above copyright
+        notice, this list of conditions and the following disclaimer in
+        the documentation and/or other materials provided with the
+        distribution.
+
+      * Neither the name of Google nor the names of its contributors may
+        be used to endorse or promote products derived from this software
+        without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+    HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+libwebp's patent grant (PATENTS at its pin):
+
+    Additional IP Rights Grant (Patents)
+    ------------------------------------
+
+    "These implementations" means the copyrightable works that implement the WebM
+    codecs distributed by Google as part of the WebM Project.
+
+    Google hereby grants to you a perpetual, worldwide, non-exclusive, no-charge,
+    royalty-free, irrevocable (except as stated in this section) patent license to
+    make, have made, use, offer to sell, sell, import, transfer, and otherwise
+    run, modify and propagate the contents of these implementations of WebM, where
+    such license applies only to those patent claims, both currently owned by
+    Google and acquired in the future, licensable by Google that are necessarily
+    infringed by these implementations of WebM. This grant does not include claims
+    that would be infringed only as a consequence of further modification of these
+    implementations. If you or your agent or exclusive licensee institute or order
+    or agree to the institution of patent litigation or any other patent
+    enforcement activity against any entity (including a cross-claim or
+    counterclaim in a lawsuit) alleging that any of these implementations of WebM
+    or any code incorporated within any of these implementations of WebM
+    constitute direct or contributory patent infringement, or inducement of
+    patent infringement, then any patent rights granted to you under this License
+    for these implementations of WebM shall terminate as of the date such
+    litigation is filed.
+
+utf8proc (thirdparty/utf8proc/LICENSE.md at the pin):
+
+    ## utf8proc license ##
+
+    **utf8proc** is a software package originally developed
+    by Jan Behrens and the rest of the Public Software Group, who
+    deserve nearly all of the credit for this library, that is now maintained by the Julia-language developers.  Like the original utf8proc,
+    whose copyright and license statements are reproduced below, all new
+    work on the utf8proc library is licensed under the [MIT "expat"
+    license](http://opensource.org/licenses/MIT):
+
+    *Copyright &copy; 2014-2021 by Steven G. Johnson, Jiahao Chen, Tony Kelman, Jonas Fonseca, and other contributors listed in the git history.*
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+    ## Original utf8proc license ##
+
+    *Copyright (c) 2009, 2013 Public Software Group e. V., Berlin, Germany*
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+    ## Unicode data license ##
+
+    This software contains data (`utf8proc_data.c`) derived from processing
+    the Unicode data files. The following license applies to that data:
+
+    **COPYRIGHT AND PERMISSION NOTICE**
+
+    *Copyright (c) 1991-2007 Unicode, Inc. All rights reserved. Distributed
+    under the Terms of Use in http://www.unicode.org/copyright.html.*
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of the Unicode data files and any associated documentation (the "Data
+    Files") or Unicode software and any associated documentation (the
+    "Software") to deal in the Data Files or Software without restriction,
+    including without limitation the rights to use, copy, modify, merge,
+    publish, distribute, and/or sell copies of the Data Files or Software, and
+    to permit persons to whom the Data Files or Software are furnished to do
+    so, provided that (a) the above copyright notice(s) and this permission
+    notice appear with all copies of the Data Files or Software, (b) both the
+    above copyright notice(s) and this permission notice appear in associated
+    documentation, and (c) there is clear notice in each modified Data File or
+    in the Software as well as in the documentation associated with the Data
+    File(s) or Software that the data or software has been modified.
+
+    THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+    KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+    THIRD PARTY RIGHTS. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS
+    INCLUDED IN THIS NOTICE BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR
+    CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF
+    USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+    TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+    PERFORMANCE OF THE DATA FILES OR SOFTWARE.
+
+    Except as contained in this notice, the name of a copyright holder shall
+    not be used in advertising or otherwise to promote the sale, use or other
+    dealings in these Data Files or Software without prior written
+    authorization of the copyright holder.
+
+    Unicode and the Unicode logo are trademarks of Unicode, Inc., and may be
+    registered in some jurisdictions. All other trademarks and registered
+    trademarks mentioned herein are the property of their respective owners.
+
+
+--------------------------------------------------------------------------------
+ComfyUI workflow template -- cli/workflows/ltx25_i2v_api.json
+--------------------------------------------------------------------------------
+
+MIT License, Copyright (c) 2023-present Comfy Org.
+
+The file is ComfyUI's official template `video_ltx2_5_i2v.json`
+(Comfy-Org/workflow_templates, as shipped in comfyui-workflow-templates-json
+0.1.96 with ComfyUI v0.38.0), exported to ComfyUI's API format by ComfyUI's
+own frontend. Changed here (#340, Phase 0): the bypassed prompt enhancer's
+switch takes the prompt string (`398:382` on_true), and the unused e2b
+CLIPLoader (`398:393`) is removed.
+
+    MIT License
+
+    Copyright (c) 2023-present Comfy Org
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
