@@ -16,6 +16,13 @@
 //! any -> IPv4 only (ureq `IpFamily::Ipv4Only`) -> any. The family that got a
 //! response is kept, for the rest of this download and for the later files of
 //! the same run (a process-wide flag). IPv4-only is never the starting default.
+//!
+//! LOCAL SOURCE ON LINUX (#342): a `--source` file on the same file system as
+//! its destination is hard-linked instead of copied, after its sha256 matched
+//! (so the semantics stay: nothing unverified is ever renamed into place). The
+//! source is never opened for writing; the install only ever replaces or
+//! deletes its own link. A `.part` already begun, another file system, a
+//! sha256 that does not match, or a link that fails falls back to the copy.
 
 use crate::api::{Event, FileJob, Source};
 use crate::state::StateStore;
@@ -44,12 +51,21 @@ pub struct FetchOptions {
     pub checkpoint_bytes: u64,
     /// Backoff cap in seconds (spec: 30).
     pub max_backoff_secs: u64,
+    /// A local source file on the destination's file system is hard-linked
+    /// instead of copied (Linux, #342; see the module docs).
+    pub link_local: bool,
 }
 
 impl FetchOptions {
     /// The spec's values: 30 s stall, 64 MiB checkpoints, 30 s backoff cap.
     pub fn production(source: Source) -> FetchOptions {
-        FetchOptions { source, stall_secs: 30, checkpoint_bytes: 64 * 1024 * 1024, max_backoff_secs: 30 }
+        FetchOptions {
+            source,
+            stall_secs: 30,
+            checkpoint_bytes: 64 * 1024 * 1024,
+            max_backoff_secs: 30,
+            link_local: cfg!(unix),
+        }
     }
 }
 
@@ -104,6 +120,13 @@ pub fn download(
     if cx.state.files.get(&job.id).is_some_and(|f| f.verified) {
         cx.state.files.insert(job.id.clone(), Default::default());
         cx.state.save()?;
+    }
+    #[cfg(unix)]
+    if let Source::Local(root) = &opts.source
+        && opts.link_local
+        && cx.try_link(root)?
+    {
+        return Ok(());
     }
     for pass in 0..2 {
         let got = cx.transfer()?;
@@ -231,6 +254,41 @@ impl Cx<'_> {
             f.bytes_done = job.bytes;
             self.state.save()?;
         }
+        (self.on)(Event::FileVerified { id: job.id.clone() });
+        Ok(true)
+    }
+
+    /// Linux, `--source`: hard-link the source file into place when it is on
+    /// the same file system and its sha256 matches. False: copy it instead.
+    #[cfg(unix)]
+    fn try_link(&mut self, root: &Path) -> Result<bool, FetchError> {
+        use std::os::unix::fs::MetadataExt;
+        let job = self.job;
+        if part_path(&job.dest).exists() {
+            return Ok(false);
+        }
+        // a symlinked source tree links the file itself, never the symlink
+        let Ok(src) = std::fs::canonicalize(root.join(&job.local_rel)) else { return Ok(false) };
+        let Ok(meta) = std::fs::metadata(&src) else { return Ok(false) };
+        let dest_dev = job.dest.parent().and_then(|d| std::fs::metadata(d).ok()).map(|m| m.dev());
+        if !meta.is_file() || meta.len() != job.bytes || dest_dev != Some(meta.dev()) {
+            return Ok(false);
+        }
+        (self.on)(Event::Checking { id: job.id.clone(), bytes: meta.len() });
+        let got = hash_prefix(&mut File::open(&src)?, meta.len(), self.cancel)?.finish();
+        if !got.eq_ignore_ascii_case(&job.sha256) {
+            // the copy reports it, with its one refetch, exactly as before
+            return Ok(false);
+        }
+        // a wrong file in the way (already_there said so) goes; the copy would replace it too
+        let _ = std::fs::remove_file(&job.dest);
+        if std::fs::hard_link(&src, &job.dest).is_err() {
+            return Ok(false);
+        }
+        let f = self.state.file_mut(&job.id);
+        f.verified = true;
+        f.bytes_done = job.bytes;
+        self.state.save()?;
         (self.on)(Event::FileVerified { id: job.id.clone() });
         Ok(true)
     }

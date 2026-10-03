@@ -2,7 +2,7 @@
 
 # Boot menu
 
-Starts one operating point, then Crow. The three crow-nest points are the baseline; everything they need (binary, env, argv, port, readiness, menu text) comes from `manifests/stack.json`. Crow's llama.cpp lines are optional and listed below them. The boot menu has two faces over the same steps: the operating-point window (what the shortcut and the installer's **Open boot menu** open) and the terminal menu.
+Starts one operating point, then Crow. The three crow-nest points are the baseline; everything they need (binary, env, argv, port, readiness, menu text) comes from `manifests/stack.json`. Crow's llama.cpp lines are optional and listed below them. The boot menu has two faces over the same steps: the operating-point window (what the shortcut and the installer's **Open boot menu** open) and the terminal menu. It runs on Windows and Linux; what differs on Linux is under [Linux](#linux).
 
 ## Operating-point window
 
@@ -83,6 +83,23 @@ python cli\crow_boot.py
 | `--stack <file>` | another `stack.json` |
 
 Exit codes: 0 done, 1 failed, 2 setup error (missing file, unknown point), 3 refused because a point already runs.
+
+## Linux
+
+```bash
+python3 cli/crow_boot.py --gui --models ~/Projects/models/crow-stack
+```
+
+| | Linux (#341) |
+|---|---|
+| Binaries | `<install>/bin/serve`, `<install>/bin/sd-server` (`binary.linux` in `stack.json`) |
+| Libraries | `<install>/bin` (NVRTC beside `serve`) and `<install>/cuda/lib` (CUDA runtime and cuBLAS for `sd-server`) go in front of `LD_LIBRARY_PATH` (`lib_path.linux` in `stack.json`) |
+| Memory scope | `serve` and `sd-server` start in `systemd-run --user --scope` with the bounds the llama.cpp lines get ([Linux](linux.md#start)); `CROW_SERVER_SCOPE=0` starts the bare process |
+| Install root | `~/.local/share/crow` (`$XDG_DATA_HOME/crow`) |
+| Contract file | `~/.config/crow/active-point.json` |
+| Logs | `~/.local/state/crow/log/serve-8099.log`, `sd-server-8097.log` |
+| Stop by hand | `kill <pid>` |
+| Window | GTK. `--create-shortcut` is Windows only |
 
 ## Shortcut
 

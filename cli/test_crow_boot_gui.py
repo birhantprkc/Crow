@@ -16,19 +16,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-# The boot menu, the operating-point window and CrowSetup are Windows-only so far:
-# manifests/stack.json names Windows binaries only (#196), so every start fails on
-# another OS before a fake is reached. Owner decision 2026-10-01: skip, not rewrite.
-# load_tests, not SkipTest at import: CI names the modules, and the loader only
-# turns an import-time SkipTest into a skip under discover.
-if sys.platform != "win32":
-    def load_tests(loader, tests, pattern):
-        @unittest.skip("stack.json names Windows binaries only (#196)")
-        class WindowsOnly(unittest.TestCase):
-            def test_this_suite_runs_on_windows(self):
-                pass
-        return unittest.TestSuite([WindowsOnly("test_this_suite_runs_on_windows")])
-
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -218,6 +205,27 @@ class State3LandedTests(GuiCase):
         self.assertEqual(v["running"]["title"], "Qwen3.8-27B-UD-Q4_K_XL (optional)")
         self.assertEqual(v["running"]["detail"], "Running on port 8082. llama.cpp.")
         self.assertEqual(len(v["rows"]), 3, "every baseline point is offered (and refused)")
+
+
+class TheWindowOnLinuxTests(GuiCase):
+    """#341: the window starts a point on Linux, behind the user scope."""
+
+    def test_start_27b_lands_scoped_and_the_row_reads_the_linux_plan(self):
+        scope = ["systemd-run", "--user", "--scope", "--"]
+        with mock.patch.object(crow_boot, "PLATFORM_KEY", "linux"), \
+                mock.patch.object(crow_boot.crow_platform, "server_scope_prefix", lambda: list(scope)):
+            self.layout("27b")
+            popen = FakePopen()
+            ctl = self.controller(popen=popen, get=lambda url, timeout: OK_HEALTH)
+            ctl.start("27b")
+            ctl.refresh()
+            v = ctl.view()
+        self.assertEqual(v["phase"], crow_boot_gui.LANDED, self.out.getvalue())
+        self.assertEqual(v["running"]["detail"], "Running on port 8099. 128k context, vision on.")
+        (argv, kw), = popen.calls
+        self.assertEqual(argv[:len(scope)], scope)
+        self.assertEqual(argv[len(scope)], os.path.join(self.install, "bin", "serve"))
+        self.assertTrue(kw["env"]["LD_LIBRARY_PATH"].startswith(os.path.join(self.install, "bin")))
 
 
 class State4OneModelAtATimeTests(GuiCase):

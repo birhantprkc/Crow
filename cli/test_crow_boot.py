@@ -14,22 +14,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
-
-# The boot menu, the operating-point window and CrowSetup are Windows-only so far:
-# manifests/stack.json names Windows binaries only (#196), so every start fails on
-# another OS before a fake is reached. Owner decision 2026-10-01: skip, not rewrite.
-# load_tests, not SkipTest at import: CI names the modules, and the loader only
-# turns an import-time SkipTest into a skip under discover.
-if sys.platform != "win32":
-    def load_tests(loader, tests, pattern):
-        @unittest.skip("stack.json names Windows binaries only (#196)")
-        class WindowsOnly(unittest.TestCase):
-            def test_this_suite_runs_on_windows(self):
-                pass
-        return unittest.TestSuite([WindowsOnly("test_this_suite_runs_on_windows")])
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -39,6 +27,10 @@ import crow_core  # noqa: E402
 import crow_platform  # noqa: E402
 
 STACK = crow_boot.load_stack(crow_boot.DEFAULT_STACK)
+# The two binaries as stack.json names them on the platform the suite runs on
+# (#341: Windows and Linux both, so the suite runs on both).
+EXE = ".exe" if crow_boot.PLATFORM_KEY == "windows" else ""
+SERVE, SD_SERVER = "serve" + EXE, "sd-server" + EXE
 OK_HEALTH = (200, b'{"status": "ok"}')
 NOTHING = (None, b"")
 
@@ -128,7 +120,9 @@ class BootCase(unittest.TestCase):
             os.makedirs(d)
         patches = [mock.patch.object(crow_platform, "config_dir", lambda: self.config),
                    mock.patch.object(crow_platform, "state_dir", lambda: self.state),
-                   mock.patch.object(crow_platform, "pid_alive", lambda pid: True)]
+                   mock.patch.object(crow_platform, "pid_alive", lambda pid: True),
+                   # argv[0] is the server here; the Linux scope has its own tests
+                   mock.patch.object(crow_platform, "server_scope_prefix", lambda: [])]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -170,7 +164,7 @@ class ThePlaceholdersResolveFromTheStackTests(BootCase):
         plan = crow_boot.plan_point(STACK, "27b", self.install, self.models)
         serve = plan["serve"]
         self.assertEqual(serve["argv"][0], os.path.normpath(
-            os.path.join(self.install, "bin", "serve.exe")))
+            os.path.join(self.install, "bin", SERVE)))
         self.assertEqual(serve["argv"][1:3], ["--port", "8099"])
         self.assertEqual(serve["argv"][4], os.path.join(self.install, "session"))
         self.assertEqual(serve["env"]["CROW_CNQ"], os.path.join(
@@ -185,7 +179,7 @@ class ThePlaceholdersResolveFromTheStackTests(BootCase):
     def test_the_image_stack_carries_sd_server_and_the_window_env(self):
         plan = crow_boot.plan_point(STACK, "image-stack", self.install, self.models)
         argv = plan["image"]["argv"]
-        self.assertEqual(argv[0], os.path.join(self.install, "bin", "sd-server.exe"))
+        self.assertEqual(argv[0], os.path.join(self.install, "bin", SD_SERVER))
         self.assertIn("te=cpu", argv, "a value without a placeholder is passed as written")
         self.assertIn(os.path.join(self.models, "qwen-image-2.1", "text_encoder_sdcli",
                                    "model.safetensors.index.json"), argv)
@@ -280,7 +274,7 @@ class StartingAPointTests(BootCase):
         self.assertEqual(code, crow_boot.EXIT_OK, self.out.getvalue())
         self.assertEqual(len(popen.calls), 1)
         argv, kw = popen.calls[0]
-        self.assertTrue(argv[0].endswith("serve.exe"))
+        self.assertEqual(os.path.basename(argv[0]), SERVE)
         self.assertEqual(kw["cwd"], self.install)
         self.assertIs(kw["stdin"], subprocess.DEVNULL)
         self.assertEqual(kw["env"]["CROW_CNQ"], os.path.join(
@@ -322,7 +316,7 @@ class StartingAPointTests(BootCase):
         popen = FakePopen()
         code = self.boot(popen=popen).start("27b")
         self.assertEqual(code, crow_boot.EXIT_SETUP)
-        self.assertIn("serve.exe", self.out.getvalue())
+        self.assertIn(os.path.join("bin", SERVE), self.out.getvalue())
         self.assertEqual(popen.calls, [])
 
     def test_the_image_stack_starts_sd_server_only_after_serve_is_ready(self):
@@ -342,9 +336,9 @@ class StartingAPointTests(BootCase):
         code = self.boot(popen=popen, get=get).start("image-stack")
         self.assertEqual(code, crow_boot.EXIT_OK, self.out.getvalue())
         names = [e[1] for e in events if e[0] == "popen"]
-        self.assertEqual(names, ["serve.exe", "sd-server.exe"])
+        self.assertEqual(names, [SERVE, SD_SERVER])
         self.assertLess(events.index(("serve ready", "")),
-                        events.index(("popen", "sd-server.exe")))
+                        events.index(("popen", SD_SERVER)))
         argv, kw = popen.calls[1]
         self.assertEqual(kw["cwd"], crow_core.image_server_workdir())
         self.assertTrue(os.path.isdir(kw["cwd"]))
@@ -359,7 +353,7 @@ class StartingAPointTests(BootCase):
         popen = FakePopen()
         code = self.boot(popen=popen).start("image-stack")
         self.assertEqual(code, crow_boot.EXIT_FAILED)
-        self.assertEqual([os.path.basename(c[0][0]) for c in popen.calls], ["serve.exe"])
+        self.assertEqual([os.path.basename(c[0][0]) for c in popen.calls], [SERVE])
         self.assertEqual(self.terminated, [popen.procs[0]])
         self.assertIsNone(self.contract())
 
@@ -635,6 +629,112 @@ class StopWaitsForTheTeardownTests(unittest.TestCase):
         self.assertIs(boot.alive, crow_boot.process_exists,
                       "stop waits on the teardown, not on the exit code")
 
+    @unittest.skipIf(crow_platform.IS_WINDOWS, "a zombie is a POSIX state")
+    def test_a_killed_child_nobody_waited_for_is_gone(self):
+        # #341: the window is the parent of the serve it started and nothing
+        # reaps it after Stop. A zombie answers signal 0, so pid_alive alone
+        # kept Stop waiting its 30 s and reporting the server still there.
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                 stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            child.send_signal(9)
+            stat = os.path.join("/proc", str(child.pid), "stat")
+            for _ in range(200):
+                with open(stat, encoding="utf-8", errors="replace") as fh:
+                    if fh.read().rsplit(")", 1)[-1].split()[0] == "Z":
+                        break
+                time.sleep(0.025)
+            self.assertTrue(crow_platform.pid_alive(child.pid), "a zombie still answers signal 0")
+            self.assertFalse(crow_boot.process_exists(child.pid))
+        finally:
+            child.kill()
+            child.wait(timeout=30)
+
+
+class BothPlatformsTests(BootCase):
+    """#341: stack.json names the Windows and the Linux binaries, and Boot starts
+    serve and sd-server on Linux the way the llama.cpp lines start: behind
+    crow_platform.server_scope_prefix(), with stack.json's lib_path in front of
+    LD_LIBRARY_PATH. Windows starts exactly as before."""
+
+    SCOPE = ["systemd-run", "--user", "--scope", "--"]
+
+    def platform(self, key):
+        p = mock.patch.object(crow_boot, "PLATFORM_KEY", key)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_every_point_plans_on_both_platforms(self):
+        for key, exe in (("windows", ".exe"), ("linux", "")):
+            libs = {"windows": [],
+                    "linux": [os.path.join(self.install, "bin"),
+                              os.path.join(self.install, "cuda", "lib")]}[key]
+            for point in ("flash-next", "27b", "image-stack"):
+                with self.subTest(platform=key, point=point), \
+                        mock.patch.object(crow_boot, "PLATFORM_KEY", key):
+                    plan = crow_boot.plan_point(STACK, point, self.install, self.models)
+                    self.assertEqual(plan["serve"]["argv"][0],
+                                     os.path.join(self.install, "bin", "serve" + exe))
+                    self.assertEqual(plan["lib_path"], libs)
+                    if plan["image"]:
+                        argv = plan["image"]["argv"]
+                        self.assertEqual(argv[0], os.path.join(self.install, "bin", "sd-server" + exe))
+                        self.assertEqual("--mmap" in argv, key == "windows")
+
+    def test_on_linux_only_the_engine_binary_is_missing_from_a_full_model_tree(self):
+        self.platform("linux")
+        for point in ("27b", "image-stack"):
+            with self.subTest(point=point):
+                plan = self.layout(point)
+                os.remove(plan["serve"]["argv"][0])
+                self.assertEqual(crow_boot.missing_files(plan, self.install, self.models),
+                                 [os.path.join(self.install, "bin", "serve")])
+
+    def start_image_stack(self, inherited):
+        data = os.path.join(self.tmp, "data")
+        os.makedirs(os.path.join(data, "cuda", "lib"))
+        self.layout("image-stack")
+        popen = FakePopen()
+        probes = iter([OK_HEALTH, (200, b"{}")])
+        with mock.patch.dict(os.environ, inherited), \
+                mock.patch.object(crow_platform, "data_dir", lambda: data), \
+                mock.patch.object(crow_platform, "server_scope_prefix", lambda: list(self.SCOPE)):
+            code = self.boot(popen=popen, get=lambda url, timeout: next(probes)).start("image-stack")
+            expected_image_env = crow_core._image_server_env()
+        self.assertEqual(code, crow_boot.EXIT_OK, self.out.getvalue())
+        return popen, data, expected_image_env
+
+    def test_on_linux_serve_and_sd_server_start_scoped_with_the_library_path(self):
+        self.platform("linux")
+        popen, data, _ = self.start_image_stack({"LD_LIBRARY_PATH": "/opt/other"})
+        plan = crow_boot.plan_point(STACK, "image-stack", self.install, self.models)
+        libs = [os.path.join(self.install, "bin"), os.path.join(self.install, "cuda", "lib")]
+        (serve_argv, serve_kw), (image_argv, image_kw) = popen.calls
+        self.assertEqual(serve_argv, self.SCOPE + plan["serve"]["argv"])
+        self.assertEqual(image_argv, self.SCOPE + plan["image"]["argv"])
+        self.assertEqual(serve_kw["env"]["LD_LIBRARY_PATH"], os.pathsep.join(libs + ["/opt/other"]))
+        image_libs = libs + ([] if crow_platform.IS_WINDOWS else [os.path.join(data, "cuda", "lib")])
+        self.assertEqual(image_kw["env"]["LD_LIBRARY_PATH"],
+                         os.pathsep.join(image_libs + ["/opt/other"]))
+
+    def test_on_windows_the_start_is_what_it_was(self):
+        # The scope prefix is [] on Windows (crow_platform); lib_path names no
+        # Windows folder, so argv and both environments are the pre-#341 ones.
+        self.platform("windows")
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/opt/other"}):
+            env = {k: v for k, v in os.environ.items()
+                   if k not in crow_boot.engine_env_keys(STACK)}
+        self.SCOPE = []
+        popen, _data, image_env = self.start_image_stack({"LD_LIBRARY_PATH": "/opt/other"})
+        plan = crow_boot.plan_point(STACK, "image-stack", self.install, self.models)
+        env.update(plan["serve"]["env"])
+        (serve_argv, serve_kw), (image_argv, image_kw) = popen.calls
+        self.assertEqual(plan["lib_path"], [])
+        self.assertEqual(serve_argv, plan["serve"]["argv"])
+        self.assertEqual(image_argv, plan["image"]["argv"])
+        self.assertEqual(serve_kw["env"], env)
+        self.assertEqual(image_kw["env"], image_env)
+
 
 class TheTerminalTests(unittest.TestCase):
     def test_a_stream_that_is_no_terminal_gets_plain_ascii_output(self):
@@ -684,7 +784,7 @@ class ThePlanAsJsonTests(BootCase):
     def test_the_image_stack_carries_sd_server_and_the_derived_encoder(self):
         doc = crow_boot.plan_json(STACK, "image-stack", self.install, self.models)
         plan = crow_boot.plan_point(STACK, "image-stack", self.install, self.models)
-        self.assertEqual(doc["image"]["binary"], os.path.join(self.install, "bin", "sd-server.exe"))
+        self.assertEqual(doc["image"]["binary"], os.path.join(self.install, "bin", SD_SERVER))
         self.assertEqual(doc["image"]["argv"], plan["image"]["argv"][1:])
         self.assertEqual(doc["image"]["port"], 8097)
         self.assertEqual(doc["crow_env"], plan["crow_env"])

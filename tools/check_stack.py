@@ -21,6 +21,11 @@ OFFLINE (the default, no network):
                    SAME point installs; the identity is the CROW_CNQ file name;
                    the slot dir is created; ports agree with argv; a menu line
                    never claims more context than the point serves;
+  * platforms    - #341: every engine and image server names its binary for
+                   windows AND linux, the same program under ${INSTALL}/bin/
+                   (.exe on Windows only); argv_platform names only those two;
+                   lib_path (the folders in front of LD_LIBRARY_PATH) holds
+                   ${INSTALL}/ folders, and on Linux the engine's own folder;
   * crow files   - the Crow-wide group (crow_files: the dictation model) has every
                    field, a pinned 40-hex revision, a status of published or
                    upstream, a dest under ${INSTALL}/ that no other file uses, and
@@ -73,6 +78,9 @@ REPO_ID = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
 PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
 PATH_ROOTS = ("${INSTALL}/", "${MODELS}/")
 # absolute or personal paths: a drive letter, a UNC root, a home directory
+# A Hugging Face repo id, `<namespace>/<name>` (#343). The namespace is the public
+# owner the installer downloads from, so it is not held to the user-name check.
+REPO_ID = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 PERSONAL = re.compile(r"(?i)(\b[a-z]:[\\/]|\\\\[a-z0-9]|(^|[\s\"'(=])~[\\/]|[\\/](users|home)[\\/])")
 SMALL = 1 << 20
 CROW_SMALL = 8 << 20
@@ -80,6 +88,8 @@ CROW_FILE_FIELDS = ("id", "repo", "path", "revision", "bytes", "sha256", "dest",
                     "license", "role")
 CROW_STATUSES = ("published", "upstream")
 WHISPER_DIR = "${INSTALL}/models/whisper-small/"
+PLATFORMS = ("windows", "linux")
+BIN_DIR = "${INSTALL}/bin/"
 HF = "https://huggingface.co"
 
 
@@ -228,6 +238,8 @@ def check_paths(doc) -> "list[str]":
         if PERSONAL.search(s):
             p.append("%s: absolute or personal path in %r" % (where, s[:80]))
         low = s.lower()
+        if where.endswith("/repo") and REPO_ID.fullmatch(s):
+            low = low.split("/", 1)[1]
         for n in names:
             if re.search(r"(?<![a-z0-9])%s(?![a-z0-9])" % re.escape(n), low):
                 p.append("%s: names the user %r" % (where, n))
@@ -407,6 +419,43 @@ def check_wiring(doc) -> "list[str]":
             if int(k) * 1000 > int(eng.get("context") or 0):
                 p.append("point %s menu gui text claims %sk context, the engine serves %r"
                          % (pid, k, eng.get("context")))
+    return p
+
+
+def check_platforms(doc) -> "list[str]":
+    """#341: both platforms can start every point (cli/crow_boot.py plan_point)."""
+    p = []
+    lib_path = doc.get("lib_path")
+    if not isinstance(lib_path, dict) or sorted(set(lib_path) - set(PLATFORMS)):
+        p.append("lib_path must map %s to folder lists" % " / ".join(PLATFORMS))
+        lib_path = {}
+    for plat, dirs in lib_path.items():
+        if not isinstance(dirs, list) or not all(isinstance(d, str) and d.startswith("${INSTALL}/")
+                                                 for d in dirs):
+            p.append("lib_path.%s %r is not a list of ${INSTALL}/ folders" % (plat, dirs))
+    for pt in doc["points"]:
+        specs = [("engine", pt.get("engine") or {})]
+        if pt.get("image_server"):
+            specs.append(("image_server", pt["image_server"]))
+        for what, spec in specs:
+            binary = spec.get("binary") or {}
+            if sorted(binary) != sorted(PLATFORMS):
+                p.append("point %s %s.binary names %s, expected %s"
+                         % (pt["id"], what, sorted(binary) or "nothing", " and ".join(PLATFORMS)))
+                continue
+            win, lin = binary["windows"], binary["linux"]
+            if not win.startswith(BIN_DIR) or not lin.startswith(BIN_DIR):
+                p.append("point %s %s.binary is not under %s" % (pt["id"], what, BIN_DIR))
+            if not win.endswith(".exe") or lin.endswith(".exe") or win[:-4] != lin:
+                p.append("point %s %s.binary: windows %s and linux %s are not one program"
+                         % (pt["id"], what, win, lin))
+            if what == "engine" and lin.rsplit("/", 1)[0] not in (lib_path.get("linux") or []):
+                p.append("point %s: lib_path.linux lacks %s, where the NVRTC beside serve lives"
+                         % (pt["id"], lin.rsplit("/", 1)[0]))
+            extra = spec.get("argv_platform")
+            if extra is not None and (not isinstance(extra, dict) or set(extra) - set(PLATFORMS)):
+                p.append("point %s %s.argv_platform names a platform other than %s"
+                         % (pt["id"], what, " / ".join(PLATFORMS)))
     return p
 
 
@@ -639,6 +688,7 @@ def run(doc, online=False) -> Report:
         "%s %d files %s B" % (pt["id"], len(pt["files"]), format(pt["bytes"]["disk"], ","))
         for pt in doc["points"]))
     r.check("engine wiring", check_wiring(doc), "env/argv paths are files of their own point")
+    r.check("platforms", check_platforms(doc), "windows and linux binaries for every server, lib_path")
     crow = [f for f in doc.get("crow_files") or [] if isinstance(f, dict)]
     crow_problems = check_crow_files(doc)
     r.check("crow files", crow_problems, "%d files %s B, dictation in %s"

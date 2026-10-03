@@ -10,6 +10,7 @@ the model — that is a separate line, printed at the end of the run.
 | Windows | `install.ps1` — five steps, no elevation, everything under `%LOCALAPPDATA%\Crow` |
 | Windows, one window | `CrowSetup.exe` from the [latest release](https://github.com/nibor1896/Crow/releases/latest): Crow, the crow-nest engine and the operating points you pick, with resume. See [CrowSetup.exe](#crowsetupexe-windows) |
 | Linux | `install.sh` — five steps, no root, everything under `${XDG_DATA_HOME:-~/.local/share}/crow` |
+| Linux, one window | `CrowSetup-linux-x64` from the [latest release](https://github.com/nibor1896/Crow/releases/latest): the same installer as `CrowSetup.exe`, for Linux. See [CrowSetup (Linux)](#crowsetup-linux) |
 | The model | `hf download`, separately, 73.45 GiB + 0.9 GiB for the projector |
 
 ---
@@ -209,6 +210,84 @@ warned about; none of them stops the install.
 
 The engine is **built** rather than downloaded — the Windows package ships an `.exe` and there is
 no Linux release asset. Full page: [Linux](linux.md).
+
+---
+
+## CrowSetup (Linux)
+
+`CrowSetup-linux-x64` is `CrowSetup.exe` built for Linux: the same window, the same points, the
+same resume, verify and retry rules as [CrowSetup.exe](#crowsetupexe-windows).
+
+```bash
+chmod +x CrowSetup-linux-x64 && ./CrowSetup-linux-x64
+./CrowSetup-linux-x64 --headless --points 27b,image-stack
+```
+
+| needs | |
+|---|---|
+| system | `webkit2gtk-4.1` and `gtk3` (the window and the binary link them), glibc 2.34+ (the engine) |
+| Python | `python3` 3.10+ with `venv`, and `python-gobject` for the Crow window |
+| display | X11 or Wayland. The window sets `__NV_DISABLE_EXPLICIT_SYNC=1` unless you set it, as the Crow window does: without it WebKitGTK dies on NVIDIA under Wayland |
+
+```bash
+sudo pacman -S --needed gtk3 webkit2gtk-4.1 python python-gobject
+```
+
+| installs | |
+|---|---|
+| Crow | `crow-<v>-linux-x64.tar.gz`: Crow, `bin/sd-server`, `cuda/lib/` (`libcudart.so.13`, `libcublas.so.13`, `libcublasLt.so.13`) |
+| crow-nest engine | `crow-nest-engine-<v>-linux-x64.tar.gz` into `bin/`: `serve` and the files its `MANIFEST.json` lists. Refused when the system glibc is older than the pack's `glibc_min` |
+| Python | `<install>/venv` from the system `python3` with `--system-site-packages`, then `pywebview` (required), `faster-whisper`, `sounddevice` (voice, a missing one only warns) — as `install.sh` |
+| shortcuts | desktop entries: "Crow Operating Points" (`crow-operating-points.desktop`) and "Crow" (`crow.desktop`) in `${XDG_DATA_HOME:-~/.local/share}/applications`; the folder you chose gets "Crow Operating Points" |
+
+| | Windows | Linux |
+|---|---|---|
+| install root | `%LOCALAPPDATA%\Crow` | `${XDG_DATA_HOME:-~/.local/share}/crow` |
+| models | `<install>\models` | `<install>/models` |
+| setup state | `<install>\setup\state.json` | `<install>/setup/state.json` |
+| a running binary on update | renamed to `.old` | replaced by rename, the running process keeps its file |
+| `--source` on the same file system | copied | hard-linked after its sha256 matched; the source is never written |
+
+| flag | |
+|---|---|
+| `--source <dir>` | as on Windows, plus: a file not at `<dir>/<repo>/<path>` is taken from `<dir>/<path under models/>` (a models tree). A folder that holds `qwen-image-2.1/text_encoder_sdcli/` complete is linked in and the convert step is skipped |
+| `--package-source <dir>` | the two `.tar.gz` packages from `<dir>/<asset>` |
+| all others | as [CrowSetup.exe](#crowsetupexe-windows) |
+
+A local test install that downloads no model, from a models tree on the same file system:
+
+```bash
+./CrowSetup-linux-x64 --headless --points 27b,image-stack \
+    --install-root ~/crow-test/crow --source ~/models/crow-stack \
+    --package-source ~/crow-test/packs --no-shortcuts
+```
+
+### Build it (Linux)
+
+```bash
+bash tools/pack-release.sh --sd-server <sd-server> --cuda-lib <cuda>/lib64
+bash installer/build.sh --crow-pack dist/crow-<v>-linux-x64.tar.gz --engine-pack crow-nest-engine-<v>-linux-x64.tar.gz
+bash tools/pack-release.sh --selftest
+bash installer/build.sh --selftest
+```
+
+| `tools/pack-release.sh` | |
+|---|---|
+| stage | the payload as `tools/repack-release.py` stages it, `bin/sd-server`, the three CUDA libraries under their sonames |
+| completeness | every `NEEDED` (`readelf -d`) is packed or a system library (glibc, libstdc++, libgcc, libgomp, the driver's `libcuda.so.1`) |
+| shipped set | `tools/repack-release.py` rules; `runs/`, `*.log` and the other excludes never ship |
+| privacy gate | `$HOME`, `/home/<anyone>/`, the user name (bare too), the host name, `--private-pattern`, UTF-8 and UTF-16LE. The user name passes only where it is the project's public namespace (`github.com/<name>/`, `"repo": "<name>/`, the copyright line). A hit writes nothing |
+| archive | regular files only, no owner in the headers, `MANIFEST.json` with forward slashes, read back against its manifest and gated again |
+
+| `installer/build.sh` | |
+|---|---|
+| `packages-linux-x64.json` | asset, bytes, sha256, version and release URL of the two tarballs; the binary embeds it. No Python is embedded |
+| build | `cargo build --release -p crowsetup --features bundle`, `$HOME`, `CARGO_HOME` and the repo remapped |
+| check | `crowsetup --selftest` must exit 0 |
+| privacy gate | `tools/pack-release.sh --gate` over the binary. A hit refuses the build and nothing is copied |
+| output | `installer/dist/CrowSetup-linux-x64`, with its size and sha256 printed |
+
+Needs Rust, the GTK 3 and WebKitGTK 4.1 development files, Python 3 and `readelf`.
 
 ---
 

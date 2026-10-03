@@ -369,7 +369,7 @@ button.sec:hover{color:var(--soft)}
     var h = mark(null) + '<div class="say">Landed. Crow is ready.</div><div class="list">';
     h += row({ title: 'Boot menu shortcut', desc: S.shortcutDir ? S.shortcutLabel : 'Not written.', dcls: S.shortcutDir ? '' : 'warn',
       tail: '<button class="chip" data-act="shortcut">change</button>' + toggle('', true, 'static') });
-    h += row({ title: 'Start menu entry', desc: 'Crow', tail: toggle('', true, 'static') });
+    h += row({ title: S.init.launcher_label || 'Start menu entry', desc: 'Crow', tail: toggle('', true, 'static') });
     h += row({ title: 'Installed', desc: (d.installed || []).map(title).join(', ') });
     h += '</div>';
     var note = bm.status === 'failed' ? '<p class="note">' + esc(bm.detail) + '</p>' : '';

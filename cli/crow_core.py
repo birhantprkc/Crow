@@ -85,7 +85,7 @@ import crow_platform
 # column 0. Until #187 it stood in cli/crow.py, which handed it over on import;
 # an installation older than this change still carries it there, and that is
 # the only reason the installers look in crow.py at all.
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 # The name every reader has used since the split: the session file's `version`
 # field, the User-Agents and the update notice. It used to be "" until the
@@ -7597,8 +7597,8 @@ def _rooted(path: str) -> str:
 # ONE THAT DOES, and the error that said so was the OS's, not Crow's. Measured
 # over every stored session on this machine (2026-09-22): 18 distinct
 # run_command calls carried a `cwd`, and 5 of them named a home that is not
-# there -- the account name spelled `nibor11896` three times and `nibor11899`
-# twice, for the real `nibor1896`. crow-nest #91's replay puts the digit at logprob
+# there -- the account name `name1896` spelled `name11896` three times and
+# `name11899` twice. crow-nest #91's replay puts the digit at logprob
 # -0.013 against -4.41 for the right one: a confident error, so a sampler
 # cannot be relied on to avoid it and the tool has to answer it. What came
 # back each time was `[Errno 2] No such file or directory: '<the wrong
@@ -7615,7 +7615,7 @@ NEAR_MISS_SCAN = 4096
 
 def _near_edits(name: str) -> int:
     """How many edits still count as the same name: 1 below 8 characters,
-    2 from there. `nibor11899` -> `nibor1896` is two, and a 3-letter `src`
+    2 from there. `name11899` -> `name1896` is two, and a 3-letter `src`
     must not turn into `bin`."""
     return 1 if len(name) < 8 else 2
 

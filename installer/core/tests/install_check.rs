@@ -175,9 +175,20 @@ fn a_real_process_is_started_and_judged() {
     let t = Duration::from_secs(60);
     let usage = "import sys; sys.stderr.write('[serve] --help needs a value (usage: serve [--port <n>])\\n'); sys.exit(2)";
     check::binary_starts(&exe, &["-c", usage], StartRule::UsageOrZero("usage: serve"), t).unwrap();
-    let crash = "import sys; sys.exit(-1073741515)";
-    let err = check::binary_starts(&exe, &["-c", crash], StartRule::UsageOrZero("usage: serve"), t).unwrap_err();
-    assert!(err.contains("DLL"), "{err}");
+    #[cfg(windows)]
+    {
+        let crash = "import sys; sys.exit(-1073741515)";
+        let err = check::binary_starts(&exe, &["-c", crash], StartRule::UsageOrZero("usage: serve"), t).unwrap_err();
+        assert!(err.contains("DLL"), "{err}");
+    }
+    // Linux (#342): the loader's own message and exit 127 for a missing library
+    #[cfg(not(windows))]
+    {
+        let crash = "import sys; sys.stderr.write('serve: error while loading shared libraries: libnvrtc.so: \
+                     cannot open shared object file\\n'); sys.exit(127)";
+        let err = check::binary_starts(&exe, &["-c", crash], StartRule::UsageOrZero("usage: serve"), t).unwrap_err();
+        assert!(err.contains("exited 127") && err.contains("libnvrtc.so"), "{err}");
+    }
     let err = check::binary_starts(Path::new("C:\\nope\\serve.exe"), &["--help"], StartRule::ExitZero, t).unwrap_err();
     assert!(err.contains("serve.exe"), "{err}");
     let hang = "import time; time.sleep(30)";
@@ -222,7 +233,15 @@ fn check_point_against_the_real_boot_menu_names_what_is_missing() {
     assert!(repo.join("cli").join("crow_boot.py").is_file(), "{}", repo.display());
     let models = tempfile::tempdir().unwrap();
     let err = check::check_point(&py(), repo, models.path(), "27b").unwrap_err();
-    assert!(err.contains("serve.exe"), "{err}");
+    if cfg!(windows) {
+        assert!(err.contains("serve.exe"), "{err}");
+    } else if err.contains("names no engine binary") {
+        // #342: until manifests/stack.json carries `binary.linux` (#341) the boot
+        // menu itself refuses, and says so; nothing more can be checked here
+        return;
+    } else {
+        assert!(err.contains("bin/serve"), "{err}");
+    }
     assert!(err.contains("Qwen3.8-27B-CNQ4.5.cnq"), "{err}");
     let err = check::check_point(&py(), repo, models.path(), "no-such-point").unwrap_err();
     assert!(err.contains("no-such-point"), "{err}");
