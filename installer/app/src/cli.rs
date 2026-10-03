@@ -8,8 +8,8 @@ CrowSetup [options]
   (no options)            the window
   --headless              no window: plain text progress, same run
   --points <ids>          with --headless: comma-separated points to install
-                          (flash-next, 27b, image-stack); without it the saved
-                          selection continues
+                          (flash-next, 27b, image-stack, media-stack); without it
+                          the saved selection continues
   --selftest              no network, no window: the run order on fake steps and
                           the core checks; prints RESULT, exit 0/1
   --source <dir>          local files instead of Hugging Face / GitHub

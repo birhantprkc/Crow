@@ -71,6 +71,11 @@
    "why": "#300 phase 3. The two-stage edit robin chose on the pictures (1 MP edit, then img2img at full size). A second copy would drift back to a 4 MP edit, which measured grainy (E1, E2)."
   },
   {
+   "name": "tool_animate_image",
+   "kind": "def",
+   "why": "#340. The only place that moves the card between the language model and ComfyUI (use_mode) around a clip, and always brings the language model back. A second copy would start ComfyUI beside the engine, and a clip alone peaked at 32,049 of 32,607 MiB in Phase 0."
+  },
+  {
    "name": "tool_write_file",
    "kind": "def",
    "why": "The one tool whose drift costs data: #10 measured hermes-agent resolving read-before-write to last-write-wins in two independent code paths, one warning and one writing anyway. Two implementations here is that same defect with a different name."

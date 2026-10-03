@@ -1035,7 +1035,7 @@
     }
    },
    "image_server": null,
-   "_image_server": "Not at boot: sd-server starts on the first image call, as for a llama.cpp line (crow_core.image_server_start), and leaves the card for a clip (use_mode).",
+   "_image_server": "Not at boot: Crow's window warms sd-server when it opens (#300), else the first image call starts it (crow_core.image_server_start), and leaves the card for a clip (use_mode).",
    "video_server": {
     "_what": "ComfyUI headless (#340 Phase 0, v0.38.0 portable), started by Crow on the first animate_image and stopped after the clip (crow_core.use_mode); never at boot.",
     "binary": {

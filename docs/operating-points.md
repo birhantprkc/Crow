@@ -178,7 +178,7 @@ point `media-stack`.
 | Language model | `Qwen3.5-9B-Q8_0.gguf` with `mmproj-F16.gguf` on llama-server, port 8099, one slot |
 | Context | `-c 65536` — **not measured** for the 9B: crow-nest's dense default, until a run measures its VRAM beside sd-server |
 | Start | the boot window's fill assumes 15 s — **not measured**, the 27B GGUF line's figure |
-| Pictures | Qwen-Image 2.1 on sd-server with `--max-vram 7`, started on the first image call, never at boot |
+| Pictures | Qwen-Image 2.1 on sd-server with `--max-vram 7`, not started by the boot menu: Crow's window warms it when it opens (#300), else the first image call starts it |
 | Clips | LTX-2.5 distilled int8 on ComfyUI v0.38.0 portable, port 8188, started on the first `animate_image` and ended after the clip |
 | Mode switch | `use_mode`: for a clip, sd-server and the language model leave the card and ComfyUI starts; afterwards ComfyUI ends and the language model starts again from the boot's plan — also after an error, a stop or the 30-minute timeout |
 | Clip sizes | 1080p (1920x1088) or 1440p (2560x1408), 1 to 20 s at 24 fps; 4K is not offered |
@@ -211,10 +211,11 @@ five stills. Host RAM is machine-wide, of 63.4 GiB. Raw runs: `runs/340-ltx25-ph
 
 | open | |
 |---|---|
-| the 9B's start and its context of 65,536 | the figures above are a borrowed start and a default |
-| the 9B's VRAM beside sd-server at `--max-vram 7` | |
-| ComfyUI's boot time | `VIDEO_BOOT_WAIT` 300 s is an assumption |
-| the mode switch's own time | language model down, ComfyUI up, language model back |
+| the 9B's start and its context of 65,536 | the figures above are a borrowed start and a default; one run (2026-10-03): back 8 s after ComfyUI ended |
+| the 9B's VRAM beside sd-server at `--max-vram 7` | one run (2026-10-03): peak 21,864 of 32,579 MiB while making pictures |
+| ComfyUI's boot time | `VIDEO_BOOT_WAIT` 300 s is an assumption; one run (2026-10-03): answering 16 s after the card was free |
+| the mode switch's own time | one run (2026-10-03), a 5 s clip: card free 11:14:53, ComfyUI up 11:15:09, rendered in 73.3 s, the 9B back 11:16:32 |
+| prompt following | a small object can change while it is handled; Crow sends LTX the raw text where Lightricks' template enhances it first (#346) |
 | ComfyUI finding the LTX files through `extra_model_paths.yaml` | Phase 0 had them in `ComfyUI/models`; the file's format rests on ComfyUI's `utils/extra_config.py` |
 
 ---
