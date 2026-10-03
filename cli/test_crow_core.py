@@ -29619,3 +29619,82 @@ class TheVideoToolIsDeclaredTests(unittest.TestCase):
         for part in ("<working root>/videos/", "one continuous motion", "not in the still",
                      "sound"):
             self.assertIn(part, text)
+
+
+class TheClipReachesTheWindowTests(_AnimateCase):
+    """#340: the saved clip is announced as a video, never as an image --
+    the live check is "the MP4 plays at 1920x1080 in the window"."""
+
+    def setUp(self):
+        super().setUp()
+        crow_core.take_announced_videos()
+        self.addCleanup(crow_core.take_announced_videos)
+        crow_core.take_announced_images()
+        self.addCleanup(crow_core.take_announced_images)
+
+    def test_a_saved_clip_is_announced_once_with_its_job(self):
+        said = crow_core.tool_animate_image("still.png", "the crow tilts its head", seed=1)
+        self.assertTrue(said.startswith("saved videos/"), said)
+        made = crow_core.take_announced_videos()
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0]["source"], "animate_image")
+        self.assertEqual(made[0]["job"], self.states[0]["job"])
+        self.assertTrue(os.path.isabs(made[0]["path"]))
+        with open(made[0]["path"], "rb") as fh:
+            self.assertEqual(fh.read(), MP4_BYTES)
+        self.assertEqual(crow_core.take_announced_videos(), [], "taken exactly once")
+        self.assertEqual(crow_core.take_announced_images(), [], "a clip is no picture")
+
+    def test_a_failed_clip_announces_nothing(self):
+        self.history_error = "Allocation on device"
+        said = crow_core.tool_animate_image("still.png", "m")
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertEqual(crow_core.take_announced_videos(), [])
+
+
+class TheClipEventFollowsTheResultTests(TurnLoopCase):
+    """#340: through run_turn, `video_created` after the call's tool_result."""
+
+    def test_the_order_is_result_then_video(self):
+        work = os.path.join(self.dir, "work-clip")
+        os.makedirs(work, exist_ok=True)
+        clip = os.path.join(work, "c.mp4")
+
+        def fake(**_):
+            crow_core.announce_video(clip, "animate_image", "vid-1")
+            return "saved c.mp4"
+
+        class Recorder(_TurnRecorder):
+            def video_created(self, path, source, job=""):
+                self.log.append(("video", path, source, job))
+
+        events = Recorder()
+        with mock.patch.dict(crow_core.TOOL_IMPL, {"animate_image": fake}):
+            self.serve([_call_delta("animate_image",
+                                    json.dumps({"image": "s.png", "motion": "m"}))])
+            self.serve([{"content": "done"}])
+            self.turn(self.conversation("animate it"), events=events)
+        names = [e[0] for e in events.log]
+        self.assertIn("video", names, names)
+        self.assertLess(names.index("tool_result"), names.index("video"))
+        video = next(e for e in events.log if e[0] == "video")
+        self.assertEqual(video[1:], (clip, "animate_image", "vid-1"))
+        self.assertEqual(crow_core.take_announced_videos(), [])
+
+    def test_the_seam_has_the_event(self):
+        self.assertTrue(callable(crow_core.TurnEvents.video_created))
+        crow_core.TurnEvents().video_created("/x.mp4", "animate_image", "j")
+
+
+class VideoNotesKeepFactsTests(unittest.TestCase):
+    """#340: a clip's card comes back after a restart from its facts alone."""
+
+    def test_a_video_note_keeps_its_fields_and_drops_the_rest(self):
+        kept = crow_core.clean_notes([{
+            "k": "video", "at": 2, "t": "", "path": "/w/videos/a.mp4", "name": "a.mp4",
+            "w": 1920, "h": 1088, "bytes": 1642079, "source": "animate_image",
+            "job": "vid-1", "src": "data:video/mp4;base64,AAAA", "mtime": 3.5}])
+        self.assertEqual(kept, [{
+            "k": "video", "at": 2, "t": "", "path": "/w/videos/a.mp4", "name": "a.mp4",
+            "w": 1920, "h": 1088, "bytes": 1642079, "source": "animate_image",
+            "job": "vid-1"}])

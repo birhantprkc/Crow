@@ -838,6 +838,62 @@ def image_card(path: str) -> "tuple[dict | None, str]":
     return card, ""
 
 
+# #340. THE CLIPS THE WINDOW PLAYS, by extension and by the bytes that prove
+# it: an ISO-BMFF `ftyp` box at offset 4, or WebM's EBML header. ComfyUI's
+# SaveVideo writes the first.
+VIDEO_TYPES = {".mp4": "video/mp4", ".webm": "video/webm"}
+# A BOUND FOR THE BRIDGE, NOT FOR THE DISK: on Windows and on a phone the clip
+# travels as a data URL (`Api.video_src`). The largest Phase 0 clip, 20 s at
+# 1920x1088, was 11,584,769 B (2026-10-02, ComfyUI/output/340).
+VIDEO_MAX_BYTES = 64 * 1024 * 1024
+
+
+def video_file_card(path: str) -> "tuple[dict | None, str]":
+    """`image_file_card` for a clip: (card, "") or (None, why).
+
+    No size from the header -- the job's progress carried the final one, and
+    the page reads the stream's own once it has loaded.
+    """
+    if not isinstance(path, str) or not path or "\0" in path:
+        return None, "no path"
+    full = os.path.abspath(path)
+    name = os.path.basename(full)
+    if not os.path.isfile(full):
+        return None, "no longer on disk: " + full
+    mime = VIDEO_TYPES.get(os.path.splitext(full)[1].lower())
+    if mime is None:
+        return None, "not a video type Crow plays: " + name
+    try:
+        size = os.path.getsize(full)
+        mtime = os.path.getmtime(full)
+        with open(full, "rb") as fh:
+            head = fh.read(16)
+    except OSError as exc:
+        return None, "cannot read %s: %s" % (name, exc)
+    if not size:
+        return None, "empty: " + name
+    if size > VIDEO_MAX_BYTES:
+        return None, "%s is over %d MiB" % (name, VIDEO_MAX_BYTES // (1024 * 1024))
+    ok = (head[4:8] == b"ftyp" if mime == "video/mp4"
+          else head[:4] == b"\x1a\x45\xdf\xa3")
+    if not ok:
+        return None, "its bytes are not a %s video: %s" % (
+            mime.split("/")[1].upper(), name)
+    return {"path": full, "name": name, "w": 0, "h": 0, "bytes": size,
+            "mtime": mtime, "mime": mime}, ""
+
+
+def video_card(path: str) -> "tuple[dict | None, str]":
+    """`video_file_card` plus `image_place_ok`, as `image_card` asks it."""
+    card, why = video_file_card(path)
+    if card is None:
+        return None, why
+    if not image_place_ok(card["path"]):
+        return None, ("outside the working area and every approved path: "
+                      + card["path"])
+    return card, ""
+
+
 def image_thumb_png(path: str, edge: int = IMAGE_THUMB_EDGE) -> "bytes | None":
     """A PNG no longer than `edge` on its long side, or None.
 
@@ -2887,6 +2943,13 @@ figure.gen .genbtn img{display:block;width:100%;height:auto;border-radius:8px;
 figure.gen .gencap{font-size:11.5px;color:var(--dim);margin-top:5px}
 figure.gen.gone .gentile{animation:none}
 figure.gen.gone .gencap{color:var(--dimmer)}
+/* #340. A CLIP PLAYS WHERE ITS TILE STOOD, wider than a picture: the
+   player's own controls (fullscreen among them) need the room. */
+.turn.gen figure.vid{max-width:min(720px,100%)}
+figure.gen video{display:block;width:100%;height:auto;border-radius:8px;
+  border:1px solid var(--bevel);background:var(--raised)}
+figure.gen .genact{margin-left:8px;padding:0;border:0;background:none;
+  color:var(--accent);font:inherit;cursor:pointer}
 
 /* #311. THE LIGHTBOX. A native modal <dialog>: showModal makes the page
    behind it inert (so Esc here can never stop a running turn), Esc closes
@@ -4312,7 +4375,8 @@ function genLine(e){
   const ph=String((e && e.phase) || "");
   if(ph==="error") return "error — "+String(e.line || "the job failed");
   if(ph==="stopped") return "stopped — the server finishes it in the background";
-  if(ph==="interrupted") return "interrupted — Crow ended before the image was saved";
+  if(ph==="interrupted") return "interrupted — Crow ended before the "
+    +(e.kind==="animate" ? "clip" : "image")+" was saved";
   if(ph==="refused") return String(e.line || "saved, not shown here");
   const parts=[];
   if(e.stage) parts.push("stage "+e.stage);
@@ -4491,7 +4555,8 @@ const crow = {
     f.classList.toggle("still", GEN_STILL.indexOf(ph)!==-1);
     f.querySelector(".genline").textContent=text;
     tile.setAttribute("aria-label",
-      (e.kind==="edit" ? "Editing an image: " : "Making an image: ")+text);
+      (e.kind==="edit" ? "Editing an image: "
+       : e.kind==="animate" ? "Making a video: " : "Making an image: ")+text);
   },
 
   // THE PICTURE. Swapped IN PLACE for its job's tile when there is one
@@ -4543,6 +4608,50 @@ const crow = {
       b.replaceWith(tile); }
     const cap=f.querySelector(".gencap");
     if(cap) cap.textContent=(cap.dataset.base ? cap.dataset.base+" · " : "")+why;
+  },
+
+  // #340. THE CLIP, a <video> with the player's own controls, swapped in
+  // for its job's tile like a picture. The caption's size is the job's
+  // until the stream has loaded, then the stream's own -- the live check
+  // asks what actually plays, not what was ordered.
+  vidCard(e){
+    const job=String(e.job || ""), path=String(e.path || ""), name=String(e.name || "video");
+    const f=document.createElement("figure"); f.className="gen card vid";
+    f.dataset.path=path; if(job) f.dataset.job=job;
+    const v=document.createElement("video");
+    v.controls=true; v.preload="metadata"; v.playsInline=true;
+    v.setAttribute("aria-label", name);
+    if(e.w>0 && e.h>0) v.style.aspectRatio=e.w+" / "+e.h;
+    const cap=document.createElement("figcaption"); cap.className="gencap";
+    const said=document.createElement("span");
+    const base=w=>[name, w, genSize(e.bytes)].filter(Boolean).join(" · ");
+    said.textContent=cap.dataset.base=base(e.w>0 && e.h>0 ? e.w+"×"+e.h : "");
+    cap.appendChild(said);
+    if(!window.CROW_REMOTE){
+      const r=document.createElement("button"); r.type="button"; r.className="genact";
+      r.textContent="Show in folder";
+      r.onclick=()=>pywebview.api.video_reveal(path).then(why=>{
+        if(why) said.textContent=cap.dataset.base+" · "+why; });
+      cap.appendChild(r); }
+    v.addEventListener("loadedmetadata", ()=>{
+      if(!v.videoWidth || !v.videoHeight) return;
+      v.style.aspectRatio=v.videoWidth+" / "+v.videoHeight;
+      said.textContent=cap.dataset.base=base(v.videoWidth+"×"+v.videoHeight); });
+    f.append(v, cap);
+    const old=job ? this.gens[job] : null;
+    if(old && old.isConnected) old.replaceWith(f);
+    else this.turn("gen").appendChild(f);
+    if(job) this.gens[job]=f;
+    const gone=()=>{ f.classList.add("gone"); v.remove();
+      said.textContent=cap.dataset.base+" · no longer on disk"; };
+    // A DATA URL BECOMES A BLOB: the player seeks in it, and the element
+    // does not carry megabytes of base64 in its attribute.
+    pywebview.api.video_src(path).then(u=>{
+      if(!u){ gone(); return; }
+      if(!u.startsWith("data:")){ v.src=u; return; }
+      return fetch(u).then(r=>r.blob()).then(b=>{ v.src=URL.createObjectURL(b); });
+    }).catch(gone);
+    this.bottom();
   },
 
   // #311. THE LIGHTBOX, built once and on first use. Every label is
@@ -8601,6 +8710,7 @@ const crow = {
       // #308 / #311: an image job's tile, and the picture that replaces it.
       case "imgjob": this.genJob(e); break;
       case "image": this.genCard(e); break;
+      case "video": this.vidCard(e); break;
       // #227: the pane moved (a link, a redirect); #201: a link to open here.
       case "brnav": this.brNav(e.url, e.how); break;
       case "bropen": this.brOpen(e.url); break;
@@ -9066,6 +9176,8 @@ REMOTE_PROXIED = frozenset({
     # #311: the phone sees the previews, the lightbox and its (i) panel --
     # `image_full` answers a phone with the bytes, never a `file://` URL.
     "image_thumb", "image_full", "image_info",
+    # #340: the player's source -- the bytes for a phone, like `image_full`.
+    "video_src",
 })
 # WAS DAS TELEFON STATTDESSEN TUT, je Schluessel ein Satz. Die Seite liest
 # die Schluessel (`__REMOTE_BOUND__`), dieser Text ist fuer Menschen.
@@ -9121,6 +9233,7 @@ REMOTE_DESKTOP_BOUND = {
     "image_reveal": "desktop", "image_copy": "desktop",
     "image_open": "desktop", "image_trash": "desktop",
     "image_save_as": "download",
+    "video_reveal": "desktop",
 }
 # WAS EIN TELEFON UEBER HTTP RUFEN DARF: das Proxierte plus die gebundenen,
 # deren Ersatz doch auf dem Desktop landet. Alles andere beantwortet der
@@ -10872,6 +10985,31 @@ class Turn(TurnEvents):
                    "mtime": card["mtime"], "source": str(source or ""),
                    "job": job})
 
+    def video_created(self, path: str, source: str, job: str = "") -> None:
+        """#340. A tool wrote a clip: it takes its job's tile as a player.
+
+        `image_created`'s rules, `video_card`'s test: a refused clip says
+        so on its tile, and its size is the job's until the page has read
+        the stream's own.
+        """
+        card, why = video_card(path)
+        job = str(job or "")
+        size = self.__dict__.get("_imgjob_size", {}).get(job, (0, 0, "animate"))
+        if card is None:
+            line = "saved, not shown here: " + why
+            if job:
+                self._put({"k": "imgjob", "job": job, "kind": size[2],
+                           "phase": "refused", "stage": "", "i": None,
+                           "n": None, "eta_s": None, "line": line,
+                           "w": size[0], "h": size[1]})
+            else:
+                self._put({"k": "note", "t": "video " + line})
+            return
+        self._put({"k": "video", "path": card["path"], "name": card["name"],
+                   "w": size[0], "h": size[1], "bytes": card["bytes"],
+                   "mtime": card["mtime"], "source": str(source or ""),
+                   "job": job})
+
     @staticmethod
     def _clock() -> float:
         """The throttle's clock; a test replaces it on the instance."""
@@ -11839,7 +11977,7 @@ class Api:
         # #311. EIN BILD IM CHAT IST AB HIER ANGEKUENDIGT -- auch aus einem
         # Schnappschuss oder einem Replay: ein Telefon, das einen anderen Chat
         # ansieht, fragt nach dessen Vorschauen, und die muessen es geben.
-        if message.get("k") == "image" and message.get("path"):
+        if message.get("k") in ("image", "video") and message.get("path"):
             self._announce_image(message)
         # #249: `state_snapshot` sammelt, statt zuzustellen. Vor allem anderen,
         # damit ein Schnappschuss weder Kostenzeilen noch Notizen mitschreibt.
@@ -11893,7 +12031,7 @@ class Api:
             del self._notes[:-crow_core.SESSION_NOTES_MAX]
         # #308. DIE KACHEL EINES BILDJOBS STEHT IM BAND, EINMAL PRO JOB: jede
         # Fortschrittszeile aktualisiert dieselbe Marke, statt 40 anzuhaengen.
-        if not self._replaying and message.get("k") in ("imgjob", "image"):
+        if not self._replaying and message.get("k") in ("imgjob", "image", "video"):
             self._note_imgjob(message)
         kind = message.get("k")
         if kind in _STICKY_KINDS:
@@ -16002,7 +16140,7 @@ class Api:
         job = str(message.get("job") or "")
         if not job:
             return
-        if message.get("k") == "image":
+        if message.get("k") in ("image", "video"):
             self._imgjobs_running.discard(job)
             return
         if message.get("phase") in IMGJOB_TERMINAL | {"refused"}:
@@ -16226,6 +16364,57 @@ class Api:
             return why
         for key in [k for k in self._thumbs if k[0] == card["path"]]:
             self._thumbs.pop(key, None)
+        return ""
+
+    # -- #340: the clips in the chat --
+
+    def _video_vet(self, path) -> "tuple[dict | None, str]":
+        """`_image_vet` for a clip: announced by this chat, and still a
+        video by its bytes."""
+        if not isinstance(path, str) or not path or "\0" in path:
+            return None, "no video"
+        full = os.path.abspath(path)
+        seen = self._images.get(full)
+        if seen is None:
+            return None, "not a video this chat showed: " + full
+        card, why = video_file_card(full)
+        if card is None:
+            return None, why
+        card.update(seen)
+        return card, ""
+
+    def video_src(self, path: str) -> str:
+        """#340: the player's source, "" when refused -- `image_full`'s road.
+
+        A `file://` URL for the GTK desktop; the bytes as a data URL for a
+        phone and for WebView2, which refuses `file://` in a page from
+        NavigateToString. Measured 2026-10-02: a 5 s clip at 1920x1088 is
+        1.6-2.4 MB, the size of the PNGs that already travel this way.
+        """
+        card, _why = self._video_vet(path)
+        if card is None:
+            return ""
+        if _client() != DESKTOP or crow_platform.IS_WINDOWS:
+            try:
+                return data_url(card["path"], card["mime"])
+            except OSError:
+                return ""
+        import pathlib
+        return pathlib.Path(card["path"]).as_uri()
+
+    def video_reveal(self, path: str) -> str:
+        """#340: `image_reveal` for a clip -- the folder, the file selected."""
+        card, why = self._video_vet(path)
+        if card is None:
+            return why
+        if show_in_file_manager(card["path"]):
+            return ""
+        try:
+            subprocess.Popen(crow_platform.reveal_command(card["path"], False),
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError:
+            return "no file manager took " + card["path"]
         return ""
 
     def update_check(self) -> dict:
@@ -18896,7 +19085,7 @@ def _replay_marks(notes: "list | None", running) -> list:
     marks = sorted((n for n in (notes or []) if isinstance(n, dict)),
                    key=lambda n: int(n.get("at") or 0))
     pictured = {n.get("job") for n in marks
-                if n.get("k") == "image" and n.get("job")}
+                if n.get("k") in ("image", "video") and n.get("job")}
     out = []
     for mark in marks:
         if mark.get("k") == "imgjob":

@@ -2718,10 +2718,13 @@ SESSION_NOTES_KEY = "notes"
 # (SESSION_NOTE_FIELDS): an 8 MB PNG in session.json would be read and
 # rewritten on every save. #308: "imgjob" is the fifth -- the window keeps one
 # mark per image job, updated as it runs, so a restart draws a job that never
-# finished as interrupted instead of a running animation.
-SESSION_NOTE_KINDS = ("note", "memory", "alarm", "image", "imgjob")
+# finished as interrupted instead of a running animation. #340: "video" is
+# the sixth -- a clip `animate_image` made, the image card's facts again.
+SESSION_NOTE_KINDS = ("note", "memory", "alarm", "image", "imgjob", "video")
 SESSION_NOTE_FIELDS = {
     "image": {"path": str, "name": str, "w": int, "h": int, "bytes": int,
+              "source": str, "job": str},
+    "video": {"path": str, "name": str, "w": int, "h": int, "bytes": int,
               "source": str, "job": str},
     "imgjob": {"job": str, "kind": str, "phase": str, "stage": str, "w": int,
                "h": int, "line": str},
@@ -12302,6 +12305,24 @@ def take_announced_images() -> "list[dict]":
     return ride
 
 
+def announce_video(path: str, source: str, job: str = "") -> None:
+    """#340. A tool wrote a clip the user should see -- `announce_image`'s
+    ride for `video_created`, kept apart so a picture never reaches a surface
+    as a clip or the other way round."""
+    ride = getattr(_TURN_LOCAL, "videos", None)
+    if ride is None:
+        ride = _TURN_LOCAL.videos = []
+    ride.append({"path": os.path.abspath(path), "source": str(source),
+                 "job": str(job or "")})
+
+
+def take_announced_videos() -> "list[dict]":
+    """What this thread's calls announced as clips since the last take."""
+    ride = getattr(_TURN_LOCAL, "videos", None) or []
+    _TURN_LOCAL.videos = []
+    return ride
+
+
 def image_model_dir() -> str:
     """Where Qwen-Image 2.1 lies: $CROW_IMAGE_MODEL_DIR, else beside the text
     models under `crow_platform.models_dir()`.
@@ -13777,6 +13798,7 @@ def tool_animate_image(image: str = "", motion: str = "", seconds=None,
     except OSError as exc:
         return "error: the clip could not be saved: %s%s" % (exc, after)
     report_progress(**dict(base, phase="saved", i=None, n=None, eta_s=0.0, line=saved))
+    announce_video(saved, "animate_image", base["job"])
     shown = saved
     root = get_root()
     if root and _inside(root, saved):
@@ -25372,6 +25394,11 @@ class TurnEvents:
         call's `tool_result`, once per picture, with the absolute path, the
         tool that made it and the `job` its `tool_progress` events carried."""
 
+    def video_created(self, path: str, source: str, job: str = "") -> None:
+        """#340. A tool saved a clip the user should see -- `image_created`'s
+        twin, fired after the call's `tool_result`. The live check: "the MP4
+        plays at 1920x1080 in the window"."""
+
     def tools_finished(self) -> None:
         """Every call of this round has run and been appended."""
 
@@ -26189,6 +26216,9 @@ def run_turn(
             # tile before the picture lands where it belongs.
             for made in take_announced_images():
                 getattr(events, "image_created", lambda *a: None)(
+                    made["path"], made["source"], made["job"])
+            for made in take_announced_videos():
+                getattr(events, "video_created", lambda *a: None)(
                     made["path"], made["source"], made["job"])
             # #98: THE USER HEARS THIS FROM CROW, NOT FROM THE MODEL'S APOLOGY.
             # In the measured turn the only notice that the working area had been
