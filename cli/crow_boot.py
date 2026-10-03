@@ -422,6 +422,11 @@ def plan_json(stack: dict, point_id: str, install: str, models: str) -> dict:
         "crow_env": plan["crow_env"],
         "files": files,
         "derived": derived,
+        # #348: the archive the installer's runtime step unpacks and deletes,
+        # by file id -- consumed like a derived job's inputs, so the check asks
+        # for the unpacked program (video.binary) instead.
+        "runtime_archives": [a for a in [((((point.get("video_server") or {}).get("runtime")
+                                             or {}).get(PLATFORM_KEY)) or {}).get("file")] if a],
     }
 
 
