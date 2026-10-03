@@ -815,10 +815,13 @@ class TheVideoServerIsPlannedNotStartedTests(BootCase):
     def test_the_plan_json_names_the_runtime_archive_the_unpack_consumes(self):
         """#348: CrowSetup's check asked for the ComfyUI 7z the runtime step had
         deleted. The plan names it, the way `derived` names consumed inputs."""
-        doc = crow_boot.plan_json(STACK, "media-stack", self.install, self.models)
+        # The Media Stack is Windows-only: planned as on Windows on every host.
+        with mock.patch.object(crow_boot, "PLATFORM_KEY", "windows"):
+            doc = crow_boot.plan_json(STACK, "media-stack", self.install, self.models)
+            plain = crow_boot.plan_json(STACK, "27b", self.install, self.models)
         self.assertEqual(doc["runtime_archives"], ["comfyui-portable"])
         self.assertIn("comfyui-portable", [f["id"] for f in doc["files"]])
-        self.assertEqual(crow_boot.plan_json(STACK, "27b", self.install, self.models)["runtime_archives"], [])
+        self.assertEqual(plain["runtime_archives"], [])
 
     def test_a_start_spawns_only_the_engine(self):
         plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
