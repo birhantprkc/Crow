@@ -84,7 +84,7 @@ FEATURES = [
  ("Subagents", "delegate, subtasks, collect: up to 16 at once", "ok"),
  ("Browser panel", "tabs and an address bar, render_page for the model", "gold"),
  ("Vision", "read_image, a drop, a paste; Flash-Next and the 27B", "sub"),
- ("Images", "generate_image, edit_image: Qwen-Image 2.1, local", "ok"),
+ ("Images", "Qwen-Image 2.1 pictures, LTX-2.5 clips, local", "ok"),
  ("Lightbox", "folder, download, size in MB; on the phone too", "gold"),
  ("Session search", "SQLite FTS5 over every archived conversation", "sub"),
  ("MCP", "stdio and Streamable HTTP, OAuth, per-tool classes", "ok"),
@@ -107,7 +107,7 @@ TOOLS = [
  ("Web", "web_search · fetch_url"),
  ("Browser", "render_page"),
  ("Vision", "read_image · judge"),
- ("Images", "generate_image · edit_image"),
+ ("Images", "generate_image · edit_image · animate_image"),
  ("Memory", "memory · skill · session_search"),
  ("Goals", "goal_set · goal_step"),
  ("Subagents", "delegate · subtasks · collect"),
@@ -122,20 +122,22 @@ if sorted(_listed) != sorted(BUILTIN):
 IMAGES = [("generate_image, warm", "2752×1536", "155.2 s"),
           ("generate_image, cold", "2752×1536", "175.3 s"),
           ("edit_image, 2 stages", "1 MP edit + full-size redraw", "105.7 + 55.3 s"),
-          ("generate_image, Windows", "2752×1536", "218.1 s")]
+          ("generate_image, Windows", "2752×1536", "218.1 s"),
+          ("animate_image, 5 s clip", "1920×1088, Media Stack", "65.6 s")]
 IMAGES_SUB = "Qwen-Image 2.1 beside crow-nest's 27B"
 IMAGES_TEXT = ("In the chat an animated square in the theme's colours stands where the picture will be, "
                "then turns into it.")
-IMAGES_NOTE = ("RTX 5090 beside the 27B serve, 40 steps; Linux 2026-09-27, Windows 2026-09-28. "
-               "Source: docs/reference/tools.md")
+IMAGES_NOTE = ("RTX 5090; pictures beside the 27B, 40 steps, 2026-09-27/28; the clip: median of 5, 2026-10-02. "
+               "Source: docs/")
 
 OPS = [("Default, Windows", "CNQ4.5-M NVFP4 container", "45.1", "crow-nest"),
        ("Default, Linux", "CNQ4.5-M NVFP4 container", "36.8*", "crow-nest"),
        ("Second, Windows", "Qwen3.8-Flash-Next UD-Q2_K_XL", "41.76", "llama.cpp"),
        ("Second, Linux", "Qwen3.8-Flash-Next UD-Q2_K_XL", "41.8", "llama.cpp"),
-       ("Third", "Qwen3.8-27B UD-Q4_K_XL", "123.05", "llama.cpp")]
+       ("Third", "Qwen3.8-27B UD-Q4_K_XL", "123.05", "llama.cpp"),
+       ("Media Stack, Windows", "Qwen3.5-9B Q8_0 + Qwen-Image + LTX-2.5", "—", "llama.cpp")]
 STATS_NOTE = "Decode and prefill: crow-nest v0.3.0, CNQ4.5-M NVFP4, one RTX 5090, Windows, 2026-09-13/14. Conditions: docs/operating-points.md"
-OPS_NOTE = "* at 16k context. crow-nest: Windows 2026-09-13/14, Linux 2026-09-17. llama.cpp: Windows 2026-09-01 (#182), Linux 2026-09-16."
+OPS_NOTE = "* at 16k context. — not measured. crow-nest: Windows 2026-09-13/14, Linux 2026-09-17. llama.cpp: Windows 2026-09-01 (#182), Linux 2026-09-16."
 INTRO_LINES = (
     f"A local model at 200k context with {NTOOLS} tools and MCP, persistent memory, its own skills,",
     "a browser panel, eyes, and subagents it can send out while it keeps working.",
