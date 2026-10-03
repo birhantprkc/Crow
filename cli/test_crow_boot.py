@@ -483,7 +483,9 @@ class TheOptionalLlamaLinesTests(BootCase):
         self.assertIsNone(self.contract())
 
     def test_the_menu_numbers_them_after_the_baseline_and_starts_them(self):
-        answers = iter(["5", "0"])
+        # #340: the Media Stack is a baseline row on Windows only
+        here = sum(1 for p in STACK["points"] if crow_boot.runs_here(p))
+        answers = iter([str(2 + here), "0"])
         popen = FakePopen()
         code = self.boot(read=lambda prompt="": next(answers), popen=popen,
                          get=lambda url, timeout: (200, b"{}"),
@@ -491,7 +493,7 @@ class TheOptionalLlamaLinesTests(BootCase):
         self.assertEqual(code, crow_boot.EXIT_OK)
         self.assertEqual(popen.calls[0][0][-1], "8082")
         rows = self.boot(llama=FakeLlama([LLAMA_27B])).entries()
-        self.assertEqual([r[0] for r in rows if r[4] and r[4][0] == "stop"], ["6"])
+        self.assertEqual([r[0] for r in rows if r[4] and r[4][0] == "stop"], [str(3 + here)])
 
 
 class TheLandedScreenReturnsToTheMenuTests(BootCase):

@@ -157,6 +157,10 @@ pub struct PointBytes {
 pub struct HostRam {
     /// Host RAM the engine pins at most; null for the dense points.
     pub pinned_max_gib: Option<u64>,
+    /// Host RAM the point's peak was measured at, outside the engine (#340: the
+    /// Media Stack's ComfyUI during a 20 s clip). Like a pin, it needs 64 GB.
+    #[serde(default)]
+    pub peak_gib: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

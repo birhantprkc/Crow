@@ -29140,10 +29140,7 @@ class TheContractCarriesTheVideoServerTests(unittest.TestCase):
         self.alive = {os.getpid()}
         for target, attr, value in (
                 (crow_platform, "config_dir", lambda: self.dir),
-                (crow_platform, "pid_alive", lambda pid: pid in self.alive),
-                # media-stack joins the list with its stack.json entry (step 3)
-                (crow_core, "ACTIVE_POINTS",
-                 crow_core.ACTIVE_POINTS + (crow_core.ACTIVE_POINT_MEDIA,))):
+                (crow_platform, "pid_alive", lambda pid: pid in self.alive)):
             patcher = mock.patch.object(target, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -29312,9 +29309,7 @@ class TheModeSwitchTests(unittest.TestCase):
                 (crow_core.subprocess, "Popen", popen),
                 (crow_core, "VIDEO_POLL_S", 0.005),
                 (crow_core, "_VIDEO_PROC", None),
-                (crow_core, "_IMAGE_PROC", None),
-                (crow_core, "ACTIVE_POINTS",
-                 crow_core.ACTIVE_POINTS + (crow_core.ACTIVE_POINT_MEDIA,))):
+                (crow_core, "_IMAGE_PROC", None)):
             patcher = mock.patch.object(target, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)

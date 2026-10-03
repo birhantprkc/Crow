@@ -182,6 +182,7 @@ ICONS = {
     "flash-next": ("\U0001F9E0", "-"),
     "27b": ("⚡", "-"),
     "image-stack": ("\U0001F3A8", "-"),
+    "media-stack": ("\U0001F3AC", "-"),
     "optional": ("\U0001F999", "-"),
     "stop": ("\U0001F6D1", "x"),
     "quit": ("\U0001F44B", "q"),

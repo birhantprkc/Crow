@@ -427,6 +427,7 @@ class TheWindowsLine(Base):
             "flash-next": "200k context. Great for coding and vision.",
             "27b": "128k context. Great speed, coding and vision.",
             "image-stack": "27B with Qwen-Image 2.1. Create pictures.",
+            "media-stack": "Qwen3.5-9B with Qwen-Image 2.1 and LTX-2.5. Create pictures and videos.",
         })
 
     def test_a_point_without_one(self):
@@ -643,7 +644,7 @@ class PointLists(unittest.TestCase):
         self.assertEqual(hit, {label for label, _, _, rule, *_ in C.POINT_LISTS if rule != "subset"})
 
     def test_cli_points_without_a_point(self):
-        self.edit("installer/app/src/cli.rs", '"27b", "image-stack"]', '"27b"]')
+        self.edit("installer/app/src/cli.rs", '"image-stack", "media-stack"]', '"image-stack"]')
         self.assertIn("cli.rs POINTS", "\n".join(self.problems()))
 
     def test_boot_icon_missing(self):
@@ -661,6 +662,57 @@ class PointLists(unittest.TestCase):
     def test_a_list_that_moved(self):
         self.edit("installer/ui/index.html", "var DESC = {", "var DESCRIPTIONS = {")
         self.assertTrue(any("setup page DESC: list not found" in p for p in self.problems()))
+
+
+class OnlineToken(unittest.TestCase):
+    """#340: --online measures a gated repo (Lightricks/LTX-2.5) with the user's
+    Hugging Face token; Hugging Face hides an LFS sha256 without it."""
+
+    def test_the_token_is_found_where_huggingface_hub_looks(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".cache", "huggingface"))
+            with open(os.path.join(home, ".cache", "huggingface", "token"), "w") as fh:
+                fh.write("hf_file\n")
+            self.assertEqual(C.hf_token({}, home), "hf_file")
+            self.assertEqual(C.hf_token({"HUGGING_FACE_HUB_TOKEN": "hf_old"}, home), "hf_old")
+            self.assertEqual(C.hf_token({"HF_TOKEN": " hf_env ", "HUGGING_FACE_HUB_TOKEN": "x"}, home), "hf_env")
+            self.assertIsNone(C.hf_token({}, os.path.join(home, "nobody")))
+
+    def test_only_hugging_face_gets_the_token(self):
+        seen = []
+
+        class Resp:
+            headers = {}
+
+            def read(self, *a):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=0):
+            seen.append((req.full_url, req.get_header("Authorization")))
+            return Resp()
+
+        with mock.patch.object(C, "hf_token", return_value="hf_x"), \
+             mock.patch.object(C.urllib.request, "urlopen", fake_urlopen):
+            C.fetch("https://huggingface.co/api/models/a/b")
+            C.fetch("https://api.github.com/repos/a/b")
+            C.fetch("https://huggingface.co.evil.example/x")
+        self.assertEqual(seen, [("https://huggingface.co/api/models/a/b", "Bearer hf_x"),
+                                ("https://api.github.com/repos/a/b", None),
+                                ("https://huggingface.co.evil.example/x", None)])
+
+    def test_a_hidden_sha256_is_named_not_compared(self):
+        hub = C.Hub()
+        hub.trees[("Lightricks/LTX-2.5", "r")] = {
+            "vae/v.safetensors": {"size": 5, "lfs": {"oid": "*" * 64, "size": 5}}}
+        with self.assertRaises(LookupError) as cm:
+            hub.measure("Lightricks/LTX-2.5", "r", "vae/v.safetensors")
+        self.assertIn("HF_TOKEN", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -70,7 +70,7 @@ REPO = os.path.dirname(HERE)
 MANIFEST = os.path.join(REPO, "manifests", "stack.json")
 
 SCHEMA = "crow-stack/1"
-POINT_IDS = ("flash-next", "27b", "image-stack")
+POINT_IDS = ("flash-next", "27b", "image-stack", "media-stack")
 # engine.kind: crow-nest's serve (the default, a CNQ container in CROW_CNQ) or
 # llama.cpp's llama-server (a GGUF given with -m), #340.
 ENGINE_KINDS = ("serve", "llama-server")
@@ -663,12 +663,38 @@ def check_crow_files(doc) -> "list[str]":
 
 # ---- online ----
 
+def hf_token(env=None, home=None):
+    """#340: the user's Hugging Face token, where huggingface_hub 1.21 reads it:
+    HF_TOKEN, HUGGING_FACE_HUB_TOKEN, then the file at HF_TOKEN_PATH, else
+    $HF_HOME/token, else ${XDG_CACHE_HOME:-~/.cache}/huggingface/token. The
+    installer's fetch.rs find_hf_token reads the same places."""
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if (env.get(key) or "").strip():
+            return env[key].strip()
+    path = env.get("HF_TOKEN_PATH") or os.path.join(
+        env.get("HF_HOME") or os.path.join(env.get("XDG_CACHE_HOME") or os.path.join(home, ".cache"),
+                                           "huggingface"), "token")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
 def fetch(url: str, limit: int = 0, tries: int = 16):
-    """(body, headers); Hugging Face resets connections, so retry with pauses."""
+    """(body, headers); Hugging Face resets connections, so retry with pauses.
+    A token goes to https://huggingface.co only (a gated repo hides its sha256)."""
     last = None
+    headers = {"User-Agent": "crow-check-stack"}
+    if url.startswith(HF + "/"):
+        token = hf_token()
+        if token:
+            headers["Authorization"] = "Bearer " + token
     for i in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "crow-check-stack"})
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=60) as r:
                 body = r.read(limit + 1) if limit else r.read()
                 if limit and len(body) > limit:
@@ -718,6 +744,9 @@ class Hub:
         if e is None:
             raise LookupError("%s@%s has no %s" % (repo, rev[:12], path))
         if e.get("lfs"):
+            if not HEX64.match(e["lfs"]["oid"] or ""):
+                raise LookupError("%s@%s hides the sha256 of %s (a gated repo): set HF_TOKEN or log in "
+                                  "with the Hugging Face CLI after accepting its licence" % (repo, rev[:12], path))
             return e["size"], e["lfs"]["oid"]
         body, _ = fetch("%s/%s/resolve/%s/%s" % (HF, repo, rev, path), limit=limit)
         return len(body), hashlib.sha256(body).hexdigest()

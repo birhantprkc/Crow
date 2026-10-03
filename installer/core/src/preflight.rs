@@ -10,7 +10,8 @@
 //!   With a hard block, `blocked` stays empty: the sentence says it once.
 //! - per point, at most one reason, checked in this order:
 //!   VRAM below 32 GB (every point; RTX 5090 = 32,607 MiB), host RAM below 64 GB
-//!   for a point whose stack.json `preflight.host_ram.pinned_max_gib` is set
+//!   for a point whose stack.json `preflight.host_ram.pinned_max_gib` (or,
+//!   #340, `peak_gib`) is set
 //!   (Flash-Next pins up to 46 GiB), free disk below the point's own
 //!   `preflight.disk_bytes` (files + derived, the peak during conversion).
 //! - GB in sentences is GiB, as Explorer shows it; needs round up, free space
@@ -138,7 +139,9 @@ pub fn verdicts_with_disk(facts: &Facts, stack: &Stack, disk_need: &dyn Fn(&crat
             let vram = gpu.and_then(|g| g.vram_mib);
             let reason = if let Some(mib) = vram.filter(|m| *m < VRAM_FLOOR_MIB) {
                 Some(format!("Needs {VRAM_NEED_GB} GB of VRAM. This GPU has {} GB.", mib.div_ceil(1024)))
-            } else if p.preflight.host_ram.pinned_max_gib.is_some() && facts.ram_bytes < RAM_FLOOR_BYTES {
+            } else if (p.preflight.host_ram.pinned_max_gib.is_some() || p.preflight.host_ram.peak_gib.is_some())
+                && facts.ram_bytes < RAM_FLOOR_BYTES
+            {
                 Some(format!("Needs {RAM_NEED_GB} GB RAM. This machine has {} GB.", ceil_gib(facts.ram_bytes)))
             } else if facts.disk_free_bytes < disk_need(p) {
                 Some(format!(

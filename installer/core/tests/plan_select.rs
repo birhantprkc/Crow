@@ -273,8 +273,8 @@ fn unknown_point_is_an_error_and_a_repeated_one_is_not() {
 #[test]
 fn embedded_stack_parses_with_its_crow_files() {
     let s = Stack::embedded();
-    assert_eq!(s.points.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["flash-next", "27b", "image-stack"]);
-    assert_eq!(s.files.len(), 26);
+    assert_eq!(s.points.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["flash-next", "27b", "image-stack", "media-stack"]);
+    assert_eq!(s.files.len(), 36);
     assert_eq!(s.crow_files.len(), 4);
     assert_eq!(s.crow_files.iter().map(|f| f.bytes).sum::<u64>(), WHISPER);
     assert!(Stack::parse("{").is_err());

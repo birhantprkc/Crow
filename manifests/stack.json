@@ -36,6 +36,21 @@
    "show_at_install": true,
    "text_file": "qi-license",
    "summary": "Research or evaluation purposes only. Commercial use needs a separate licence from Qwen (model-business@notice.qwencloud.com). Crow ships no Qwen-Image weights; the installer fetches them from Qwen/Qwen-Image-2.1."
+  },
+  "ltx-2.x-community": {
+   "name": "LTX-2.x Community License Agreement",
+   "covers": "LTX-2.5 weights",
+   "non_commercial": false,
+   "show_at_install": true,
+   "text_file": "lx-license",
+   "summary": "Use, modify and distribute under the Agreement, its Attachment A and the Acceptable Use Policy; entities with US$10M or more annual revenue need a paid licence. Crow ships no LTX weights: the installer fetches them from Lightricks/LTX-2.5 with the user's own Hugging Face token, after the user accepted the licence there."
+  },
+  "gpl-3.0": {
+   "name": "GNU General Public License v3.0",
+   "non_commercial": false,
+   "show_at_install": false,
+   "text_file": "comfyui-license",
+   "summary": "ComfyUI's licence. Crow does not redistribute ComfyUI: the installer fetches ComfyUI's own portable release and unpacks it."
   }
  },
  "files": [
@@ -384,6 +399,145 @@
    "status": "upstream",
    "license": "qwen-research",
    "role": "weights"
+  },
+  {
+   "id": "ms-model",
+   "repo": "unsloth/Qwen3.5-9B-GGUF",
+   "path": "Qwen3.5-9B-Q8_0.gguf",
+   "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+   "bytes": 9527502048,
+   "sha256": "809626574d0cb43d4becfa56169980da2bb448f2299270f7be443cb89d0a6ae4",
+   "dest": "${MODELS}/qwen3.5-9b/Qwen3.5-9B-Q8_0.gguf",
+   "source": null,
+   "status": "upstream",
+   "license": "apache-2.0",
+   "role": "container"
+  },
+  {
+   "id": "ms-mmproj",
+   "repo": "unsloth/Qwen3.5-9B-GGUF",
+   "path": "mmproj-F16.gguf",
+   "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+   "bytes": 918166080,
+   "sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f",
+   "dest": "${MODELS}/qwen3.5-9b/mmproj-F16.gguf",
+   "source": null,
+   "status": "upstream",
+   "license": "apache-2.0",
+   "role": "projector"
+  },
+  {
+   "id": "lx-transformer",
+   "repo": "Lightricks/LTX-2.5",
+   "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+   "revision": "2356ce76915d6c48d313d7e8b25900e1dd3abaa8",
+   "bytes": 21504034224,
+   "sha256": "c4279eeff115cbeaca494bd2183e7d768c38fe85a184dc6afbb7159157c44334",
+   "dest": "${MODELS}/ltx-2.5/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "ltx-2.x-community",
+   "role": "weights",
+   "gated": true
+  },
+  {
+   "id": "lx-text-encoder",
+   "repo": "Lightricks/LTX-2.5",
+   "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+   "revision": "2356ce76915d6c48d313d7e8b25900e1dd3abaa8",
+   "bytes": 15372969374,
+   "sha256": "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f",
+   "dest": "${MODELS}/ltx-2.5/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "ltx-2.x-community",
+   "role": "weights",
+   "gated": true
+  },
+  {
+   "id": "lx-video-vae",
+   "repo": "Lightricks/LTX-2.5",
+   "path": "vae/ltx-2.5-video-vae-bf16.safetensors",
+   "revision": "2356ce76915d6c48d313d7e8b25900e1dd3abaa8",
+   "bytes": 1472223346,
+   "sha256": "847e14ca7f3355debca0cea4eaa24ac0fbcdf0061da054ac89ca638a869ddba3",
+   "dest": "${MODELS}/ltx-2.5/vae/ltx-2.5-video-vae-bf16.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "ltx-2.x-community",
+   "role": "weights",
+   "gated": true
+  },
+  {
+   "id": "lx-audio-vae",
+   "repo": "Lightricks/LTX-2.5",
+   "path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+   "revision": "2356ce76915d6c48d313d7e8b25900e1dd3abaa8",
+   "bytes": 364866540,
+   "sha256": "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5",
+   "dest": "${MODELS}/ltx-2.5/vae/ltx-2.5-audio-vae-bf16.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "ltx-2.x-community",
+   "role": "weights",
+   "gated": true
+  },
+  {
+   "id": "lx-upscaler",
+   "repo": "Lightricks/LTX-2.5",
+   "path": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+   "revision": "2356ce76915d6c48d313d7e8b25900e1dd3abaa8",
+   "bytes": 995778752,
+   "sha256": "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8",
+   "dest": "${MODELS}/ltx-2.5/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+   "source": null,
+   "status": "upstream",
+   "license": "ltx-2.x-community",
+   "role": "weights",
+   "gated": true
+  },
+  {
+   "id": "lx-license",
+   "repo": "Lightricks/LTX-2",
+   "path": "LICENSE-2_x",
+   "revision": "a95ab856bf29407b6b066ede0abe1846050db56c",
+   "bytes": 30399,
+   "sha256": "be75acae5c99b0fb16ed6cfbf8f731e5121a729bef112d20337699407e796451",
+   "dest": "${MODELS}/ltx-2.5/LICENSE-2_x",
+   "source": null,
+   "status": "upstream",
+   "license": "ltx-2.x-community",
+   "role": "license",
+   "host": "github"
+  },
+  {
+   "id": "comfyui-portable",
+   "repo": "Comfy-Org/ComfyUI",
+   "path": "ComfyUI_windows_portable_nvidia.7z",
+   "revision": "6b747c0428c343e1417219641db93a4fb7cb69ae",
+   "bytes": 1994326521,
+   "sha256": "8f137eac345707fd7e42bcf8e29377415243011ca15522a86aed6c77331fbd56",
+   "dest": "${INSTALL}/setup/downloads/ComfyUI_windows_portable_nvidia.7z",
+   "source": null,
+   "status": "upstream",
+   "license": "gpl-3.0",
+   "role": "runtime",
+   "host": "github-release",
+   "tag": "v0.38.0"
+  },
+  {
+   "id": "comfyui-license",
+   "repo": "Comfy-Org/ComfyUI",
+   "path": "LICENSE",
+   "revision": "6b747c0428c343e1417219641db93a4fb7cb69ae",
+   "bytes": 35149,
+   "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+   "dest": "${INSTALL}/licenses/ComfyUI-LICENSE",
+   "source": null,
+   "status": "upstream",
+   "license": "gpl-3.0",
+   "role": "license",
+   "host": "github"
   }
  ],
  "derived": [
@@ -788,6 +942,155 @@
      "_source": "Windows: sd-server needs --mmap; measured 2026-09-28 beside the default 27B serve the image completed with commit 51,149 of 64,901 MB (Crow crow_platform.image_server_platform_args). VRAM: --max-vram 7 keeps it beside the 27B, card peak 31,322-31,566 MiB of 32,127 (Linux, crow_core.image_server_command)."
     },
     "disk_bytes": 69434804127
+   }
+  },
+  {
+   "id": "media-stack",
+   "menu": {
+    "title": "Media Stack",
+    "line": "9B + Qwen-Image 2.1 + LTX-2.5 — pictures and short videos",
+    "gui": "Qwen3.5-9B with Qwen-Image 2.1 and LTX-2.5. Create pictures and videos."
+   },
+   "platforms": [
+    "windows"
+   ],
+   "_platforms": "Windows first (the owner, 2026-10-02): ComfyUI publishes its portable runtime for Windows only; the Linux runtime is its own ticket.",
+   "files": [
+    "ms-model",
+    "ms-mmproj",
+    "qi-transformer-index",
+    "qi-transformer-1",
+    "qi-transformer-2",
+    "qi-text-encoder-index",
+    "qi-text-encoder-1",
+    "qi-text-encoder-2",
+    "qi-text-encoder-3",
+    "qi-text-encoder-4",
+    "qi-vae",
+    "qi-license",
+    "lx-transformer",
+    "lx-text-encoder",
+    "lx-video-vae",
+    "lx-audio-vae",
+    "lx-upscaler",
+    "lx-license",
+    "comfyui-portable",
+    "comfyui-license"
+   ],
+   "derived": [
+    "qi-text-encoder-sdcli"
+   ],
+   "bytes": {
+    "published": 0,
+    "mirror_pending": 0,
+    "upstream": 85265651750,
+    "files": 85265651750,
+    "derived": 21919007463,
+    "disk": 107184659213
+   },
+   "engine": {
+    "kind": "llama-server",
+    "binary": {
+     "windows": "${INSTALL}/bin/llama-server.exe"
+    },
+    "cwd": "${INSTALL}",
+    "env": {},
+    "argv": [
+     "-m",
+     "${MODELS}/qwen3.5-9b/Qwen3.5-9B-Q8_0.gguf",
+     "--mmproj",
+     "${MODELS}/qwen3.5-9b/mmproj-F16.gguf",
+     "--port",
+     "8099",
+     "-c",
+     "65536",
+     "-ngl",
+     "99",
+     "--parallel",
+     "1",
+     "--jinja",
+     "--slot-save-path",
+     "${INSTALL}/session"
+    ],
+    "dirs": [
+     "${INSTALL}/session"
+    ],
+    "port": 8099,
+    "context": 65536,
+    "_context": "NOT MEASURED for the 9B: crow-nest's dense default (DENSE_CONTEXT_FLOOR) until the media-stack run on the owner's go measures VRAM beside sd-server.",
+    "readiness": {
+     "method": "GET",
+     "path": "/health",
+     "status": 200,
+     "json": {
+      "status": "ok"
+     }
+    },
+    "identity": {
+     "method": "GET",
+     "path": "/props",
+     "field": "model_path",
+     "endswith": "Qwen3.5-9B-Q8_0.gguf",
+     "vision": true
+    }
+   },
+   "image_server": null,
+   "_image_server": "Not at boot: sd-server starts on the first image call, as for a llama.cpp line (crow_core.image_server_start), and leaves the card for a clip (use_mode).",
+   "video_server": {
+    "_what": "ComfyUI headless (#340 Phase 0, v0.38.0 portable), started by Crow on the first animate_image and stopped after the clip (crow_core.use_mode); never at boot.",
+    "binary": {
+     "windows": "${INSTALL}/comfyui/python_embeded/python.exe"
+    },
+    "argv": [
+     "-s",
+     "${INSTALL}/comfyui/ComfyUI/main.py",
+     "--windows-standalone-build",
+     "--disable-auto-launch",
+     "--listen",
+     "127.0.0.1",
+     "--port",
+     "8188"
+    ],
+    "port": 8188,
+    "readiness": {
+     "method": "GET",
+     "path": "/system_stats",
+     "status": 200
+    },
+    "runtime": {
+     "windows": {
+      "file": "comfyui-portable",
+      "dir": "${INSTALL}/comfyui",
+      "strip": "ComfyUI_windows_portable",
+      "bytes": 4384588275,
+      "model_paths": {
+       "file": "ComfyUI/extra_model_paths.yaml",
+       "base": "${MODELS}/ltx-2.5",
+       "folders": [
+        "diffusion_models",
+        "text_encoders",
+        "vae",
+        "latent_upscale_models"
+       ]
+      }
+     }
+    }
+   },
+   "crow_env": {
+    "CROW_IMAGE_MODEL_DIR": "${MODELS}/qwen-image-2.1"
+   },
+   "preflight": {
+    "gpu": {
+     "arch": "blackwell",
+     "sm": "sm_120",
+     "_source": "crow-nest docs/getting-started.md:18-19: the FP4 path builds for compute_120a; the Ampere/Ada fallback is not planned (crow-nest #12). Measured on one RTX 5090, 32,607 MiB."
+    },
+    "host_ram": {
+     "pinned_max_gib": null,
+     "peak_gib": 50,
+     "_source": "#340 Phase 0, RTX 5090, runs/340-ltx25-phase0/results.jsonl: clip B-20s peaked at host_ram_used_peak_mib 50,868 (49.7 GiB used machine-wide of 63.4 GiB) and VRAM 32,049 MiB of 32,607, so images and videos never share the card (crow_core.use_mode)."
+    },
+    "disk_bytes": 107184659213
    }
   }
  ]

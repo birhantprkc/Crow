@@ -55,7 +55,7 @@ pub struct Args {
     pub shortcuts: Shortcuts,
 }
 
-pub const POINTS: [&str; 3] = ["flash-next", "27b", "image-stack"];
+pub const POINTS: [&str; 4] = ["flash-next", "27b", "image-stack", "media-stack"];
 
 /// (the shortcut folder the selection starts with, the Start menu folder).
 /// A headless run into a non-default root is a test install: it leaves the
