@@ -85,6 +85,19 @@ pub struct BootPlan {
     pub files: Vec<PlanFile>,
     #[serde(default)]
     pub derived: Vec<PlanDerived>,
+    /// #340: the video server, of which the check reads only the program.
+    #[serde(default)]
+    pub video: Option<PlanVideo>,
+    /// #348: file ids the runtime step unpacks and deletes (the ComfyUI 7z).
+    #[serde(default)]
+    pub runtime_archives: Vec<String>,
+}
+
+/// The part of `--plan`'s `video` the check needs: the program inside the
+/// unpacked runtime, which stands in for the archive it came from.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct PlanVideo {
+    pub binary: PathBuf,
 }
 
 /// When a `--help` run counts as "the binary starts".
@@ -129,7 +142,18 @@ pub fn check_files(plan: &BootPlan, verified: &dyn Fn(&str) -> bool) -> Result<(
             problems.push(format!("missing: {}", server.binary.display()));
         }
     }
-    let consumed: BTreeSet<&str> = plan.derived.iter().flat_map(|d| d.inputs.iter().map(String::as_str)).collect();
+    // #348: an unpacked runtime is checked by its program; the archive is gone.
+    if let Some(video) = &plan.video {
+        if !plan.runtime_archives.is_empty() && !video.binary.is_file() {
+            problems.push(format!("missing: {}", video.binary.display()));
+        }
+    }
+    let consumed: BTreeSet<&str> = plan
+        .derived
+        .iter()
+        .flat_map(|d| d.inputs.iter().map(String::as_str))
+        .chain(plan.runtime_archives.iter().map(String::as_str))
+        .collect();
     for f in plan.files.iter().filter(|f| !consumed.contains(f.id.as_str())) {
         check_one(&f.dest, f.bytes, f.sha256.as_deref(), !verified(&f.id), &mut problems);
     }

@@ -5,6 +5,14 @@ The reasoning is in the commit and on the issue.
 
 ## Unreleased
 
+## 3.2.1 — 2026-10-03
+
+**The Media Stack installs to the end.** v3.2.0's `CrowSetup.exe` stopped every Media Stack install at its last check, after all files and the video runtime were in place.
+
+### Fixed
+
+- **CrowSetup no longer asks for the ComfyUI archive it deleted** (#348, 2026-10-03). The runtime step unpacks `ComfyUI_windows_portable_nvidia.7z` and deletes it, but the check still required it, so the install ended with "media-stack is not complete: missing: …ComfyUI_windows_portable_nvidia.7z" and Retry failed the same way. The boot menu's plan now names the archives a runtime consumes, and the check asks for the unpacked ComfyUI program instead. Found by the v3.2.0 deployment check (released `CrowSetup.exe --headless` on robin's machine); the regression tests are red without the fix.
+
 ## 3.2.0 — 2026-10-03
 
 **Crow makes short videos.** The new Media Stack operating point (Windows) puts Qwen3.5-9B, Qwen-Image 2.1 and LTX-2.5 on one card, and `animate_image` turns a still into an MP4 with sound that plays in the window. CrowSetup installs it from the original sources, with the user's own Hugging Face token for the gated LTX weights, and unpacks ComfyUI as the video runtime. The first live run on robin's RTX 5090 (2026-10-03, n=1) rendered a 5 s clip in 73.3 s and brought the language model back 8 s after ComfyUI ended. This release ships Windows assets only; on Linux, v3.1.0 stays the install.

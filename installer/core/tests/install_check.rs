@@ -246,3 +246,41 @@ fn check_point_against_the_real_boot_menu_names_what_is_missing() {
     let err = check::check_point(&py(), repo, models.path(), "no-such-point").unwrap_err();
     assert!(err.contains("no-such-point"), "{err}");
 }
+
+/// #348: the Media Stack's shape. The runtime step deleted the ComfyUI 7z after
+/// unpacking it; the check asks for the unpacked program instead.
+fn runtime_plan(w: &World, archive_listed: bool) -> check::BootPlan {
+    let archive = w.root.join("setup/downloads/comfy.7z");
+    let python = w.root.join("comfyui/python_embeded/python.exe");
+    let text = format!(
+        r#"{{"point": "media-stack",
+  "serve": {{"binary": "{serve}", "argv": [], "cwd": "{root}", "env": {{}}, "dirs": [], "port": 8099, "readiness": {{"path": "/health", "status": 200}}}},
+  "image": null,
+  "video": {{"binary": "{python}", "argv": [], "port": 8188, "readiness": {{"path": "/system_stats", "status": 200}}, "runtime": "{runtime}"}},
+  "files": [{{"id": "comfyui-portable", "dest": "{archive}", "bytes": 4, "sha256": null}}],
+  "derived": [],
+  "runtime_archives": [{listed}]}}"#,
+        serve = js(&w.root.join("bin/serve.exe")),
+        root = js(&w.root),
+        python = js(&python),
+        runtime = js(&w.root.join("comfyui")),
+        archive = js(&archive),
+        listed = if archive_listed { "\"comfyui-portable\"" } else { "" },
+    );
+    check::parse_plan(&text).unwrap()
+}
+
+#[test]
+fn a_runtime_archive_the_unpack_deleted_is_not_asked_for() {
+    let w = world();
+    fs::create_dir_all(w.root.join("comfyui/python_embeded")).unwrap();
+    fs::write(w.root.join("comfyui/python_embeded/python.exe"), b"MZ").unwrap();
+    check::check_files(&runtime_plan(&w, true), &|_id: &str| true).unwrap();
+}
+
+#[test]
+fn an_unpacked_runtime_without_its_program_is_named() {
+    let w = world();
+    let err = check::check_files(&runtime_plan(&w, true), &|_id: &str| true).unwrap_err();
+    assert!(err.contains("python.exe") && err.contains("missing"), "{err}");
+}
