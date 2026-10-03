@@ -18,7 +18,11 @@ OFFLINE (the default, no network):
   * sums         - each point's bytes per status, files, derived and disk equal
                    the sum of what it lists; preflight disk equals that sum;
   * wiring       - every env and argv path names a file or derived output the
-                   SAME point installs; the identity is the CROW_CNQ file name;
+                   SAME point installs; the identity is the CROW_CNQ file name
+                   (engine.kind "llama-server": the GGUF after -m, --mmproj a
+                   projector); an optional video_server (#340) has its own port,
+                   HTTP 200 readiness, a runtime file of role "runtime" per
+                   platform and every path inside that runtime's dir;
                    the slot dir is created; ports agree with argv; a menu line
                    never claims more context than the point serves;
   * platforms    - #341: every engine and image server names its binary for
@@ -67,6 +71,12 @@ MANIFEST = os.path.join(REPO, "manifests", "stack.json")
 
 SCHEMA = "crow-stack/1"
 POINT_IDS = ("flash-next", "27b", "image-stack")
+# engine.kind: crow-nest's serve (the default, a CNQ container in CROW_CNQ) or
+# llama.cpp's llama-server (a GGUF given with -m), #340.
+ENGINE_KINDS = ("serve", "llama-server")
+# A point's optional video server (#340): started by Crow on first use, never at
+# boot; its program lives in an unpacked runtime (runtime.<platform>.dir).
+VIDEO_FIELDS = ("binary", "argv", "port", "readiness", "runtime")
 STATUSES = ("published", "mirror-pending", "upstream")
 PLACEHOLDERS = ("INSTALL", "MODELS")
 FILE_FIELDS = ("id", "repo", "path", "revision", "bytes", "sha256", "dest", "source",
@@ -222,6 +232,18 @@ def check_schema(doc) -> "list[str]":
                   "crow_env", "preflight"):
             if k not in pt:
                 p.append("point %s lacks %s" % (pt.get("id", "?"), k))
+        eng = pt.get("engine")
+        if isinstance(eng, dict) and eng.get("kind", "serve") not in ENGINE_KINDS:
+            p.append("point %s engine kind %r is not one of %s"
+                     % (pt.get("id", "?"), eng.get("kind"), ", ".join(ENGINE_KINDS)))
+        vs = pt.get("video_server")
+        if vs is not None:
+            if not isinstance(vs, dict):
+                p.append("point %s video_server is not an object or null" % pt.get("id", "?"))
+            else:
+                for k in VIDEO_FIELDS:
+                    if k not in vs:
+                        p.append("point %s video_server lacks %s" % (pt.get("id", "?"), k))
     got = [pt.get("id") for pt in doc["points"]]
     if got != list(POINT_IDS):
         p.append("points are %s, expected %s" % (got, list(POINT_IDS)))
@@ -270,6 +292,12 @@ def path_values(pt):
     if img:
         yield "image_server.binary", list((img.get("binary") or {}).values())
         yield "image_server.argv", list(img.get("argv") or [])
+    vs = pt.get("video_server")
+    if vs:
+        yield "video_server.binary", list((vs.get("binary") or {}).values())
+        yield "video_server.argv", list(vs.get("argv") or [])
+        yield "video_server.runtime", [rt.get("dir", "") for rt in (vs.get("runtime") or {}).values()
+                                       if isinstance(rt, dict)]
     yield "crow_env", list((pt.get("crow_env") or {}).values())
 
 
@@ -362,24 +390,30 @@ def check_wiring(doc) -> "list[str]":
         for k, v in env.items():
             if is_path(v) and v not in installed:
                 p.append("point %s env %s=%s is no file this point installs" % (pid, k, v))
-        cnq = installed.get(env.get("CROW_CNQ"))
-        if cnq is None or cnq.get("role") != "container":
-            p.append("point %s CROW_CNQ does not name its container" % pid)
+        argv = list(eng.get("argv") or [])
+        llama = eng.get("kind", "serve") == "llama-server"
+        # serve loads the CNQ container named by CROW_CNQ; llama-server the GGUF after -m.
+        model = installed.get(flag_value(argv, "-m") if llama else env.get("CROW_CNQ"))
+        if model is None or model.get("role") != "container":
+            p.append("point %s %s does not name its container"
+                     % (pid, "llama-server -m" if llama else "CROW_CNQ"))
         else:
             ident = eng.get("identity") or {}
             if ident.get("path") != "/props" or ident.get("field") != "model_path" \
-                    or ident.get("endswith") != cnq["path"].rsplit("/", 1)[-1]:
+                    or ident.get("endswith") != model["path"].rsplit("/", 1)[-1]:
                 p.append("point %s identity must be /props model_path ending in %s"
-                         % (pid, cnq["path"].rsplit("/", 1)[-1]))
+                         % (pid, model["path"].rsplit("/", 1)[-1]))
+        mmproj = flag_value(argv, "--mmproj")
+        if llama and mmproj is not None and (installed.get(mmproj) or {}).get("role") != "projector":
+            p.append("point %s llama-server --mmproj %s is no projector this point installs" % (pid, mmproj))
         ready = eng.get("readiness") or {}
         if ready.get("path") != "/health" or ready.get("json") != {"status": "ok"}:
             p.append("point %s readiness must be GET /health answering {\"status\": \"ok\"}" % pid)
-        argv = list(eng.get("argv") or [])
         if flag_value(argv, "--port") != str(eng.get("port")):
             p.append("point %s engine --port %r differs from port %r"
                      % (pid, flag_value(argv, "--port"), eng.get("port")))
         slot = flag_value(argv, "--slot-save-path")
-        if slot is None or slot not in dirs:
+        if (slot is not None or not llama) and (slot is None or slot not in dirs):
             p.append("point %s --slot-save-path %r is not created (engine.dirs)" % (pid, slot))
         for v in argv:
             if is_path(v) and v not in dirs and v not in installed:
@@ -396,6 +430,27 @@ def check_wiring(doc) -> "list[str]":
             for v in iargv:
                 if is_path(v) and v not in installed and v not in produced:
                     p.append("point %s sd-server path %s is neither installed nor derived" % (pid, v))
+        vs = pt.get("video_server")
+        if vs:
+            vargv = list(vs.get("argv") or [])
+            if flag_value(vargv, "--port") != str(vs.get("port")):
+                p.append("point %s video server --port differs from port %r" % (pid, vs.get("port")))
+            if vs.get("port") in (eng.get("port"), (img or {}).get("port")):
+                p.append("point %s video server shares port %r" % (pid, vs.get("port")))
+            if (vs.get("readiness") or {}).get("status") != 200:
+                p.append("point %s video readiness must expect HTTP 200" % pid)
+            roots = []
+            for plat, rt in sorted((vs.get("runtime") or {}).items()):
+                fid = (rt or {}).get("file")
+                if fid not in pt["files"] or (files.get(fid) or {}).get("role") != "runtime":
+                    p.append("point %s video_server.runtime.%s.file %r is no runtime file of this point"
+                             % (pid, plat, fid))
+                roots.append((rt or {}).get("dir") or "")
+            for v in vargv + list((vs.get("binary") or {}).values()):
+                if is_path(v) and v not in installed and v not in produced \
+                        and not any(r and v.startswith(r + "/") for r in roots):
+                    p.append("point %s video server path %s is neither installed nor in its runtime"
+                             % (pid, v))
         for k, v in (pt.get("crow_env") or {}).items():
             if is_path(v) and not any(x == v or x.startswith(v + "/") for x in list(installed) + list(produced)):
                 p.append("point %s crow_env %s=%s holds nothing this point installs" % (pid, k, v))
@@ -437,6 +492,20 @@ def check_platforms(doc) -> "list[str]":
         specs = [("engine", pt.get("engine") or {})]
         if pt.get("image_server"):
             specs.append(("image_server", pt["image_server"]))
+        vs = pt.get("video_server")
+        if vs:
+            # The video server's program is in its unpacked runtime, not in bin/,
+            # so the bin/ rules below do not apply to it.
+            binary, runtime = vs.get("binary") or {}, vs.get("runtime") or {}
+            for name, m in (("binary", binary), ("runtime", runtime)):
+                if sorted(m) != sorted(PLATFORMS):
+                    p.append("point %s video_server.%s names %s, expected %s"
+                             % (pt["id"], name, sorted(m) or "nothing", " and ".join(PLATFORMS)))
+            for plat in PLATFORMS:
+                root = ((runtime.get(plat) or {}).get("dir") or "").rstrip("/")
+                if plat in binary and (not root or not binary[plat].startswith(root + "/")):
+                    p.append("point %s video_server.binary.%s is not inside its runtime dir"
+                             % (pt["id"], plat))
         for what, spec in specs:
             binary = spec.get("binary") or {}
             if sorted(binary) != sorted(PLATFORMS):

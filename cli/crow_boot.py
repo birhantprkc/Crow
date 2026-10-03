@@ -255,6 +255,7 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
     engine = point.get("engine") or {}
     port = int(engine.get("port") or crow_core.CROW_NEST_PORT)
     serve = {
+        "kind": engine.get("kind") or "serve",
         "argv": [r(_binary(engine, point_id, "engine"))]
                 + [r(a) for a in engine.get("argv") or []],
         "env": {str(k): r(v) for k, v in (engine.get("env") or {}).items()},
@@ -273,6 +274,18 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
             "port": int(spec.get("port") or 8097),
             "readiness": spec.get("readiness") or {"path": "/", "status": 200},
         }
+    # #340: the video server is planned here but never started by the menu; Crow
+    # starts it on first use. `runtime` is the unpacked folder its program lives in.
+    video = None
+    spec = point.get("video_server")
+    if spec:
+        video = {
+            "argv": [r(_binary(spec, point_id, "video server"))]
+                    + [r(a) for a in spec.get("argv") or []],
+            "port": int(spec.get("port") or 8188),
+            "readiness": spec.get("readiness") or {"path": "/system_stats", "status": 200},
+            "runtime": r(((spec.get("runtime") or {}).get(PLATFORM_KEY) or {}).get("dir") or ""),
+        }
     menu = point.get("menu") or {}
     return {
         "id": point_id,
@@ -280,6 +293,7 @@ def plan_point(stack: dict, point_id: str, install: str, models: str) -> dict:
         "line": menu.get("line") or "",
         "serve": serve,
         "image": image,
+        "video": video,
         "crow_env": {str(k): r(v) for k, v in (point.get("crow_env") or {}).items()},
         "base_url": base_url_for(port),
         "identity": engine.get("identity") or {},
@@ -313,7 +327,11 @@ def engine_env_keys(stack: dict) -> set:
 
 
 def missing_files(plan: dict, install: str, models: str) -> list:
-    """Placeholder paths the point needs that are not on disk (dirs excluded)."""
+    """Placeholder paths the point needs that are not on disk (dirs excluded).
+
+    The video server is not among them: the menu never starts it, and a point
+    whose video runtime is missing still boots (#340).
+    """
     roots = tuple(os.path.normpath(p) for p in (install, models))
     dirs = set(plan["serve"]["dirs"])
     wanted = [plan["serve"]["argv"][0]] + list(plan["serve"]["env"].values())
@@ -368,18 +386,23 @@ def plan_json(stack: dict, point_id: str, install: str, models: str) -> dict:
         })
     serve = plan["serve"]
     image = plan["image"]
+    video = plan["video"]
     return {
         "point": plan["id"],
         "title": plan["title"],
         "install_root": install,
         "models_root": models,
         "base_url": plan["base_url"],
-        "serve": {"binary": serve["argv"][0], "argv": serve["argv"][1:], "cwd": serve["cwd"],
+        "serve": {"kind": serve["kind"], "binary": serve["argv"][0], "argv": serve["argv"][1:],
+                  "cwd": serve["cwd"],
                   "env": serve["env"], "dirs": serve["dirs"], "port": serve["port"],
                   "readiness": serve["readiness"]},
         "image": None if image is None else {
             "binary": image["argv"][0], "argv": image["argv"][1:], "port": image["port"],
             "readiness": image["readiness"]},
+        "video": None if video is None else {
+            "binary": video["argv"][0], "argv": video["argv"][1:], "port": video["port"],
+            "readiness": video["readiness"], "runtime": video["runtime"]},
         "crow_env": plan["crow_env"],
         "files": files,
         "derived": derived,

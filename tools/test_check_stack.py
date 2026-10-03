@@ -397,6 +397,104 @@ class TheWindowsLine(Base):
             self.red("placeholders and paths", "names the user")
 
 
+def media_like(doc):
+    """27b rebuilt as a llama-server point with a video server (#340), valid as built."""
+    base = file_(doc, "27b-cnq")
+    doc["files"] += [
+        dict(base, id="g-model", path="model-Q8_0.gguf", dest="${MODELS}/g/model-Q8_0.gguf"),
+        dict(base, id="g-mmproj", path="mmproj-F16.gguf", dest="${MODELS}/g/mmproj-F16.gguf",
+             role="projector"),
+        dict(base, id="g-runtime", path="comfyui.zip", dest="${INSTALL}/setup/comfyui.zip", role="runtime"),
+    ]
+    pt = point(doc, "27b")
+    pt["files"] = ["g-model", "g-mmproj", "g-runtime"]
+    pt["engine"] = {
+        "kind": "llama-server",
+        "binary": {"windows": "${INSTALL}/bin/llama-server.exe", "linux": "${INSTALL}/bin/llama-server"},
+        "cwd": "${INSTALL}", "env": {}, "dirs": [], "port": 8099, "context": 131072,
+        "argv": ["-m", "${MODELS}/g/model-Q8_0.gguf", "--mmproj", "${MODELS}/g/mmproj-F16.gguf",
+                 "--port", "8099"],
+        "readiness": {"method": "GET", "path": "/health", "status": 200, "json": {"status": "ok"}},
+        "identity": {"method": "GET", "path": "/props", "field": "model_path", "endswith": "model-Q8_0.gguf"},
+    }
+    pt["video_server"] = {
+        "binary": {"windows": "${INSTALL}/comfyui/python_embeded/python.exe",
+                   "linux": "${INSTALL}/comfyui/venv/bin/python"},
+        "argv": ["-s", "${INSTALL}/comfyui/ComfyUI/main.py", "--port", "8188"],
+        "port": 8188,
+        "readiness": {"method": "GET", "path": "/system_stats", "status": 200},
+        "runtime": {"windows": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"},
+                    "linux": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"}},
+    }
+    return pt
+
+
+class LlamaEngineAndVideo(unittest.TestCase):
+    """engine.kind llama-server and video_server (#340), on a rebuilt 27b."""
+
+    def setUp(self):
+        self.doc = copy.deepcopy(REAL)
+        self.pt = media_like(self.doc)
+
+    def problems(self):
+        return C.check_schema(self.doc) + C.check_wiring(self.doc) + C.check_platforms(self.doc)
+
+    def red(self, needle):
+        self.assertTrue(any(needle in p for p in self.problems()), self.problems())
+
+    def test_the_fixture_is_green(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_unknown_engine_kind(self):
+        self.pt["engine"]["kind"] = "vllm"
+        self.red("engine kind 'vllm' is not one of")
+
+    def test_model_flag_names_no_container(self):
+        self.pt["engine"]["argv"][1] = "${MODELS}/g/mmproj-F16.gguf"
+        self.red("llama-server -m does not name its container")
+
+    def test_identity_of_another_file(self):
+        self.pt["engine"]["identity"]["endswith"] = "other.gguf"
+        self.red("identity must be /props model_path ending in model-Q8_0.gguf")
+
+    def test_mmproj_not_installed(self):
+        self.pt["engine"]["argv"][3] = "${MODELS}/g/missing.gguf"
+        self.red("--mmproj ${MODELS}/g/missing.gguf is no projector")
+
+    def test_serve_still_needs_its_slot_dir(self):
+        self.pt["engine"]["kind"] = "serve"
+        self.red("--slot-save-path None is not created")
+
+    def test_video_server_field_missing(self):
+        del self.pt["video_server"]["runtime"]
+        self.red("video_server lacks runtime")
+
+    def test_video_port_differs_from_argv(self):
+        self.pt["video_server"]["port"] = 8189
+        self.red("video server --port differs from port 8189")
+
+    def test_video_shares_the_engine_port(self):
+        self.pt["video_server"]["port"] = 8099
+        self.pt["video_server"]["argv"][3] = "8099"
+        self.red("video server shares port 8099")
+
+    def test_runtime_file_without_role_runtime(self):
+        self.pt["video_server"]["runtime"]["linux"]["file"] = "g-model"
+        self.red("video_server.runtime.linux.file 'g-model' is no runtime file")
+
+    def test_video_path_outside_its_runtime(self):
+        self.pt["video_server"]["argv"][1] = "${INSTALL}/elsewhere/main.py"
+        self.red("video server path ${INSTALL}/elsewhere/main.py is neither installed nor in its runtime")
+
+    def test_video_without_a_linux_binary(self):
+        del self.pt["video_server"]["binary"]["linux"]
+        self.red("video_server.binary names ['windows'], expected windows and linux")
+
+    def test_video_binary_outside_its_runtime_dir(self):
+        self.pt["video_server"]["binary"]["windows"] = "${INSTALL}/bin/python.exe"
+        self.red("video_server.binary.windows is not inside its runtime dir")
+
+
 class PointLists(unittest.TestCase):
     """The hand-written point lists (#340), each broken in a copy of its source file."""
 

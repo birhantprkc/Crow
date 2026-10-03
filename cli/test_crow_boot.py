@@ -7,6 +7,7 @@ contract file is the real one, written into a temporary config folder.
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
@@ -744,6 +745,86 @@ class TheTerminalTests(unittest.TestCase):
                             for c in style.icon(key)))
         self.assertEqual(style.paint("x", "32"), "x")
         self.assertIn(crow_boot.flight_frame(5, fancy=False), "|/-\\")
+
+
+def media_stack():
+    """STACK with the 27b rebuilt as a llama-server point with a video server (#340)."""
+    doc = copy.deepcopy(STACK)
+    pt = next(p for p in doc["points"] if p["id"] == "27b")
+    pt["engine"] = dict(pt["engine"], kind="llama-server",
+                        binary={"windows": "${INSTALL}/bin/llama-server.exe",
+                                "linux": "${INSTALL}/bin/llama-server"},
+                        env={}, dirs=[],
+                        argv=["-m", "${MODELS}/g/model-Q8_0.gguf", "--port", "8099"])
+    pt["video_server"] = {
+        "binary": {"windows": "${INSTALL}/comfyui/python_embeded/python.exe",
+                   "linux": "${INSTALL}/comfyui/venv/bin/python"},
+        "argv": ["-s", "${INSTALL}/comfyui/ComfyUI/main.py", "--port", "8188"],
+        "port": 8188,
+        "readiness": {"method": "GET", "path": "/system_stats", "status": 200},
+        "runtime": {"windows": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"},
+                    "linux": {"file": "g-runtime", "dir": "${INSTALL}/comfyui"}},
+    }
+    return doc
+
+
+class TheVideoServerIsPlannedNotStartedTests(BootCase):
+    """#340: a llama-server engine starts like serve; the video server is planned for
+    Crow's first use, never started by the menu and never a reason not to boot."""
+
+    def setUp(self):
+        super().setUp()
+        self.stack = media_stack()
+
+    def test_the_plan_carries_the_engine_kind_and_the_video_server(self):
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        self.assertEqual(plan["serve"]["kind"], "llama-server")
+        self.assertEqual(plan["serve"]["argv"][0],
+                         os.path.normpath(os.path.join(self.install, "bin", "llama-server" + EXE)))
+        self.assertEqual(plan["serve"]["argv"][1:3],
+                         ["-m", os.path.join(self.models, "g", "model-Q8_0.gguf")])
+        video = plan["video"]
+        runtime = os.path.join(self.install, "comfyui")
+        self.assertEqual(video["runtime"], runtime)
+        self.assertTrue(video["argv"][0].startswith(runtime), video["argv"][0])
+        self.assertEqual(video["argv"][video["argv"].index("--port") + 1], "8188")
+        self.assertEqual(video["port"], 8188)
+        self.assertNotIn("${", json.dumps(plan), "a placeholder was left unresolved")
+        self.assertEqual(crow_boot.plan_point(STACK, "27b", self.install, self.models)["video"], None)
+        self.assertEqual(crow_boot.plan_point(STACK, "27b", self.install, self.models)["serve"]["kind"],
+                         "serve")
+
+    def test_a_missing_video_runtime_does_not_block_the_boot(self):
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        missing = crow_boot.missing_files(plan, self.install, self.models)
+        self.assertIn(os.path.join(self.models, "g", "model-Q8_0.gguf"), missing)
+        self.assertFalse([m for m in missing if m.startswith(plan["video"]["runtime"])], missing)
+
+    def test_the_plan_json_names_the_video_server(self):
+        doc = crow_boot.plan_json(self.stack, "27b", self.install, self.models)
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        self.assertEqual(doc["serve"]["kind"], "llama-server")
+        self.assertEqual(doc["video"], {"binary": plan["video"]["argv"][0], "argv": plan["video"]["argv"][1:],
+                                        "port": 8188, "readiness": plan["video"]["readiness"],
+                                        "runtime": plan["video"]["runtime"]})
+        self.assertIsNone(crow_boot.plan_json(STACK, "27b", self.install, self.models)["video"])
+
+    def test_a_start_spawns_only_the_engine(self):
+        plan = crow_boot.plan_point(self.stack, "27b", self.install, self.models)
+        for path in crow_boot.missing_files(plan, self.install, self.models):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").close()
+        probes = iter([NOTHING, OK_HEALTH])
+        popen = FakePopen()
+        boot = crow_boot.Boot(self.stack, self.install, self.models, out=self.out, style=crow_boot.Style(),
+                              popen=popen, get=lambda url, timeout: next(probes), sleep=self.clock.sleep,
+                              clock=self.clock, read=lambda prompt="": "0", scan=lambda: [],
+                              llama=FakeLlama(), point_for=lambda url, timeout=3.0: None,
+                              model_path=lambda url, timeout=3.0: "x/model-Q8_0.gguf",
+                              terminate=self.terminated.append, log_dir=self.logs)
+        code = boot.start("27b")
+        self.assertEqual(code, crow_boot.EXIT_OK, self.out.getvalue())
+        self.assertEqual([os.path.basename(c[0][0]) for c in popen.calls], ["llama-server" + EXE])
 
 
 class ThePlanAsJsonTests(BootCase):
