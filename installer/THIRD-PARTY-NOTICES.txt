@@ -440,6 +440,19 @@ WebView2LoaderStatic.lib (Microsoft.Web.WebView2 1.0.3800.47) -- Microsoft, see 
     text [135], [136]
 
 ================================================================================
+SOURCE CODE OF THE MPL-2.0 COMPONENTS
+================================================================================
+
+These crates are under the Mozilla Public License 2.0 and are compiled in
+unmodified. Their Source Code Form is the published crate, downloadable at
+no charge from crates.io; the sha256 is the one Cargo.lock pins.
+
+option-ext 0.2.0
+    https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate
+    sha256 04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d
+    repository https://github.com/soc/option-ext.git
+
+================================================================================
 LICENCE TEXTS
 ================================================================================
 

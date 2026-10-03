@@ -19,8 +19,10 @@ The file is generated, never written by hand:
   3. identical texts are printed once and listed with every crate that uses them.
 
 Checked here: the file is what the current Cargo.lock produces, every crate has
-at least one text, the vendored texts are unchanged, the WebView2 loader is still
-the library the vendored Microsoft texts belong to, and NOTICE points at the file.
+at least one text and its SPDX expression is covered by them ("A AND B" needs
+both texts), every MPL-2.0 crate gets a source line (MPL 3.2(a)), the vendored
+texts are unchanged, the WebView2 loader is still the library the vendored
+Microsoft texts belong to, and NOTICE points at the file.
 
 Usage:  installer_notices.py [--write] [REPO]
 Exit 0 = all green (or written).  1 = at least one check failed.  2 = setup error.
@@ -81,6 +83,94 @@ def read_text(path):
     return "\n".join(line.rstrip() for line in text.split("\n")).strip("\n")
 
 
+# What a licence text is, by phrases from the licence itself. A crate's SPDX
+# expression is then evaluated against the kinds its texts show: "A AND B" needs
+# both, "A OR B" one of them. ISC and 0BSD share their grant sentence, MIT and
+# MIT-0 theirs; an id with no entry here fails the check until it gets one.
+KINDS = (
+    ("Apache-2.0", (r"Apache License", r"Version 2\.0")),
+    ("MIT", (r"Permission is hereby granted, free of charge",)),
+    ("ISC", (r"Permission to use, copy, modify, and(/or)? distribute this software for any",)),
+    ("BSD", (r"Redistribution and use in source and binary forms",)),
+    ("Zlib", (r"Permission is granted to anyone to use this software for any purpose",
+              r"(?i)altered source versions must be plainly marked")),
+    ("Unicode", (r"(?i)unicode,? inc|UNICODE LICENSE",)),
+    ("Unlicense", (r"This is free and unencumbered software released into the public domain",)),
+    ("CC0", (r"(?i)Creative Commons", r"CC0")),
+    ("CDLA-Permissive", (r"Community Data License Agreement", r"(?i)permissive")),
+    ("bzip2", (r"bzip2", r"Redistribution and use in source and binary forms")),
+    ("MPL-2.0", (r"Mozilla Public License,? [Vv]ersion 2\.0",)),
+)
+SPDX_KIND = {
+    "Apache-2.0": "Apache-2.0", "MIT": "MIT", "MIT-0": "MIT", "ISC": "ISC", "0BSD": "ISC",
+    "BSD-2-Clause": "BSD", "BSD-3-Clause": "BSD", "Zlib": "Zlib", "Unicode-3.0": "Unicode",
+    "Unicode-DFS-2016": "Unicode", "Unlicense": "Unlicense", "CC0-1.0": "CC0",
+    "CDLA-Permissive-2.0": "CDLA-Permissive", "bzip2-1.0.6": "bzip2", "MPL-2.0": "MPL-2.0",
+}
+# MPL-2.0 is file-level copyleft, not a notice licence: section 3.2(a) has whoever
+# distributes the Executable Form tell its recipients where to get the Source Code
+# Form. The notices therefore name, for every MPL crate, the unmodified .crate on
+# crates.io and its sha256 from Cargo.lock.
+CRATE_URL = "https://static.crates.io/crates/{name}/{name}-{version}.crate"
+
+
+def lock_checksums(installer):
+    """{(name, version): sha256 of the .crate} from installer/Cargo.lock."""
+    with open(os.path.join(installer, "Cargo.lock"), encoding="utf-8") as fh:
+        lock = fh.read()
+    out = {}
+    for block in lock.split("[[package]]"):
+        n = re.search(r'^name = "([^"]+)"', block, re.M)
+        v = re.search(r'^version = "([^"]+)"', block, re.M)
+        c = re.search(r'^checksum = "([0-9a-f]{64})"', block, re.M)
+        if n and v and c:
+            out[(n.group(1), v.group(1))] = c.group(1)
+    return out
+
+
+def kinds_of(text):
+    return {k for k, needles in KINDS if all(re.search(n, text) for n in needles)}
+
+
+def covered(expr, kinds):
+    """True when the SPDX expression is satisfied by texts of these kinds.
+    Raises ValueError on an id SPDX_KIND does not know."""
+    tokens = re.findall(r"\(|\)|[A-Za-z0-9.+-]+", expr.replace("/", " OR "))
+    pos = 0
+
+    def atom():
+        nonlocal pos
+        tok = tokens[pos]
+        pos += 1
+        if tok == "(":
+            v = disj()
+            pos += 1                         # ")"
+            return v
+        if tok.endswith("+"):
+            tok = tok[:-1]
+        if tok not in SPDX_KIND:
+            raise ValueError("unknown licence id %r in %r" % (tok, expr))
+        return SPDX_KIND[tok] in kinds
+
+    def conj():
+        nonlocal pos
+        v = atom()
+        while pos < len(tokens) and tokens[pos] == "AND":
+            pos += 1
+            v = atom() and v
+        return v
+
+    def disj():
+        nonlocal pos
+        v = conj()
+        while pos < len(tokens) and tokens[pos] == "OR":
+            pos += 1
+            v = conj() or v
+        return v
+
+    return disj()
+
+
 def build(repo):
     """(file text, [(check, ok, detail)])."""
     installer = os.path.join(repo, "installer")
@@ -103,11 +193,14 @@ def build(repo):
     meta = json.loads(cargo(installer, "metadata", "--format-version", "1"))
     packages = {(p["name"], p["version"]): p for p in meta["packages"]}
     crates = shipped(installer)
+    checksums = lock_checksums(installer)
+    mpl = []                                 # [(name, version, repository, sha256)]
 
     texts = {}                               # text -> index
     order = []                               # [(title, text)]
     rows = []
     missing = []
+    uncovered = []
 
     def add(title, text):
         if text not in texts:
@@ -138,10 +231,23 @@ def build(repo):
                                 read_text(os.path.join(licdir, f))))
         if not refs:
             missing.append("%s %s (%s)" % (name, version, p.get("license")))
+        kinds = set().union(*(kinds_of(order[r - 1][1]) for r in refs))
+        try:
+            if not covered(p.get("license") or "", kinds):
+                uncovered.append("%s %s: %s, texts show %s"
+                                 % (name, version, p.get("license"), sorted(kinds) or "nothing"))
+        except (ValueError, IndexError) as exc:
+            uncovered.append("%s %s: %s" % (name, version, exc))
+        if "MPL" in (p.get("license") or ""):
+            mpl.append((name, version, p.get("repository") or "-", checksums.get((name, version))))
         for r in refs:
             order[r - 1][2].append("%s %s" % (name, version))
         rows.append((name, version, p.get("license") or "?", crates[(name, version)], refs))
     checks.append(("every shipped crate has a licence text", not missing, "; ".join(missing)))
+    checks.append(("every crate's licence expression is covered by its texts", not uncovered,
+                   "; ".join(uncovered)))
+    checks.append(("every MPL-2.0 crate has a checksum in Cargo.lock for its source line",
+                   all(m[3] for m in mpl), ", ".join("%s %s" % m[:2] for m in mpl if not m[3])))
 
     loader = sources["webview2_loader"]
     lp = packages.get((loader["crate"], loader["version"]))
@@ -192,6 +298,16 @@ def build(repo):
     lines.append("WebView2LoaderStatic.lib (%s) -- Microsoft, see the texts  [Windows only]"
                  % loader["nuget"])
     lines.append("    text %s" % ", ".join("[%d]" % r for r in ms))
+    if mpl:
+        lines += ["", "=" * 80, "SOURCE CODE OF THE MPL-2.0 COMPONENTS", "=" * 80, "",
+                  "These crates are under the Mozilla Public License 2.0 and are compiled in",
+                  "unmodified. Their Source Code Form is the published crate, downloadable at",
+                  "no charge from crates.io; the sha256 is the one Cargo.lock pins.", ""]
+        for name, version, repo_url, digest in mpl:
+            lines += ["%s %s" % (name, version),
+                      "    %s" % CRATE_URL.format(name=name, version=version),
+                      "    sha256 %s" % digest,
+                      "    repository %s" % repo_url]
     lines += ["", "=" * 80, "LICENCE TEXTS", "=" * 80]
     for i, (title, text, users) in enumerate(order, 1):
         lines += ["", "-" * 80, "[%d] %s" % (i, title)]

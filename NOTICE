@@ -405,6 +405,12 @@ several dual-licensed -- and, on Windows, Microsoft's WebView2 loader:
 webview2-com-sys links WebView2LoaderStatic.lib from the NuGet package
 Microsoft.Web.WebView2 1.0.3800.47, under Microsoft's BSD-style licence.
 
+One crate of the Linux build is under the Mozilla Public License 2.0, a
+file-level copyleft: option-ext (through wry, dirs and dirs-sys), compiled in
+unmodified. MPL-2.0 section 3.2(a) asks that recipients of the binary learn
+where its source is; the notices file names the published .crate on crates.io
+with the sha256 Cargo.lock pins, for every MPL crate the lock contains.
+
 Every one of those texts, with the crate and version it belongs to, is in
 `installer/THIRD-PARTY-NOTICES.txt`. The exe ships alone as a release asset, so
 it carries that file too: `CrowSetup --licenses` prints it. The file is generated
