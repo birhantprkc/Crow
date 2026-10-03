@@ -25,6 +25,9 @@ crow-nest figures: measured on `v0.3.0` ([crow-nest — the Rust engine](#crow-n
 `DEFAULT_BASE_URL` in the client is still `http://127.0.0.1:8083/v1`, so the crow-nest line is
 reached with `--base-url http://127.0.0.1:8099/v1`.
 
+The [Media Stack](#media-stack--pictures-and-short-videos-windows) (Windows) puts a 9B beside
+picture and video engines on one card; its own numbers are in its section.
+
 A fourth server, DeepSeek-V4-Flash-0731 on `:8081`, is still set up by `install.ps1` and is
 [at the end of this page](#deepseek-v4-flash-0731).
 
@@ -160,6 +163,59 @@ token and the smaller download, and it runs on the **packaged** engine.
 ```powershell
 & "$env:LOCALAPPDATA\Crow\bin\llama-server.exe" -m "$env:LOCALAPPDATA\Crow\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf" --mmproj "$env:LOCALAPPDATA\Crow\models\qwen38-gguf\mmproj-F16.gguf" --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja --slot-save-path "$env:LOCALAPPDATA\Crow\session" --spec-type draft-mtp
 ```
+
+---
+
+## Media Stack — pictures and short videos (Windows)
+
+One card, three engines, never all at once (#340). A language model talks; Qwen-Image 2.1
+makes pictures; LTX-2.5 turns a still into a clip (`animate_image`). Windows only for now,
+because ComfyUI publishes its portable runtime for Windows only. CrowSetup installs it as the
+point `media-stack`.
+
+| | |
+|---|---|
+| Language model | `Qwen3.5-9B-Q8_0.gguf` with `mmproj-F16.gguf` on llama-server, port 8099, one slot |
+| Context | `-c 65536` — **not measured** for the 9B: crow-nest's dense default, until a run measures its VRAM beside sd-server |
+| Start | the boot window's fill assumes 15 s — **not measured**, the 27B GGUF line's figure |
+| Pictures | Qwen-Image 2.1 on sd-server with `--max-vram 7`, started on the first image call, never at boot |
+| Clips | LTX-2.5 distilled int8 on ComfyUI v0.38.0 portable, port 8188, started on the first `animate_image` and ended after the clip |
+| Mode switch | `use_mode`: for a clip, sd-server and the language model leave the card and ComfyUI starts; afterwards ComfyUI ends and the language model starts again from the boot's plan — also after an error, a stop or the 30-minute timeout |
+| Clip sizes | 1080p (1920x1088) or 1440p (2560x1408), 1 to 20 s at 24 fps; 4K is not offered |
+| Host RAM | 64 GB, CrowSetup's preflight |
+| Disk | 107,184,659,213 B: 85,265,651,750 B downloaded from the original sources, 21,919,007,463 B derived |
+| Source of truth | [`../manifests/stack.json`](../manifests/stack.json), point `media-stack` |
+
+### Numbers (#340 Phase 0)
+
+Measured 2026-10-02 on Windows, RTX 5090 (32,607 MiB), ComfyUI v0.38.0 (`6b747c0`), torch
+2.14.0+cu130. Every clip ran after `POST /free` with nothing else on the card, n=1 per still,
+five stills. Host RAM is machine-wide, of 63.4 GiB. Raw runs: `runs/340-ltx25-phase0/`
+(PREREG `4be3203`, addendum `23e7d14`).
+
+| clip | ok | wall clock | peak VRAM MiB | peak host RAM MiB | MP4 bytes |
+|---|---|---|---|---|---|
+| 5 s, 1920x1088, 121 frames | 5/5 | median **65.6 s** (63.1–67.5) | 31,951–32,021 | 28,541–29,284 | 1,642,079–2,640,609 |
+| 10 s, 1920x1088, 241 frames | 5/5 | median **146.2 s** (133.9–401.3) | 31,954–32,022 | 33,678–34,964 | 3,374,707–5,000,714 |
+| 20 s, 1920x1088, 481 frames | 3/3 | median **353.7 s** (349.1–361.1) | 31,976–32,049 | 45,244–50,868 | 8,370,405–11,584,769 |
+| 5 s, 2560x1408 | 2/2 | 121.5 s, 153.4 s | 31,740–31,834 | 33,721–35,288 | |
+| 5 s, 3840x2176 | 1/2 | 391.8 s; the other ran out of GPU memory and took the ComfyUI server down | 31,719–31,819 | 31,628–44,173 | |
+
+- Gray frames: 0 in every clip.
+- robin's blind rating: identity and motion held in 5/5 at 5 s and at 10 s.
+- One 10 s clip (A) took 401.3 s against 133.9–147.5 s for the other four, with the same
+  sampling steps. Cause unknown.
+- A clip fills the card (~32.0 of 32.6 GB), which is why pictures and clips never share it.
+
+### Not measured
+
+| open | |
+|---|---|
+| the 9B's start and its context of 65,536 | the figures above are a borrowed start and a default |
+| the 9B's VRAM beside sd-server at `--max-vram 7` | |
+| ComfyUI's boot time | `VIDEO_BOOT_WAIT` 300 s is an assumption |
+| the mode switch's own time | language model down, ComfyUI up, language model back |
+| ComfyUI finding the LTX files through `extra_model_paths.yaml` | Phase 0 had them in `ComfyUI/models`; the file's format rests on ComfyUI's `utils/extra_config.py` |
 
 ---
 

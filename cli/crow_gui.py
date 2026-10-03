@@ -16389,7 +16389,7 @@ class Api:
         A `file://` URL for the GTK desktop; the bytes as a data URL for a
         phone and for WebView2, which refuses `file://` in a page from
         NavigateToString. Measured 2026-10-02: a 5 s clip at 1920x1088 is
-        1.6-2.4 MB, the size of the PNGs that already travel this way.
+        1.6-2.6 MB, the size of the PNGs that already travel this way.
         """
         card, _why = self._video_vet(path)
         if card is None:
