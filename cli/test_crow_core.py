@@ -29620,6 +29620,20 @@ class TheVideoToolIsDeclaredTests(unittest.TestCase):
                      "sound"):
             self.assertIn(part, text)
 
+    def test_the_users_motion_text_goes_through_verbatim_with_its_sound(self):
+        """#340 live run 2026-10-03: the 9B's rewrites dropped the sound
+        sentence (noise came back) and named 'the human's foot at the bottom
+        left corner' (a giant foot was painted in); the verbatim text worked."""
+        tool = next(t["function"] for t in crow_core.TOOLS
+                    if t["function"]["name"] == "animate_image")
+        text = tool["description"]
+        for part in ("VERBATIM", "no shortening, no rewording", "including the sound",
+                     "never 'the human'", "Sound:"):
+            self.assertIn(part, text)
+        motion = tool["parameters"]["properties"]["motion"]["description"]
+        self.assertIn("verbatim", motion)
+        self.assertNotIn("one or two sentences", motion)
+
 
 class TheClipReachesTheWindowTests(_AnimateCase):
     """#340: the saved clip is announced as a video, never as an image --

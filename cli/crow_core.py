@@ -1319,13 +1319,27 @@ TOOLS = [
     # #340. THE STILL MOVES. Its rules for `motion` are what Phase 0's clips
     # and the owner's test clip showed: one motion that carries through, nothing
     # the still does not hold, sound as words.
+    # THE VIDEO MODEL TAKES THE TEXT LITERALLY, the owner's live run 2026-10-03
+    # showed it: a motion text passed verbatim moved what it named (the crow
+    # landed on 2B's raised hand), while the 9B's own rewrite of "2B's foot
+    # taps" -- "the human's foot at the bottom left corner" -- painted a giant
+    # bare foot into the corner, and a rewrite that dropped the user's sound
+    # sentence came back as loud noise. So the user's own text goes through
+    # untouched, and a written one names each figure as the user does.
     _fn("animate_image",
         "Turn a still picture into a short video clip with the local video "
-        "model (LTX-2.5). Write `motion` as one continuous motion plus the "
-        "camera, e.g. 'the crow tilts its head twice and flaps one wing; the "
-        "camera holds still with a slow push in'. Only what is in the still "
-        "moves: no props that are not in the still, no zoom into detail the "
-        "still does not have; describe any sound in words. While the clip "
+        "model (LTX-2.5). The video model takes `motion` literally, word for "
+        "word. When the user wrote the motion text, pass it VERBATIM: no "
+        "shortening, no rewording, every sentence including the sound. "
+        "Otherwise write one continuous motion plus the camera, e.g. 'the "
+        "crow tilts its head twice and flaps one wing; the camera holds still "
+        "with a slow push in'. Name every figure the way the user does (a "
+        "name such as '2B', or 'the crow'), never 'the human' or a corner of "
+        "the frame, and name only body parts the still shows. Only what is in "
+        "the still moves: no props that are not in the still, no zoom into "
+        "detail the still does not have. End with the sound in words, e.g. "
+        "'Sound: soft wind, a crow's caw, no music, no speech.' -- without it "
+        "the model invents its own, often loud noise. While the clip "
         "renders the language model steps aside and comes back afterwards. "
         "About 1 minute for 5 s at 1080p, 2.5 minutes for 10 s, 6 minutes "
         "for 20 s. The MP4 is saved in <working root>/videos/; stills of it "
@@ -1333,8 +1347,11 @@ TOOLS = [
         {"image": dict(_STR, description="The still, a path in the working "
                                          "area. A taller-than-wide still "
                                          "renders upright (9:16)."),
-         "motion": dict(_STR, description="One continuous motion and the "
-                                          "camera, in one or two sentences."),
+         "motion": dict(_STR, description="The user's motion text verbatim "
+                                          "when they wrote one; otherwise one "
+                                          "continuous motion, the camera, "
+                                          "and a closing 'Sound: ...' "
+                                          "sentence."),
          "seconds": {"type": "integer",
                      "description": "Length, 1 to 20. Default 5."},
          "resolution": dict(_STR, description="1080p (1920x1088, default) or "
