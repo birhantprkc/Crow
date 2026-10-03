@@ -79,6 +79,39 @@ pub struct StackFile {
     pub status: Status,
     pub license: String,
     pub role: String,
+    /// Where a published or upstream file lives (#340); absent = Hugging Face.
+    #[serde(default)]
+    pub host: Option<UpstreamHost>,
+    /// The release tag of a `github-release` asset; `revision` is its commit.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// A Hugging Face repo whose files need the user's token (the LTX gate).
+    #[serde(default)]
+    pub gated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpstreamHost {
+    Huggingface,
+    /// A raw file at a commit.
+    Github,
+    /// A release asset, by its tag.
+    GithubRelease,
+}
+
+impl StackFile {
+    /// The pinned URL of a published or upstream file at its host.
+    pub fn url(&self, revision: &str) -> Result<String, String> {
+        Ok(match self.host.unwrap_or(UpstreamHost::Huggingface) {
+            UpstreamHost::Huggingface => hf_url(&self.repo, revision, &self.path),
+            UpstreamHost::Github => format!("https://raw.githubusercontent.com/{}/{}/{}", self.repo, revision, self.path),
+            UpstreamHost::GithubRelease => {
+                let tag = self.tag.as_deref().ok_or_else(|| format!("file {} on github-release has no tag", self.id))?;
+                format!("https://github.com/{}/releases/download/{}/{}", self.repo, tag, self.path)
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

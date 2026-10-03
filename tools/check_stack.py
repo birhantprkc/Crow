@@ -82,6 +82,9 @@ PLACEHOLDERS = ("INSTALL", "MODELS")
 FILE_FIELDS = ("id", "repo", "path", "revision", "bytes", "sha256", "dest", "source",
                "status", "license", "role")
 SOURCE_FIELDS = ("host", "repo", "path", "revision", "bytes", "sha256", "license")
+# Where a published or upstream file is fetched from (#340); optional, default
+# huggingface. A mirror-pending file names its host in `source`.
+HOSTS = ("huggingface", "github", "github-release")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 REPO_ID = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
@@ -157,6 +160,28 @@ class Report:
         self.lines.append("  NOTE     %s" % text)
 
 
+def host_problems(f) -> "list[str]":
+    """#340: where an upstream or published file lives. `host` is huggingface
+    (the default), github (a raw file at a commit) or github-release (a release
+    asset, which needs its `tag`; `revision` is the tag's commit). `gated`: a
+    Hugging Face repo whose files need the user's token."""
+    fid, p = f.get("id", "?"), []
+    host = f.get("host", "huggingface")
+    if f["status"] == "mirror-pending" and "host" in f:
+        p.append("file %s is mirror-pending: the host is its source's" % fid)
+    if host not in HOSTS:
+        p.append("file %s host %r is not one of %s" % (fid, host, ", ".join(HOSTS)))
+    if host == "github-release" and not (isinstance(f.get("tag"), str) and f["tag"]):
+        p.append("file %s on github-release needs a tag" % fid)
+    if "tag" in f and host != "github-release":
+        p.append("file %s carries a tag only with host github-release" % fid)
+    if "gated" in f and f["gated"] is not True:
+        p.append("file %s: gated must be true or absent" % fid)
+    if f.get("gated") is True and host != "huggingface":
+        p.append("file %s: gated only on host huggingface" % fid)
+    return p
+
+
 def check_schema(doc) -> "list[str]":
     p = []
     if doc.get("schema") != SCHEMA:
@@ -192,6 +217,7 @@ def check_schema(doc) -> "list[str]":
             p.append("file %s path %r is not repo-relative" % (fid, f["path"]))
         if f["license"] not in licenses:
             p.append("file %s licence %r is not declared under licenses" % (fid, f["license"]))
+        p.extend(host_problems(f))
         if f["status"] in ("published", "upstream"):
             if not isinstance(f["revision"], str) or not HEX40.match(f["revision"]):
                 p.append("file %s (%s) needs a 40-hex commit revision" % (fid, f["status"]))
@@ -659,6 +685,39 @@ def github_measure(repo, rev, path):
     return len(body), hashlib.sha256(body).hexdigest()
 
 
+def release_measure(repo, tag, rev, path):
+    """(bytes, sha256) of a release asset from the GitHub API's `digest`, without
+    the download; raises when the tag no longer points at `rev`."""
+    body, _ = fetch("https://api.github.com/repos/%s/git/ref/tags/%s" % (repo, tag))
+    obj = json.loads(body)["object"]
+    if obj["type"] == "tag":
+        body, _ = fetch(obj["url"])
+        obj = json.loads(body)["object"]
+    if obj["sha"] != rev:
+        raise LookupError("tag %s of %s points at %s, pinned %s" % (tag, repo, obj["sha"][:12], rev[:12]))
+    body, _ = fetch("https://api.github.com/repos/%s/releases/tags/%s" % (repo, tag))
+    for a in json.loads(body)["assets"]:
+        if a["name"] == path:
+            digest = a.get("digest") or ""
+            if not digest.startswith("sha256:"):
+                raise LookupError("release asset %s has no sha256 digest" % path)
+            return a["size"], digest[len("sha256:"):]
+    raise LookupError("release %s of %s has no asset %s" % (tag, repo, path))
+
+
+def upstream_measure(f, hub):
+    """(bytes, sha256, where) of a published or upstream file at its host."""
+    host = f.get("host", "huggingface")
+    if host == "github":
+        return github_measure(f["repo"], f["revision"], f["path"]) + (
+            "github:%s@%s" % (f["repo"], f["revision"][:12]),)
+    if host == "github-release":
+        return release_measure(f["repo"], f["tag"], f["revision"], f["path"]) + (
+            "release:%s@%s" % (f["repo"], f["tag"]),)
+    return hub.measure(f["repo"], f["revision"], f["path"]) + (
+        "%s@%s" % (f["repo"], f["revision"][:12]),)
+
+
 def check_online(doc, report: Report):
     hub = Hub()
     for f in doc["files"]:
@@ -681,9 +740,9 @@ def check_online(doc, report: Report):
                     else:
                         problems.append("%s at %s/%s differs from its source" % (f["id"], f["repo"], f["path"]))
             else:
-                got = hub.measure(f["repo"], f["revision"], f["path"])
-                where = "%s@%s" % (f["repo"], f["revision"][:12])
-                if hub.head(f["repo"]) != f["revision"]:
+                *got, where = upstream_measure(f, hub)
+                got = tuple(got)
+                if f.get("host", "huggingface") == "huggingface" and hub.head(f["repo"]) != f["revision"]:
                     report.note("%s: %s HEAD is %s, pinned %s"
                                 % (f["id"], f["repo"], hub.head(f["repo"])[:12], f["revision"][:12]))
             if got != (f["bytes"], f["sha256"]):

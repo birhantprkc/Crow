@@ -81,6 +81,50 @@ class Schema(Base):
         self.red("schema", "share dest")
 
 
+class UpstreamHosts(Base):
+    """#340: an upstream file may come from GitHub (a raw file or a release asset)
+    and may sit behind a Hugging Face gate the user has to pass."""
+
+    def green_schema(self):
+        r = C.run(self.doc)
+        self.assertFalse([ln for ln in r.lines if ln.startswith("  FAIL") and "schema" in ln], r.lines)
+
+    def test_a_github_raw_file_and_a_release_asset_are_valid(self):
+        file_(self.doc, "qi-license")["host"] = "github"
+        f = file_(self.doc, "qi-vae")
+        f["host"], f["tag"] = "github-release", "v0.38.0"
+        self.green_schema()
+
+    def test_a_gated_hugging_face_file_is_valid(self):
+        file_(self.doc, "qi-vae")["gated"] = True
+        self.green_schema()
+
+    def test_unknown_host(self):
+        file_(self.doc, "qi-vae")["host"] = "gitlab"
+        self.red("schema", "host 'gitlab'")
+
+    def test_a_release_asset_needs_its_tag(self):
+        file_(self.doc, "qi-vae")["host"] = "github-release"
+        self.red("schema", "github-release needs a tag")
+
+    def test_a_tag_belongs_to_a_release_asset_only(self):
+        file_(self.doc, "qi-vae")["tag"] = "v1"
+        self.red("schema", "tag only with host github-release")
+
+    def test_gated_is_true_or_absent(self):
+        file_(self.doc, "qi-vae")["gated"] = "yes"
+        self.red("schema", "gated must be true")
+
+    def test_only_hugging_face_has_a_gate(self):
+        f = file_(self.doc, "qi-vae")
+        f["host"], f["gated"] = "github", True
+        self.red("schema", "gated only on host huggingface")
+
+    def test_a_mirror_pending_file_takes_its_host_from_source(self):
+        file_(self.doc, "fn-hotsets-crow0924")["host"] = "github"
+        self.red("schema", "mirror-pending: the host is its source's")
+
+
 class Paths(Base):
     def test_absolute_env_path(self):
         point(self.doc, "27b")["engine"]["env"]["CROW_CNQ"] = "D:/models/Qwen3.8-27B-CNQ4.5.cnq"

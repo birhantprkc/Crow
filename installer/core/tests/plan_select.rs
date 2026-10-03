@@ -283,3 +283,32 @@ fn embedded_stack_parses_with_its_crow_files() {
     let err = Stack::parse(&raw.to_string()).unwrap_err();
     assert!(err.contains("27b-ghost"), "{err}");
 }
+
+#[test]
+fn an_upstream_file_is_fetched_from_its_host_and_a_gate_rides_on_the_job() {
+    // #340: GitHub raw files, GitHub release assets and gated Hugging Face repos.
+    let mut doc = Stack::embedded().raw.clone();
+    for f in doc["files"].as_array_mut().unwrap() {
+        match f["id"].as_str().unwrap() {
+            "qi-license" => f["host"] = "github".into(),
+            "qi-vae" => {
+                f["host"] = "github-release".into();
+                f["tag"] = "v0.38.0".into();
+            }
+            "qi-transformer-1" => f["gated"] = true.into(),
+            _ => {}
+        }
+    }
+    let s = Stack::parse(&doc.to_string()).expect("parse");
+    let root = default_root();
+    let p = plan(&s, &sel(&["image-stack"], &root), &root.join("models"), &packages()).expect("plan");
+    let job = |id: &str| p.jobs.iter().find(|j| j.id == id).unwrap().clone();
+    let (lic, vae, t1, t2) = (job("qi-license"), job("qi-vae"), job("qi-transformer-1"), job("qi-transformer-2"));
+    let f = |id: &str| s.file(id).unwrap().clone();
+    assert_eq!(lic.url, format!("https://raw.githubusercontent.com/Qwen/Qwen-Image-2.1/{}/{}", f("qi-license").revision.unwrap(), f("qi-license").path));
+    assert_eq!(vae.url, format!("https://github.com/Qwen/Qwen-Image-2.1/releases/download/v0.38.0/{}", f("qi-vae").path));
+    assert!(t1.url.starts_with("https://huggingface.co/Qwen/Qwen-Image-2.1/resolve/"), "{}", t1.url);
+    assert!(t2.url.starts_with("https://huggingface.co/"), "{}", t2.url);
+    assert_eq!((f("qi-transformer-1").gated, f("qi-transformer-2").gated, f("qi-vae").gated), (true, false, false));
+    assert_eq!(vae.local_rel, format!("Qwen/Qwen-Image-2.1/{}", f("qi-vae").path));
+}

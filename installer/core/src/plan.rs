@@ -19,7 +19,7 @@
 //! conversion is higher by those inputs; preflight checks each point's peak.
 
 use crate::api::{DerivedJob, FileJob, FileKind, Package, Packages, Plan, Selection};
-use crate::stack::{Stack, StackFile, Status, hf_url, resolve_path};
+use crate::stack::{Stack, StackFile, Status, resolve_path};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -108,7 +108,7 @@ fn file_job(f: &StackFile, kind: FileKind, points: Vec<String>, install: &Path, 
     let url = match (f.status, &f.revision, &f.source) {
         (Status::MirrorPending, _, Some(src)) => src.url(),
         (Status::MirrorPending, _, None) => return Err(format!("file {} is mirror-pending without a source", f.id)),
-        (_, Some(rev), _) => hf_url(&f.repo, rev, &f.path),
+        (_, Some(rev), _) => f.url(rev)?,
         (_, None, _) => return Err(format!("file {} has no pinned revision", f.id)),
     };
     Ok(FileJob {
